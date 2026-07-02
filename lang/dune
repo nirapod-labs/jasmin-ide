@@ -1,0 +1,4 @@
+(library
+ (name jide_lang)
+ (wrapped true)
+ (modules position span line_index diagnostic uri text))
