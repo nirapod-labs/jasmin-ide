@@ -218,3 +218,244 @@ let byte_order_mark () =
   check_int "after stripping, byte of (0, 2)" 2 (byte_of stripped 0 2)
 
 (* An accented comment and a string with a euro sign, as a file would have. *)
+let non_ascii_in_comment_and_string () =
+  let comment = "(* h" ^ e_acute ^ "llo *)" in
+  let code = "fn f() = \"" ^ euro ^ "\";" in
+  let text = comment ^ "\n" ^ code ^ "\n" in
+  let index = Line_index.create text in
+  let code_start = String.length comment + 1 in
+  check_int "line count" 3 (Line_index.line_count index);
+  check_int "line start 1" code_start (Line_index.line_start index 1);
+  check_int "line end 0" (String.length comment) (Line_index.line_end index 0);
+  check_int "line end 1"
+    (code_start + String.length code)
+    (Line_index.line_end index 1);
+  check_int "line end 2" (String.length text) (Line_index.line_end index 2);
+  check_position "the first byte of the accent" (0, 4) (position_of index 4);
+  check_position "inside the accent" (0, 4) (position_of index 5);
+  check_position "after the accent" (0, 5) (position_of index 6);
+  check_int "byte of (0, 5)" 6 (byte_of index 0 5);
+  let euro_byte = code_start + 10 in
+  check_position "the first byte of the euro sign" (1, 10)
+    (position_of index euro_byte);
+  check_position "inside the euro sign" (1, 10)
+    (position_of index (euro_byte + 1));
+  check_position "after the euro sign" (1, 11)
+    (position_of index (euro_byte + 3));
+  check_int "byte of (1, 11)" (euro_byte + 3) (byte_of index 1 11);
+  check_int "units of the code line" 13
+    (Line_index.utf16_length index
+       (span code_start (Line_index.line_end index 1)));
+  check_int "units of the comment line" 11
+    (Line_index.utf16_length index (span 0 (String.length comment)))
+
+let span_containment_and_merging () =
+  let a = span 0 10 in
+  let b = span 2 5 in
+  let c = span 8 20 in
+  let d = span 10 20 in
+  check_bool "contains the first byte" (Span.contains a ~byte:0);
+  check_bool "contains the last byte" (Span.contains a ~byte:9);
+  check_bool "the end is excluded" (not (Span.contains a ~byte:10));
+  check_bool "nothing before the start" (not (Span.contains a ~byte:(-1)));
+  check_bool "contains its own start" (Span.contains b ~byte:2);
+  check_bool "contains inside" (Span.contains b ~byte:4);
+  check_bool "excludes its end" (not (Span.contains b ~byte:5));
+  check_bool "an empty span is empty" (Span.is_empty (span 5 5));
+  check_bool "a reversed span is empty" (Span.is_empty (span 6 5));
+  check_bool "a normal span is not empty" (not (Span.is_empty a));
+  check_bool "overlapping spans" (Span.overlaps a c);
+  check_bool "overlapping is symmetric" (Span.overlaps c a);
+  check_bool "touching spans do not overlap" (not (Span.overlaps a d));
+  check_bool "touching spans do not overlap, the other way"
+    (not (Span.overlaps d a));
+  check_bool "an empty span overlaps nothing"
+    (not (Span.overlaps (span 4 4) c));
+  check_span "merge across a gap" (span 0 20) (Span.merge a c);
+  check_span "merge with a contained span" (span 0 10) (Span.merge a b);
+  check_span "merge is symmetric" (span 0 20) (Span.merge c a);
+  check_span "shift forward" (span 3 13) (Span.shift a 3);
+  check_span "shift backward" (span (-3) 7) (Span.shift a (-3));
+  check_span "shift below zero" (span (-5) 0) (Span.shift (span 5 10) (-10));
+  check_int "order by start" (-1) (Span.compare a b);
+  check_int "order by end" (-1) (Span.compare (span 0 5) (span 0 10));
+  check_int "equal spans" 0 (Span.compare a (span 0 10))
+
+let diagnostic_fields () =
+  let place = span 3 7 in
+  let related = [ (span 10 12, "declared here") ] in
+  let diagnostic =
+    Diagnostic.make ~code:"unused-variable" ~source:"jasminc" ~related
+      ~severity:Diagnostic.Warning place "unused variable"
+  in
+  check_span "span" place diagnostic.span;
+  check_bool "severity" (diagnostic.severity = Diagnostic.Warning);
+  check_string "message" "unused variable" diagnostic.message;
+  check_bool "code" (diagnostic.code = Some "unused-variable");
+  check_string "source" "jasminc" diagnostic.source;
+  check_int "related count" 1 (List.length diagnostic.related);
+  (match diagnostic.related with
+  | [ (place, message) ] ->
+    check_span "related span" (span 10 12) place;
+    check_string "related message" "declared here" message
+  | _ -> fail "related should hold one entry");
+  let bare = Diagnostic.make ~severity:Diagnostic.Error place "boom" in
+  check_bool "code defaults to none" (bare.code = None);
+  check_string "source has a default" "jasmin" bare.source;
+  check_int "related defaults to empty" 0 (List.length bare.related);
+  check_bool "severities differ" (Diagnostic.Error <> Diagnostic.Warning);
+  check_bool "information differs" (Diagnostic.Information <> Diagnostic.Hint);
+  let first = Diagnostic.make ~severity:Diagnostic.Error (span 0 1) "a" in
+  let second = Diagnostic.make ~severity:Diagnostic.Error (span 0 1) "b" in
+  let later = Diagnostic.make ~severity:Diagnostic.Error (span 1 2) "a" in
+  check_int "order by message" (-1) (Diagnostic.compare first second);
+  check_int "order by start" (-1) (Diagnostic.compare second later);
+  let same = Diagnostic.make ~severity:Diagnostic.Hint (span 0 1) "a" in
+  check_int "same place and message" 0 (Diagnostic.compare first same)
+
+let file_uri_with_spaces () =
+  let uri = Uri.of_string "file:///tmp/a%20b/c" in
+  check_path "the decoded path" "/tmp/a b/c" (Uri.path uri);
+  check_string "round trip" "file:///tmp/a%20b/c" (Uri.to_string uri);
+  check_bool "equal to itself" (Uri.equal uri uri);
+  let localhost = Uri.of_string "file://localhost/a%20b" in
+  check_path "the localhost path" "/a b" (Uri.path localhost);
+  check_bool "a host differs from no host" (not (Uri.equal uri localhost));
+  let from_path = Uri.of_path "/tmp/a b/c" in
+  check_string "a path is encoded" "file:///tmp/a%20b/c"
+    (Uri.to_string from_path);
+  check_bool "a path equals its parsed form" (Uri.equal from_path uri);
+  check_path "a path is decoded again" "/tmp/a b/c" (Uri.path from_path);
+  check_bool "different paths differ"
+    (not (Uri.equal (Uri.of_string "file:///x") (Uri.of_string "file:///y")));
+  check_bool "an empty authority equals none"
+    (Uri.equal (Uri.of_string "file:/x") (Uri.of_string "file:///x"))
+
+let file_uri_with_non_ascii () =
+  let uri = Uri.of_string "file:///tmp/%C3%A9" in
+  check_path "the decoded path" ("/tmp/" ^ e_acute) (Uri.path uri);
+  check_string "round trip" "file:///tmp/%C3%A9" (Uri.to_string uri);
+  check_bool "equal to the same escape"
+    (Uri.equal uri (Uri.of_string "file:///tmp/%c3%a9"));
+  let from_path = Uri.of_path ("/tmp/" ^ e_acute ^ " x") in
+  check_string "a path is encoded" "file:///tmp/%C3%A9%20x"
+    (Uri.to_string from_path);
+  check_path "a path is decoded again" ("/tmp/" ^ e_acute ^ " x")
+    (Uri.path from_path);
+  check_bool "the scheme is case insensitive"
+    (Uri.equal (Uri.of_string "FILE:///a") (Uri.of_string "file:///a"));
+  check_bool "the host is case insensitive"
+    (Uri.equal
+       (Uri.of_string "file://LOCALHOST/a")
+       (Uri.of_string "file://localhost/a"))
+
+let non_file_scheme () =
+  let https = Uri.of_string "https://example.com/a" in
+  check_no_path "no path for https" (Uri.path https);
+  check_string "round trip" "https://example.com/a" (Uri.to_string https);
+  let untitled = Uri.of_string "untitled:Untitled-1" in
+  check_no_path "no path for an opaque scheme" (Uri.path untitled);
+  check_string "round trip for an opaque scheme" "untitled:Untitled-1"
+    (Uri.to_string untitled);
+  check_no_path "no path for the empty string" (Uri.path (Uri.of_string ""));
+  check_string "the empty string round trips" ""
+    (Uri.to_string (Uri.of_string ""));
+  check_no_path "no path without a scheme" (Uri.path (Uri.of_string "/tmp/a"));
+  check_string "a path without a scheme round trips" "/tmp/a"
+    (Uri.to_string (Uri.of_string "/tmp/a"));
+  check_path "a path without an authority" "/a/b"
+    (Uri.path (Uri.of_string "file:/a/b"));
+  check_bool "a remote host has no path"
+    (Uri.path (Uri.of_string "file://server/share/a") = None)
+
+let last_line_with_trailing_newline () =
+  let index = Line_index.create "a\nb\n" in
+  check_int "line count" 3 (Line_index.line_count index);
+  check_int "line start 2" 4 (Line_index.line_start index 2);
+  check_int "line end 2" 4 (Line_index.line_end index 2);
+  check_int "line end 1" 3 (Line_index.line_end index 1);
+  check_position "byte 4" (2, 0) (position_of index 4);
+  check_int "byte of (2, 0)" 4 (byte_of index 2 0);
+  check_int "a line past the index" 4 (Line_index.line_start index 99);
+  check_int "a line before the index" 1 (Line_index.line_end index (-1))
+
+let last_line_without_trailing_newline () =
+  let index = Line_index.create "a\nb" in
+  check_int "line count" 2 (Line_index.line_count index);
+  check_int "line start 1" 2 (Line_index.line_start index 1);
+  check_int "line end 1" 3 (Line_index.line_end index 1);
+  check_int "line end 0" 1 (Line_index.line_end index 0);
+  check_position "byte 3" (1, 1) (position_of index 3);
+  check_int "byte of (1, 1)" 3 (byte_of index 1 1);
+  check_int "byte past the last line" 3 (byte_of index 1 9)
+
+let text_measurements () =
+  check_bool "ascii is utf8" (Text.is_utf8 "abc");
+  check_bool "the empty string is utf8" (Text.is_utf8 "");
+  check_bool "mixed scripts are utf8"
+    (Text.is_utf8 ("a" ^ e_acute ^ euro ^ astral));
+  check_bool "a lone continuation byte is not utf8" (not (Text.is_utf8 "\x80"));
+  check_bool "an overlong form is not utf8" (not (Text.is_utf8 "\xC0\x80"));
+  check_bool "a truncated sequence is not utf8"
+    (not (Text.is_utf8 ("a" ^ "\xE2\x82")));
+  check_bool "a surrogate is not utf8" (not (Text.is_utf8 "\xED\xA0\x80"));
+  check_bool "past the last code point is not utf8"
+    (not (Text.is_utf8 "\xF5\x80\x80\x80"));
+  check_bool "a mark is utf8" (Text.is_utf8 bom);
+  check_int "byte length" 5
+    (Text.utf8_byte_length ("a" ^ e_acute ^ euro) 0 5);
+  check_int "byte length clamps the end" 6
+    (Text.utf8_byte_length ("a" ^ e_acute ^ euro) 0 99);
+  check_int "byte length clamps the start" 0
+    (Text.utf8_byte_length "abc" 9 4);
+  check_int "byte length of an empty range" 0
+    (Text.utf8_byte_length "abc" 2 2)
+
+(* Every byte maps to a position that maps back to the start of its
+   character, and that position maps to itself again. *)
+let position_round_trip () =
+  let text =
+    "fn f() = (* " ^ e_acute ^ " " ^ astral ^ " *)\r\nlet x = \"" ^ euro
+    ^ "\";\n"
+  in
+  let index = Line_index.create text in
+  for byte = 0 to String.length text do
+    let place = position_of index byte in
+    let back = byte_of index place.line place.character in
+    check_bool
+      (Printf.sprintf "byte %d maps back before itself" byte)
+      (back <= byte);
+    check_bool
+      (Printf.sprintf "byte %d maps to the same position" byte)
+      (Position.compare (position_of index back) place = 0)
+  done;
+  let last = position_of index (String.length text) in
+  check_bool "the end of the text is on the last line"
+    (last.line = Line_index.line_count index - 1)
+
+let () =
+  test "ASCII positions" ascii_positions;
+  test "UTF-16 astral character" utf16_astral_character;
+  test "CRLF" crlf;
+  test "lone CR" lone_cr;
+  test "empty string" empty_string;
+  test "empty file with one newline" empty_file_with_one_newline;
+  test "byte inside a multi-byte character" byte_inside_multibyte_character;
+  test "byte-order mark" byte_order_mark;
+  test "non-ASCII in a comment and in a string" non_ascii_in_comment_and_string;
+  test "span containment and merging" span_containment_and_merging;
+  test "diagnostic fields" diagnostic_fields;
+  test "file URI with spaces" file_uri_with_spaces;
+  test "file URI with non-ASCII" file_uri_with_non_ascii;
+  test "non-file scheme" non_file_scheme;
+  test "line_start and line_end at the last line with a trailing newline"
+    last_line_with_trailing_newline;
+  test "line_start and line_end at the last line without a trailing newline"
+    last_line_without_trailing_newline;
+  test "text measurements" text_measurements;
+  test "position round trip" position_round_trip;
+  if !failures > 0 then begin
+    Printf.printf "\n%d tests, %d failed checks\n" !tests !failures;
+    exit 1
+  end
+  else Printf.printf "\n%d tests, no failed checks\n" !tests
