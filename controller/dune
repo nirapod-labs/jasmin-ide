@@ -1,0 +1,3 @@
+(library
+ (name jide_controller)
+ (libraries jide_lang jide_lsp jide_engine lsp jsonrpc yojson))
