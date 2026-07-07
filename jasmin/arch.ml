@@ -1,6 +1,6 @@
 open Jasmin
-type t = X86_64 | Arm_m4 | Arm_v8a | Riscv
 
+type t = X86_64 | Arm_m4 | Arm_v8a | Riscv
 type call_conv = Linux | Windows
 
 let all = [ X86_64; Arm_m4; Arm_v8a; Riscv ]
@@ -31,24 +31,34 @@ let glob_call_conv = function
   | Linux -> Glob_options.Linux
   | Windows -> Glob_options.Windows
 
-let check : t -> call_conv
-  -> file:string -> text:string -> idirs:(string * string) list -> Check.result =
+let check :
+    t ->
+    call_conv ->
+    file:string ->
+    text:string ->
+    idirs:(string * string) list ->
+    Check.result =
  fun arch call_conv ~file ~text ~idirs ->
   match arch with
   | X86_64 ->
-    let module C = (val CoreArchFactory.core_arch_x86 (glob_call_conv call_conv)) in
-    let module A = Arch_full.Arch_from_Core_arch (C) in
-    let module K = Check.Make (A) in
-    K.check ~file ~text ~idirs
+      let module C =
+        (val CoreArchFactory.core_arch_x86 (glob_call_conv call_conv))
+      in
+      let module A = Arch_full.Arch_from_Core_arch (C) in
+      let module K = Check.Make (A) in
+      K.check ~file ~text ~idirs
   | Arm_m4 ->
-    let module A = Arch_full.Arch_from_Core_arch (CoreArchFactory.Core_arch_ARM) in
-    let module K = Check.Make (A) in
-    K.check ~file ~text ~idirs
+      let module A =
+        Arch_full.Arch_from_Core_arch (CoreArchFactory.Core_arch_ARM) in
+      let module K = Check.Make (A) in
+      K.check ~file ~text ~idirs
   | Arm_v8a ->
-    let module A = Arch_full.Arch_from_Core_arch (CoreArchFactory.Core_arch_ARMV8A) in
-    let module K = Check.Make (A) in
-    K.check ~file ~text ~idirs
+      let module A =
+        Arch_full.Arch_from_Core_arch (CoreArchFactory.Core_arch_ARMV8A) in
+      let module K = Check.Make (A) in
+      K.check ~file ~text ~idirs
   | Riscv ->
-    let module A = Arch_full.Arch_from_Core_arch (CoreArchFactory.Core_arch_RISCV) in
-    let module K = Check.Make (A) in
-    K.check ~file ~text ~idirs
+      let module A =
+        Arch_full.Arch_from_Core_arch (CoreArchFactory.Core_arch_RISCV) in
+      let module K = Check.Make (A) in
+      K.check ~file ~text ~idirs

@@ -10,8 +10,8 @@ val arch_names : string list
 val arch_of_string : string -> arch option
 val call_conv_of_string : string -> call_conv option
 
-(** The Jasmin version the server was built against. *)
 val jasmin_version : string
+(** The Jasmin version the server was built against. *)
 
 type parse_result = Parse.t
 
