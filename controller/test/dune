@@ -1,0 +1,3 @@
+(test
+ (name test_server)
+ (libraries jide_controller jide_lsp jide_engine jide_lang jsonrpc yojson))

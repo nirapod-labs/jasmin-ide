@@ -1,0 +1,3 @@
+(library
+ (name jide_jasmin)
+ (libraries jide_lang jasmin))
