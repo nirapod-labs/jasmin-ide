@@ -1,4 +1,5 @@
 open Jasmin
+
 let of_location (location : Location.t) : Jide_lang.Span.t =
   let start_byte = max 0 location.loc_bchar in
   let end_byte = max start_byte location.loc_echar in

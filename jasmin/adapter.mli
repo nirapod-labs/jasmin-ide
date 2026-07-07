@@ -19,7 +19,13 @@ val parse : name:string -> string -> parse_result
 
 type check_result = {
   diagnostics : Jide_lang.Diagnostic.t list;
+      (** Diagnostics whose span indexes [file]. An error the compiler
+          reports in a file reached through a [require] is not returned: its
+          offsets belong to that file, not to this document. *)
   warnings : Warnings.t list;
+      (** Each warning names the file the compiler printed it for, or [file]
+          when it printed no location, so the engine keeps the ones for the
+          document it asked about. *)
 }
 
 val check :

@@ -67,37 +67,40 @@ let parse_location (line : string) : (string * int * int * int) option =
   match String.index_opt line '"' with
   | None -> None
   | Some start -> (
-    match find_substring_from line "\", line " start with
-    | None -> None
-    | Some marker -> (
-      let file = String.sub line (start + 1) (marker - start - 1) in
-      let index = marker + String.length "\", line " in
-      match read_digits line index with
+      match find_substring_from line "\", line " start with
       | None -> None
-      | Some (number, index) ->
-        let spaced =
-          index + 1 < String.length line && line.[index] = ' '
-          && line.[index + 1] = '('
-        in
-        if not spaced then None
-        else (
-          let index = index + 2 in
+      | Some marker -> (
+          let file = String.sub line (start + 1) (marker - start - 1) in
+          let index = marker + String.length "\", line " in
           match read_digits line index with
           | None -> None
-          | Some (start_column, index) ->
-            let end_column =
-              if index < String.length line && line.[index] = '-' then
-                match read_digits line (index + 1) with
-                | Some (value, _) -> value
-                | None -> start_column
-              else start_column
-            in
-            Some (file, number, start_column, end_column))))
+          | Some (number, index) -> (
+              let spaced =
+                index + 1 < String.length line
+                && line.[index] = ' '
+                && line.[index + 1] = '('
+              in
+              if not spaced then None
+              else
+                let index = index + 2 in
+                match read_digits line index with
+                | None -> None
+                | Some (start_column, index) ->
+                    let end_column =
+                      if index < String.length line && line.[index] = '-' then
+                        match read_digits line (index + 1) with
+                        | Some (value, _) -> value
+                        | None -> start_column
+                      else start_column
+                    in
+                    Some (file, number, start_column, end_column))))
 
 let strip_uid_suffix message =
   let length = String.length message in
   let index = ref length in
-  while !index > 0 && message.[!index - 1] >= '0' && message.[!index - 1] <= '9' do
+  while
+    !index > 0 && message.[!index - 1] >= '0' && message.[!index - 1] <= '9'
+  do
     decr index
   done;
   if !index < length && !index > 0 && message.[!index - 1] = '.' then
@@ -120,22 +123,27 @@ let parse (text : string) : t list =
     match remaining with
     | [] -> List.rev acc
     | line :: rest -> (
-      match parse_location line with
-      | Some (file, number, start_column, end_column) -> (
-        match rest with
-        | next :: rest' -> (
-          match message_after "warning: " next with
-          | Some message ->
-            loop (make file number start_column end_column message :: acc) rest'
-          | None -> (
+        match parse_location line with
+        | Some (file, number, start_column, end_column) -> (
+            match rest with
+            | next :: rest' -> (
+                match message_after "warning: " next with
+                | Some message ->
+                    loop
+                      (make file number start_column end_column message :: acc)
+                      rest'
+                | None -> (
+                    match message_after "warning: " line with
+                    | Some message ->
+                        loop
+                          (make file number start_column end_column message
+                          :: acc)
+                          rest
+                    | None -> loop acc rest))
+            | [] -> loop acc [])
+        | None -> (
             match message_after "warning: " line with
-            | Some message ->
-              loop (make file number start_column end_column message :: acc) rest
+            | Some message -> loop (make "" 0 0 0 message :: acc) rest
             | None -> loop acc rest))
-        | [] -> loop acc [])
-      | None -> (
-        match message_after "warning: " line with
-        | Some message -> loop (make "" 0 0 0 message :: acc) rest
-        | None -> loop acc rest))
   in
   loop [] lines
