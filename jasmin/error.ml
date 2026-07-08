@@ -1,7 +1,14 @@
 open Jasmin
 
 type kind = Parse | Typing | Annotation | Preprocess | Internal
-type t = { span : Jide_lang.Span.t; message : string; kind : kind }
+
+type t = {
+  span : Jide_lang.Span.t;
+  message : string;
+  kind : kind;
+  file : string option;
+      (** The file the span indexes, when the compiler named one. *)
+}
 
 let kind_name = function
   | Parse -> "parse"
@@ -10,7 +17,23 @@ let kind_name = function
   | Preprocess -> "preprocess"
   | Internal -> "internal"
 
-let make ~kind ~span message = { span; message; kind }
+let make ?(file = None) ~kind ~span message = { span; message; kind; file }
+
+let file_of_location (location : Location.t) : string option =
+  if Location.isdummy location || String.equal location.loc_fname "" then None
+  else Some location.loc_fname
+
+let file_of_error_location = function
+  | Utils.Lnone -> None
+  | Utils.Lone location -> file_of_location location
+  | Utils.Lmore location -> file_of_location location.Location.base_loc
+
+(** [belongs_to ~file error] is true when the span of [error] indexes [file].
+    A compiler error that names no file cannot be placed anywhere else, so
+    it is kept wherever it is reported. *)
+let belongs_to ~(file : string) (error : t) : bool =
+  match error.file with None -> true | Some name -> String.equal name file
+
 let location_of_error_location = Error_span.of_error_location
 
 let message_of_outcome = function
@@ -25,19 +48,33 @@ let of_exn (exn : exn) : t =
       let message =
         match message with Some m -> m | None -> "unexpected token"
       in
-      make ~kind:Parse ~span:(Error_span.of_location location) message
+      make
+        ~file:(file_of_location location)
+        ~kind:Parse
+        ~span:(Error_span.of_location location)
+        message
   | Pretyping.TyError (location, error) ->
-      make ~kind:Typing
+      make
+        ~file:(file_of_location location)
+        ~kind:Typing
         ~span:(Error_span.of_location location)
         (render_tyerror error)
   | Annot.AnnotationError (location, print) ->
-      make ~kind:Annotation
+      make
+        ~file:(file_of_location location)
+        ~kind:Annotation
         ~span:(Error_span.of_location location)
         (Format.asprintf "%t" print)
   | Typing.TyError (location, message) ->
-      make ~kind:Typing ~span:(Error_span.of_i_location location) message
+      make
+        ~file:(file_of_location location.Location.base_loc)
+        ~kind:Typing
+        ~span:(Error_span.of_i_location location)
+        message
   | Utils.HiError error ->
-      make ~kind:Typing
+      make
+        ~file:(file_of_error_location error.Utils.err_loc)
+        ~kind:Typing
         ~span:(Error_span.of_error_location error.Utils.err_loc)
         (Format.asprintf "%a" Utils.pp_hierror error)
   | Stack_overflow ->

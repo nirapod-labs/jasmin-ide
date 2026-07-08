@@ -72,13 +72,16 @@ module Make (A : Arch_full.Arch) = struct
 
   let check ~(file : string) ~(text : string) ~(idirs : (string * string) list)
       : result =
-    Options.apply ();
-    let parsed = Parse.parse ~name:file text in
-    if Parse.failed parsed then { empty with diagnostics = parsed.diagnostics }
-    else
-      let typed, printed =
-        Warnings.with_capture (fun () ->
-            type_items ~file ~items:parsed.items ~idirs)
-      in
-      { typed with warnings = Warnings.parse printed }
+    (* The formatter is redirected for the whole check, parse included: the
+       lexer and the parser warn through the same channel as the type
+       checker. [with_capture] restores the formatter on every path. *)
+    let outcome, printed =
+      Warnings.with_capture (fun () ->
+          Options.apply ();
+          let parsed = Parse.parse ~name:file text in
+          if Parse.failed parsed then
+            { empty with diagnostics = parsed.diagnostics }
+          else fst (type_items ~file ~items:parsed.items ~idirs))
+    in
+    { outcome with warnings = Warnings.parse ~file printed }
 end

@@ -5,11 +5,35 @@ let check name condition =
     incr failures;
     Printf.printf "FAIL %s\n%!" name)
 
+let contains haystack needle =
+  let n = String.length haystack and m = String.length needle in
+  let rec loop index =
+    if m = 0 then true
+    else if index + m > n then false
+    else String.sub haystack index m = needle || loop (index + 1)
+  in
+  loop 0
+
+let write_temp_file ~suffix text =
+  let path = Filename.temp_file "jide-adapter" suffix in
+  let channel = open_out_bin path in
+  output_string channel text;
+  close_out channel;
+  path
+
+let remove_file path = if Sys.file_exists path then Sys.remove path
 let x86_64 = Option.get (Jide_jasmin.Adapter.arch_of_string "x86-64")
 let linux = Option.get (Jide_jasmin.Adapter.call_conv_of_string "linux")
 
 let check_text name text =
   Jide_jasmin.Adapter.check x86_64 linux ~file:"/tmp/probe.jazz" ~text ~idirs:[]
+
+module X86 =
+  (val Jasmin.CoreArchFactory.get_arch_module Jasmin.Utils.X86_64
+         Jasmin.Glob_options.Linux
+      : Jasmin.Arch_full.Arch)
+
+module Loop = Jide_jasmin.Check.Make (X86)
 
 let valid =
   {|
@@ -44,6 +68,65 @@ fn f(reg u32 a) -> reg u32 {
   return a;
 }
 |}
+
+let with_deprecated_cast =
+  {|
+fn f(reg u32 a) -> reg u32 {
+  reg int i;
+  i = (int)a;
+  return a;
+}
+|}
+
+let first_item_fails =
+  {|
+fn first(reg u32 a) -> reg u32 {
+  reg bool b;
+  b = a;
+  return a;
+}
+
+fn second(reg u32 a) -> reg u32 {
+  reg u32 x;
+  x = a;
+  return x;
+}
+|}
+
+let library_with_unused_variable =
+  {|
+fn library(reg u32 a) -> reg u32 {
+  reg u32 unused;
+  return a;
+}
+|}
+
+let library_with_type_error =
+  {|
+fn library(reg u32 a) -> reg u32 {
+  reg bool b;
+  b = a;
+  return a;
+}
+|}
+
+let requiring path =
+  "require \"" ^ path
+  ^ "\"\n\nfn entry(reg u32 a) -> reg u32 {\n  return a;\n}\n"
+
+let location file line start_column end_column =
+  {
+    Jasmin.Location.loc_fname = file;
+    loc_start = (line, start_column);
+    loc_end = (line, end_column);
+    loc_bchar = 0;
+    loc_echar = 1;
+  }
+
+let print_warning ?(stack = []) base =
+  let location = Jasmin.Location.i_loc base stack in
+  Format.eprintf "@[<v>%a@ warning: unused variable x.7@]@."
+    Jasmin.Location.pp_iloc location
 
 let test_valid () =
   let result = check_text "valid" valid in
