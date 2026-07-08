@@ -294,6 +294,47 @@ let test_warning () =
          contains (String.lowercase_ascii warning.message) "unused")
        result.warnings)
 
+let test_parse_warning () =
+  let result = check_text "deprecated cast" with_deprecated_cast in
+  check "parse warning: the program has no diagnostics"
+    (result.Jide_jasmin.Adapter.diagnostics = []);
+  check "parse warning: the warning the parser prints is captured"
+    (List.exists
+       (fun (warning : Jide_jasmin.Warnings.t) ->
+         contains (String.lowercase_ascii warning.message) "deprecated"
+         && warning.Jide_jasmin.Warnings.file = "/tmp/probe.jazz")
+       result.warnings)
+
+let test_required_file () =
+  let library = write_temp_file ~suffix:".jinc" library_with_unused_variable in
+  let result = check_text "required file" (requiring library) in
+  check "required file: the document has no diagnostics"
+    (result.Jide_jasmin.Adapter.diagnostics = []);
+  check "required file: the warning names the file it comes from"
+    (List.exists
+       (fun (warning : Jide_jasmin.Warnings.t) ->
+         warning.Jide_jasmin.Warnings.file = library)
+       result.warnings);
+  check "required file: no warning is put on the document"
+    (List.for_all
+       (fun (warning : Jide_jasmin.Warnings.t) ->
+         warning.Jide_jasmin.Warnings.file <> "/tmp/probe.jazz")
+       result.warnings);
+  remove_file library
+
+let test_required_file_error () =
+  let library = write_temp_file ~suffix:".jinc" library_with_type_error in
+  let result = check_text "required error" (requiring library) in
+  check "required error: the diagnostic is not put on the document"
+    (result.Jide_jasmin.Adapter.diagnostics = []);
+  let direct =
+    Jide_jasmin.Adapter.check x86_64 linux ~file:library
+      ~text:library_with_type_error ~idirs:[]
+  in
+  check "required error: the error itself is real"
+    (List.length direct.diagnostics = 1);
+  remove_file library
+
 let test_arch_names () =
   check "arch names"
     (Jide_jasmin.Adapter.arch_names = [ "x86-64"; "arm-m4"; "armv8a"; "riscv" ]);
@@ -320,7 +361,15 @@ let () =
   test_valid ();
   test_syntax_error ();
   test_type_error ();
+  test_continue_after_failed_item ();
+  test_capture ();
+  test_single_line_warning ();
+  test_quoted_location ();
+  test_stacked_location ();
   test_warning ();
+  test_parse_warning ();
+  test_required_file ();
+  test_required_file_error ();
   test_arch_names ();
   test_version ();
   test_recovery_not_yet ();
