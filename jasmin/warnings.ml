@@ -157,34 +157,49 @@ let is_continuation line =
 
 let parse ?(file = "") (text : string) : t list =
   let lines = String.split_on_char '\n' text in
-  let make file line start_column end_column message =
-    { file; line; start_column; end_column; message = strip_uid_suffix message }
+  let strip_cr line =
+    let length = String.length line in
+    if length > 0 && line.[length - 1] = '\r' then String.sub line 0 (length - 1)
+    else line
   in
-  let rec loop acc remaining =
+  let make (location_file, line, start_column, end_column) message =
+    {
+      file = location_file;
+      line;
+      start_column;
+      end_column;
+      message = strip_uid_suffix message;
+    }
+  in
+  let rec loop acc pending remaining =
     match remaining with
     | [] -> List.rev acc
-    | line :: rest -> (
+    | raw :: rest -> (
+        let line = strip_cr raw in
         match parse_location line with
-        | Some (file, number, start_column, end_column) -> (
-            match rest with
-            | next :: rest' -> (
-                match message_after "warning: " next with
-                | Some message ->
-                    loop
-                      (make file number start_column end_column message :: acc)
-                      rest'
-                | None -> (
-                    match message_after "warning: " line with
-                    | Some message ->
-                        loop
-                          (make file number start_column end_column message
-                          :: acc)
-                          rest
-                    | None -> loop acc rest))
-            | [] -> loop acc [])
+        | Some (location, "") ->
+            (* A location block starts here. A stacked location repeats itself
+               on the following lines, and the first entry is the one the
+               warning is about, so a block that already waits is kept. *)
+            let pending =
+              match pending with None -> Some location | Some _ -> pending
+            in
+            loop acc pending rest
+        | Some (location, rest_of_line) -> (
+            match message_after ": warning: " rest_of_line with
+            | Some message -> loop (make location message :: acc) None rest
+            | None -> loop acc (Some location) rest)
         | None -> (
-            match message_after "warning: " line with
-            | Some message -> loop (make "" 0 0 0 message :: acc) rest
-            | None -> loop acc rest))
+            if is_continuation line then loop acc pending rest
+            else
+              match message_after "warning: " line with
+              | Some message ->
+                  let location =
+                    match pending with
+                    | Some location -> location
+                    | None -> (file, 0, 0, 0)
+                  in
+                  loop (make location message :: acc) None rest
+              | None -> loop acc None rest))
   in
-  loop [] lines
+  loop [] None lines

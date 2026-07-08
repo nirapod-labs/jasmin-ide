@@ -76,3 +76,23 @@ to do until a library in the repository depends on it; every library that does
 is enough, and the build log then shows
 `vendor/jasmin/src/jasmin.{a,cmxa}`.
 
+## Going to another release
+
+Change `version` and `sha256` in `jasmin.lock` (and `upstream` if the
+release lives elsewhere), run `vendor/fetch.sh`, and rebuild. Commit the
+lock file; the tree itself stays out of git.
+
+## Requirements
+
+OCaml 4.12 or later, dune 3.7 or later, menhir, and the opam packages
+`angstrom`, `batteries`, `zarith` and `menhirLib`. The `uint63` library and
+the OCaml modules extracted from the Rocq proofs are part of the archive.
+
+`requirements.opam` in this directory names those packages at the versions the
+project pins, together with the formatter; `make deps` installs it after the
+lock file, and `docs/deps.md` says how the two files divide the work.
+
+## Licence
+
+Jasmin is MIT licensed. The upstream licence of the compiler is copied to
+`jasmin/LICENSE`; see `NOTICE.md` at the root of the repository.
