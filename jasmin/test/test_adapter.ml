@@ -159,11 +159,32 @@ let test_type_error () =
         (diagnostic.span.Jide_lang.Span.start_byte > 0)
   | [] -> check "type error: shape" false
 
+let test_continue_after_failed_item () =
+  let file = "/tmp/probe.jazz" in
+  let parsed = Jide_jasmin.Parse.parse ~name:file first_item_fails in
+  check "continue: the fixture parses" (not (Jide_jasmin.Parse.failed parsed));
+  let result, environment =
+    Loop.type_items ~file ~items:parsed.items ~idirs:[]
+  in
+  check "continue: only the failed item produces a diagnostic"
+    (List.length result.Jide_jasmin.Check.diagnostics = 1);
+  (match result.diagnostics with
+  | [ diagnostic ] ->
+      check "continue: the diagnostic is a type error"
+        (diagnostic.Jide_lang.Diagnostic.code = Some "typing")
+  | _ -> ());
+  match environment with
+  | Some environment ->
+      check "continue: the second item is declared in the environment"
+        (Jasmin.Pretyping.Env.Funs.find "second" environment <> None);
+      check "continue: the failed item is not declared in the environment"
+        (Jasmin.Pretyping.Env.Funs.find "first" environment = None)
+  | None -> check "continue: the loop leaves an environment behind" false
+
 let test_capture () =
+  let base = location "f.jazz" 3 4 5 in
   let (), text =
-    Jide_jasmin.Warnings.with_capture (fun () ->
-        Format.eprintf
-          "\"f.jazz\", line 3 (4-5): warning: unused variable x.7@.")
+    Jide_jasmin.Warnings.with_capture (fun () -> print_warning base)
   in
   check "capture: text is captured" (String.length text > 0);
   match Jide_jasmin.Warnings.parse text with
@@ -179,6 +200,87 @@ let test_capture () =
         ("capture: one warning, got " ^ string_of_int (List.length other))
         false
 
+let test_single_line_warning () =
+  let text = "\"f.jazz\", line 3 (4-5): warning: unused variable x.7\n" in
+  match Jide_jasmin.Warnings.parse text with
+  | [ warning ] ->
+      check "single line: file" (warning.Jide_jasmin.Warnings.file = "f.jazz");
+      check "single line: line" (warning.line = 3);
+      check "single line: start column" (warning.start_column = 4);
+      check "single line: end column" (warning.end_column = 5);
+      check "single line: uid suffix stripped"
+        (warning.message = "unused variable x")
+  | other ->
+      check
+        ("single line: one warning, got " ^ string_of_int (List.length other))
+        false
+
+let test_quoted_location () =
+  let two_line =
+    "\"a.jazz\", line 2 (3-4)\n"
+    ^ "warning: the variable x is already declared at \"/tmp/other.jazz\", \
+       line 77 (9-10)\n"
+  in
+  (match Jide_jasmin.Warnings.parse two_line with
+  | [ warning ] ->
+      check "quoted location: the file does not move"
+        (warning.Jide_jasmin.Warnings.file = "a.jazz");
+      check "quoted location: the line does not move" (warning.line = 2);
+      check "quoted location: the columns do not move"
+        (warning.start_column = 3 && warning.end_column = 4);
+      check "quoted location: the message is whole"
+        (warning.message
+       = "the variable x is already declared at \"/tmp/other.jazz\", line 77 \
+          (9-10)")
+  | other ->
+      check
+        ("quoted location: one warning, got "
+        ^ string_of_int (List.length other))
+        false);
+  let message_only = "warning: see \"/tmp/o.jazz\", line 77 (3-4)\n" in
+  match Jide_jasmin.Warnings.parse ~file:"cur.jazz" message_only with
+  | [ warning ] ->
+      check "quoted location: a message supplies no location"
+        (warning.Jide_jasmin.Warnings.file = "cur.jazz" && warning.line = 0);
+      check "quoted location: the quoted text stays in the message"
+        (warning.message = "see \"/tmp/o.jazz\", line 77 (3-4)")
+  | other ->
+      check
+        ("quoted location: the message-only warning, got "
+        ^ string_of_int (List.length other))
+        false
+
+let test_stacked_location () =
+  let check_first name text =
+    match Jide_jasmin.Warnings.parse text with
+    | [ warning ] ->
+        check
+          (name ^ ": the first file is kept")
+          (warning.Jide_jasmin.Warnings.file = "a.jazz");
+        check (name ^ ": the first line is kept") (warning.line = 3);
+        check
+          (name ^ ": the first columns are kept")
+          (warning.start_column = 4 && warning.end_column = 5);
+        check (name ^ ": the message") (warning.message = "unused variable x")
+    | other ->
+        check
+          (name ^ ": one warning, got " ^ string_of_int (List.length other))
+          false
+  in
+  check_first "stacked"
+    "\"a.jazz\", line 3 (4-5)\n\
+    \ from \"b.jazz\", line 2 (1-3)\n\
+     warning: unused variable x.7\n";
+  check_first "stacked without file"
+    "\"a.jazz\", line 3 (4-5)\n from line 9 (2)\nwarning: unused variable x.7\n";
+  let base = location "a.jazz" 3 4 5 in
+  let upper = location "b.jazz" 2 1 3 in
+  let (), printed =
+    Jide_jasmin.Warnings.with_capture (fun () ->
+        print_warning ~stack:[ upper ] base)
+  in
+  check_first "stacked as printed" printed
+
 let test_warning () =
   let result = check_text "unused variable" with_unused_variable in
   check "warning: file names the probe"
@@ -189,15 +291,7 @@ let test_warning () =
   check "warning: message mentions the variable"
     (List.exists
        (fun (warning : Jide_jasmin.Warnings.t) ->
-         let message = String.lowercase_ascii warning.message in
-         let has sub =
-           let n = String.length message and m = String.length sub in
-           let rec loop i =
-             i + m <= n && (String.sub message i m = sub || loop (i + 1))
-           in
-           loop 0
-         in
-         has "unused")
+         contains (String.lowercase_ascii warning.message) "unused")
        result.warnings)
 
 let test_arch_names () =

@@ -1,0 +1,12 @@
+# Release source of the vendored Jasmin library. Read by vendor/fetch.sh.
+#
+# upstream: the release tarball the Jasmin project publishes. The edge
+#           channel records an upstream commit here instead of a tag.
+# version:  the release the tarball carries. The archive holds one top-level
+#           directory, jasmin-compiler-v<version>/, and fetch.sh refuses any
+#           other name.
+# sha256:   digest of the tarball. fetch.sh refuses any other bytes.
+
+upstream = https://github.com/jasmin-lang/jasmin/releases/download/v2026.09.0/jasmin-compiler-v2026.09.0.tar.bz2
+version = 2026.09.0
+sha256 = 11fec571efb9f7b3a47fea324b4e2a68289e0b73b2248d237eccf139b5218190
