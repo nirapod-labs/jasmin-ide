@@ -3,9 +3,15 @@
     It owns the lifecycle rules of LSP 3.17: an [initialize] before
     anything else, one answer to a second [initialize], [shutdown] then
     [exit], requests before [initialize] answered with -32002, unknown
-    requests with [MethodNotFound], unknown notifications ignored. It
-    writes nothing: it returns the packets the loop must send, so the
-    whole machine is testable without pipes. *)
+    requests with [MethodNotFound], unknown notifications logged and
+    ignored. It writes nothing: it returns the packets the loop must send,
+    so the whole machine is testable without pipes.
+
+    Notifications that change the document store are applied only while
+    the server is [Running]; an [exit] and a cancel request are the two
+    the protocol allows in every state. Every handler, request or
+    notification, runs under a catch-all that logs the failure and keeps
+    the server serving. *)
 
 type state = Uninitialized | Running | Shutting_down | Exited
 

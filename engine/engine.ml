@@ -15,7 +15,7 @@ let change_document t ~uri ~version ~text =
   match Hashtbl.find_opt t.documents uri with
   | Some document ->
     Hashtbl.replace t.documents uri (Document.with_text document ~version text)
-  | None -> Hashtbl.replace t.documents uri (Document.create ~uri ~version ~text)
+  | None -> ()
 
 let close_document t ~uri = Hashtbl.remove t.documents uri
 

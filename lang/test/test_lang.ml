@@ -270,7 +270,11 @@ let span_containment_and_merging () =
   check_bool "touching spans do not overlap, the other way"
     (not (Span.overlaps d a));
   check_bool "an empty span overlaps nothing"
-    (not (Span.overlaps (span 4 4) c));
+    (not (Span.overlaps (span 4 4) a));
+  check_bool "an empty span inside another overlaps nothing"
+    (not (Span.overlaps (span 4 4) (span 0 10)));
+  check_bool "a reversed span overlaps nothing"
+    (not (Span.overlaps (span 6 5) (span 0 10)));
   check_span "merge across a gap" (span 0 20) (Span.merge a c);
   check_span "merge with a contained span" (span 0 10) (Span.merge a b);
   check_span "merge is symmetric" (span 0 20) (Span.merge c a);
@@ -348,6 +352,19 @@ let file_uri_with_non_ascii () =
     (Uri.equal
        (Uri.of_string "file://LOCALHOST/a")
        (Uri.of_string "file://localhost/a"))
+
+let file_uri_with_a_bad_escape () =
+  let uri = Uri.of_string "file:///tmp/a%zzb" in
+  check_path "a bad escape is kept as literal text" "/tmp/a%zzb" (Uri.path uri);
+  check_string "a bad escape is encoded on the way out" "file:///tmp/a%25zzb"
+    (Uri.to_string uri);
+  let short = Uri.of_string "file:///tmp/a%2" in
+  check_path "a short escape is kept as literal text" "/tmp/a%2"
+    (Uri.path short);
+  let trailing = Uri.of_string "file:///tmp/a%" in
+  check_path "a trailing percent is kept" "/tmp/a%" (Uri.path trailing);
+  let good = Uri.of_string "file:///tmp/a%20b" in
+  check_path "a good escape still decodes" "/tmp/a b" (Uri.path good)
 
 let non_file_scheme () =
   let https = Uri.of_string "https://example.com/a" in
@@ -447,6 +464,7 @@ let () =
   test "diagnostic fields" diagnostic_fields;
   test "file URI with spaces" file_uri_with_spaces;
   test "file URI with non-ASCII" file_uri_with_non_ascii;
+  test "file URI with a bad escape" file_uri_with_a_bad_escape;
   test "non-file scheme" non_file_scheme;
   test "line_start and line_end at the last line with a trailing newline"
     last_line_with_trailing_newline;
