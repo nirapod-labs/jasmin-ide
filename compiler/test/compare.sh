@@ -100,3 +100,89 @@ fail/arm-m4/tst_imm_shifted.jazz arm-m4
 
 cd "$corpus" || exit 2
 
+# The first block `negative.expected` records for one file, as three lines: the
+# line, the one-based column and the message with its line breaks written as
+# \n. Prints nothing when the file has no block.
+expected() {
+  awk -v target="$1" '
+    function escape(s,   out, i, c) {
+      out = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "\\") out = out "\\\\"
+        else if (c == "\t") out = out "\\t"
+        else if (c == "\r") out = out "\\r"
+        else out = out c
+      }
+      return out
+    }
+    BEGIN { want = target ":"; state = 0; message = ""; more = 0 }
+    state == 0 { if ($0 == want) state = 1; next }
+    state == 1 { if ($0 ~ /^[ \t]*$/) next; state = 2 }
+    state == 2 {
+      text = $0
+      cut = index(text, "):")
+      if (cut == 0) { exit }
+      head = substr(text, 1, cut + 1)
+      rest = substr(text, cut + 2)
+      sub(/^[ \t]+/, "", rest)
+      if (!match(head, /line [0-9]+/)) { exit }
+      number = substr(head, RSTART + 5, RLENGTH - 5)
+      if (!match(head, /\([0-9]+/)) { exit }
+      column = substr(head, RSTART + 1, RLENGTH - 1) + 1
+      if (rest != "") { message = escape(rest) }
+      else { more = 1 }
+      state = 3
+      next
+    }
+    state == 3 {
+      if ($0 ~ /^[ \t]*$/) { state = 4; exit }
+      if (more) {
+        message = message (message == "" ? "" : "\\n") escape($0)
+      }
+      next
+    }
+    state == 4 { exit }
+    END {
+      if (state < 3) exit
+      printf "%s\n%d\n%s\n", number, column, message
+    }
+  ' negative.expected
+}
+
+ok_positive=0
+ok_negative=0
+failed=0
+
+pass() {
+  printf 'ok   %s\n' "$1"
+}
+
+fail() {
+  failed=$((failed + 1))
+  printf 'FAIL %s: %s\n' "$1" "$2"
+}
+
+while read -r path; do
+  [ -n "$path" ] || continue
+  if [ ! -f "$path" ]; then
+    fail "$path" "the corpus has no such file"
+    continue
+  fi
+  output=$("$binary" check "$path" 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    fail "$path" "verdict $status, the compiler accepts it (expected 0)"
+    continue
+  fi
+  last=$(printf '%s\n' "$output" | tail -n 1)
+  if [ "$last" != "$path: ok" ]; then
+    fail "$path" "last line \"$last\", expected \"$path: ok\""
+    continue
+  fi
+  ok_positive=$((ok_positive + 1))
+  pass "$path"
+done <<EOF
+$positives
+EOF
+
