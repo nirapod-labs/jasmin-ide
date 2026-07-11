@@ -26,9 +26,9 @@ let position_of_byte t byte =
   Jide_lang.Line_index.position_of_byte t.lines byte
 
 let span_of_bytes t ~start_byte ~end_byte =
-  let end_byte = max start_byte end_byte in
-  let end_byte = min end_byte (String.length t.text) in
-  let start_byte = min start_byte (String.length t.text) in
+  let length = String.length t.text in
+  let start_byte = max 0 (min start_byte length) in
+  let end_byte = max start_byte (min end_byte length) in
   Jide_lang.Span.make ~start_byte ~end_byte
 
 let line_text t line =

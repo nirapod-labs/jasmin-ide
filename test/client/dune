@@ -1,0 +1,10 @@
+(library
+ (name jide_test_client)
+ (wrapped false)
+ (modules jide_framing jide_session jide_normalise jide_client jide_fake)
+ (libraries unix yojson))
+
+(executable
+ (name jide_test_client)
+ (modules jide_test_client)
+ (libraries jide_test_client unix))

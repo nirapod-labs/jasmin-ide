@@ -415,3 +415,59 @@ let test_check_missing_file () =
         (summary = [ path ^ ": 1 error" ])
   | [] -> check "missing file: some output" false
 
+let test_run_usage () =
+  let code, out, err = run [ "--nope" ] in
+  check "usage: exit 2" (code = 2);
+  check "usage: nothing on standard output" (out = []);
+  check "usage: the reason on standard error"
+    (List.exists
+       (fun line -> starts_with ~prefix:"jasmin-lsp check: unknown option" line)
+       err);
+  let code, out, _err = run [ "--help" ] in
+  check "help: exit code 0" (code = 0);
+  check "help: the usage on standard output"
+    (match out with
+    | [ text ] -> starts_with ~prefix:"usage: jasmin-lsp check" text
+    | _ -> false)
+
+let test_two_files () =
+  let valid = "fn f(reg u32 a) -> reg u32 {\n  return a;\n}\n" in
+  let broken =
+    "fn g(reg u32 a) -> reg u32 {\n  reg bool b;\n  b = a;\n  return a;\n}\n"
+  in
+  let good = write_temp_file ~suffix:".jazz" valid in
+  let bad = write_temp_file ~suffix:".jazz" broken in
+  let code, out, _err = run [ good; bad ] in
+  check "two files: exit 1 when one has an error" (code = 1);
+  check "two files: the clean one is reported first, then the other"
+    (match out with
+    | first :: _ -> first = good ^ ": ok" && last out = bad ^ ": 1 error"
+    | [] -> false);
+  remove_file good;
+  remove_file bad
+
+let () =
+  test_defaults ();
+  test_options ();
+  test_includes ();
+  test_include_path ();
+  test_usage_errors ();
+  test_help ();
+  test_line_column ();
+  test_escape ();
+  test_kind ();
+  test_summary ();
+  test_line ();
+  test_warning_span ();
+  test_diagnostic_order ();
+  test_check_valid ();
+  test_check_type_error ();
+  test_check_syntax_error ();
+  test_check_warning ();
+  test_check_missing_file ();
+  test_run_usage ();
+  test_two_files ();
+  if !failures = 0 then print_endline "all check tests passed"
+  else (
+    Printf.printf "%d check test(s) failed\n" !failures;
+    exit 1)

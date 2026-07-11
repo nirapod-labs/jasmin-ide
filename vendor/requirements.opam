@@ -1,0 +1,31 @@
+# The build requirements the vendored Jasmin tree and the formatting step
+# need, at the versions the project switch carries. `make deps` installs this
+# file after the lock file; docs/deps.md says why the lock cannot name them.
+#
+# This is not a package of the workspace: no library depends on it, and it
+# has no build or install instructions, so opam reads only its `depends`
+# list. Keep every version equal to the one the switch has -- the command
+# `opam show --switch jasmin-ide -f version <package>` prints it -- because a
+# version the repository no longer carries fails the install instead of
+# quietly falling back.
+#
+# menhir and menhirLib build the Jasmin grammar's parser, angstrom,
+# batteries and zarith are the libraries the vendored tree links, and
+# ocamlformat is the version `.ocamlformat` pins for `make fmt`. cmdliner is
+# not listed: ocamlformat-lib 0.26.2 requires cmdliner below 2.0, so the
+# locked closure already carries the 1.x the switch resolves.
+
+opam-version: "2.0"
+synopsis:
+  "Build requirements of the vendored Jasmin library and the formatting tool"
+description:
+  "The packages the workspace needs beside the locked dependencies of the language server: the parser generator and its runtime, the libraries the vendored Jasmin tree links against, and the formatter that make fmt runs."
+
+depends: [
+  "angstrom" {= "0.16.1"}
+  "batteries" {= "3.11.0"}
+  "menhir" {= "20260209"}
+  "menhirLib" {= "20260209"}
+  "ocamlformat" {= "0.26.2"}
+  "zarith" {= "1.14"}
+]
