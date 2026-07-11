@@ -175,3 +175,243 @@ let test_usage_errors () =
       check "after -- a dash starts a file" (request.files = [ "-odd.jazz" ])
   | _ -> check "after -- parses" false
 
+let test_help () =
+  check "help: -h" (Jide_check.Request.parse [ "-h" ] = Jide_check.Request.Help);
+  check "help: --help with a file"
+    (Jide_check.Request.parse [ "f.jazz"; "--help" ] = Jide_check.Request.Help);
+  check "help: the text names the mode"
+    (starts_with ~prefix:"usage: jasmin-lsp check" Jide_check.Request.usage)
+
+let test_line_column () =
+  let text = "abc\ndef\n" in
+  check "position: first byte"
+    (Jide_check.Report.line_column ~text
+       (Jide_lang.Span.make ~start_byte:0 ~end_byte:1)
+    = (1, 1));
+  check "position: second line"
+    (Jide_check.Report.line_column ~text
+       (Jide_lang.Span.make ~start_byte:4 ~end_byte:5)
+    = (2, 1));
+  check "position: third byte of the second line"
+    (Jide_check.Report.line_column ~text
+       (Jide_lang.Span.make ~start_byte:6 ~end_byte:7)
+    = (2, 3));
+  check "position: past the end is the last line"
+    (Jide_check.Report.line_column ~text
+       (Jide_lang.Span.make ~start_byte:100 ~end_byte:200)
+    = (3, 1));
+  check "position: a negative offset is the first byte"
+    (Jide_check.Report.line_column ~text
+       (Jide_lang.Span.make ~start_byte:(-4) ~end_byte:1)
+    = (1, 1));
+  let utf8 = "é\nx" in
+  check "position: columns count bytes"
+    (Jide_check.Report.line_column ~text:utf8
+       (Jide_lang.Span.make ~start_byte:3 ~end_byte:4)
+    = (2, 1))
+
+let test_escape () =
+  check "escape: one line"
+    (Jide_check.Report.escape "a\nb\tc\\d\r" = "a\\nb\\tc\\\\d\\r");
+  check "escape: unchanged" (Jide_check.Report.escape "plain" = "plain")
+
+let test_kind () =
+  let diagnostic =
+    Jide_lang.Diagnostic.make ~code:"typing"
+      ~severity:Jide_lang.Diagnostic.Error
+      (Jide_lang.Span.make ~start_byte:0 ~end_byte:0)
+      "message"
+  in
+  check "kind: the code" (Jide_check.Report.kind diagnostic = "typing");
+  let bare =
+    Jide_lang.Diagnostic.make ~severity:Jide_lang.Diagnostic.Warning
+      (Jide_lang.Span.make ~start_byte:0 ~end_byte:0)
+      "message"
+  in
+  check "kind: a warning without a code"
+    (Jide_check.Report.kind bare = "warning");
+  let internal =
+    Jide_lang.Diagnostic.make ~severity:Jide_lang.Diagnostic.Error
+      (Jide_lang.Span.make ~start_byte:0 ~end_byte:0)
+      "message"
+  in
+  check "kind: an error without a code"
+    (Jide_check.Report.kind internal = "internal");
+  check "kind: the internal helper"
+    (Jide_check.Report.kind (Jide_check.Report.internal "boom") = "internal")
+
+let test_summary () =
+  let error = error_diagnostic "an error" in
+  let warning =
+    Jide_lang.Diagnostic.make ~code:"warning"
+      ~severity:Jide_lang.Diagnostic.Warning
+      (Jide_lang.Span.make ~start_byte:0 ~end_byte:1)
+      "a warning"
+  in
+  check "summary: no diagnostic"
+    (Jide_check.Report.summary ~file:"f" [] = "f: ok");
+  check "summary: a warning only"
+    (Jide_check.Report.summary ~file:"f" [ warning ] = "f: ok");
+  check "summary: one error"
+    (Jide_check.Report.summary ~file:"f" [ error ] = "f: 1 error");
+  check "summary: two errors"
+    (Jide_check.Report.summary ~file:"f" [ error; error ] = "f: 2 errors")
+
+let test_line () =
+  let text = "abc\ndef\n" in
+  let diagnostic =
+    Jide_lang.Diagnostic.make ~code:"typing"
+      ~severity:Jide_lang.Diagnostic.Error
+      (Jide_lang.Span.make ~start_byte:4 ~end_byte:6)
+      "some\nmessage"
+  in
+  check "line: the whole line"
+    (Jide_check.Report.line ~file:"f.jazz" ~text diagnostic
+    = "f.jazz:2:1: typing: some\\nmessage")
+
+let test_warning_span () =
+  let text = "abc\n  def\n" in
+  let diagnostics =
+    Jide_check.Report.of_check ~file:"f.jazz" ~text
+      {
+        Jide_jasmin.Adapter.diagnostics = [];
+        warnings =
+          [ warning ~file:"f.jazz" ~line:2 ~start_column:4 ~end_column:5 "x" ];
+      }
+  in
+  (match diagnostics with
+  | [ diagnostic ] ->
+      check "warning: severity"
+        (diagnostic.severity = Jide_lang.Diagnostic.Warning);
+      check "warning: code" (diagnostic.code = Some "warning");
+      check "warning: span from the line start and the column"
+        (diagnostic.span = Jide_lang.Span.make ~start_byte:8 ~end_byte:9)
+  | other ->
+      check
+        ("warning: one diagnostic, got " ^ string_of_int (List.length other))
+        false);
+  let no_location =
+    Jide_check.Report.of_check ~file:"f.jazz" ~text
+      {
+        Jide_jasmin.Adapter.diagnostics = [];
+        warnings = [ warning ~file:"f.jazz" ~line:0 "y" ];
+      }
+  in
+  (match no_location with
+  | [ diagnostic ] ->
+      check "warning: no location sits at the first byte"
+        (diagnostic.span = Jide_lang.Span.make ~start_byte:0 ~end_byte:0)
+  | _ -> check "warning: no location is one diagnostic" false);
+  let clamped =
+    Jide_check.Report.of_check ~file:"f.jazz" ~text
+      {
+        Jide_jasmin.Adapter.diagnostics = [];
+        warnings =
+          [
+            warning ~file:"f.jazz" ~line:1 ~start_column:100 ~end_column:200 "z";
+          ];
+      }
+  in
+  match clamped with
+  | [ diagnostic ] ->
+      check "warning: a column past the line is clamped"
+        (diagnostic.span = Jide_lang.Span.make ~start_byte:3 ~end_byte:3)
+  | _ -> check "warning: clamped is one diagnostic" false
+
+let test_diagnostic_order () =
+  let text = "abc\n" in
+  let result =
+    {
+      Jide_jasmin.Adapter.diagnostics =
+        [
+          Jide_lang.Diagnostic.make ~code:"typing"
+            ~severity:Jide_lang.Diagnostic.Error
+            (Jide_lang.Span.make ~start_byte:2 ~end_byte:3)
+            "second";
+          Jide_lang.Diagnostic.make ~code:"typing"
+            ~severity:Jide_lang.Diagnostic.Error
+            (Jide_lang.Span.make ~start_byte:0 ~end_byte:1)
+            "first";
+        ];
+      warnings =
+        [
+          warning ~file:"f.jazz" ~line:1 ~start_column:0 ~end_column:1 "warning";
+          warning ~file:"other.jazz" ~line:1 "elsewhere";
+        ];
+    }
+  in
+  let diagnostics = Jide_check.Report.of_check ~file:"f.jazz" ~text result in
+  check "order: errors first in source order, then warnings of this file"
+    (List.map
+       (fun (diagnostic : Jide_lang.Diagnostic.t) -> diagnostic.message)
+       diagnostics
+    = [ "first"; "second"; "warning" ])
+
+let test_check_valid () =
+  let valid =
+    "fn f(reg u32 a) -> reg u32 {\n  reg u32 b;\n  b = a;\n  return b;\n}\n"
+  in
+  let path = write_temp_file ~suffix:".jazz" valid in
+  let code, out, err = run [ path ] in
+  check "valid: exit code 0" (code = 0);
+  check "valid: one summary line" (out = [ path ^ ": ok" ]);
+  check "valid: nothing on stderr" (err = []);
+  remove_file path
+
+let test_check_type_error () =
+  let broken =
+    "fn f(reg u32 a) -> reg u32 {\n  reg bool b;\n  b = a;\n  return a;\n}\n"
+  in
+  let path = write_temp_file ~suffix:".jazz" broken in
+  let code, out, _err = run [ path ] in
+  check "type error: exit 1" (code = 1);
+  (match out with
+  | first :: summary ->
+      check "type error: the line starts with the file and a position"
+        (starts_with ~prefix:(path ^ ":3:7: typing: ") first);
+      check "type error: the summary counts it"
+        (summary = [ path ^ ": 1 error" ])
+  | [] -> check "type error: some output" false);
+  remove_file path
+
+let test_check_syntax_error () =
+  let broken = "fn f(reg u32 a -> reg u32 {\n  return a;\n}\n" in
+  let path = write_temp_file ~suffix:".jazz" broken in
+  let code, out, _err = run [ path ] in
+  check "syntax error: exit 1" (code = 1);
+  (match out with
+  | first :: _ ->
+      check "syntax error: kind parse"
+        (starts_with ~prefix:(path ^ ":1:") first && contains first ": parse: ")
+  | [] -> check "syntax error: some output" false);
+  remove_file path
+
+let test_check_warning () =
+  let warned =
+    "fn f(reg u32 a) -> reg u32 {\n  reg u32 unused;\n  return a;\n}\n"
+  in
+  let path = write_temp_file ~suffix:".jazz" warned in
+  let code, out, _err = run [ path ] in
+  check "warning: exit code 0" (code = 0);
+  check "warning: the last line is ok" (last out = path ^ ": ok");
+  check "warning: a warning line is printed"
+    (List.exists
+       (fun line -> line = path ^ ":2:11: warning: unused variable unused")
+       out);
+  remove_file path
+
+let test_check_missing_file () =
+  let path = Filename.temp_file "jide-check" ".jazz" in
+  remove_file path;
+  let code, out, _err = run [ path ] in
+  check "missing file: exit 1" (code = 1);
+  match out with
+  | first :: summary ->
+      check "missing file: an internal error at the first byte"
+        (starts_with
+           ~prefix:(path ^ ":1:1: internal: cannot read the file: ")
+           first);
+      check "missing file: the summary counts it"
+        (summary = [ path ^ ": 1 error" ])
+  | [] -> check "missing file: some output" false
+
