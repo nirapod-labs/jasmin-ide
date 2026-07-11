@@ -186,3 +186,64 @@ done <<EOF
 $positives
 EOF
 
+while read -r path arch; do
+  [ -n "$path" ] || continue
+  if [ ! -f "$path" ]; then
+    fail "$path" "the corpus has no such file"
+    continue
+  fi
+  want=$(expected "$path")
+  if [ -z "$want" ]; then
+    fail "$path" "negative.expected records no block for it"
+    continue
+  fi
+  exp_line=$(printf '%s\n' "$want" | sed -n 1p)
+  exp_column=$(printf '%s\n' "$want" | sed -n 2p)
+  exp_message=$(printf '%s\n' "$want" | sed -n '3,$p')
+
+  output=$("$binary" check --arch "$arch" "$path" 2>&1)
+  status=$?
+  if [ "$status" -ne 1 ]; then
+    fail "$path" "verdict $status, the compiler rejects it (expected 1)"
+    continue
+  fi
+  first=$(printf '%s\n' "$output" | sed -n 1p)
+  case $first in
+    "$path":*) rest=${first#"$path":} ;;
+    *)
+      fail "$path" "first line does not start with the file name: $first"
+      continue
+      ;;
+  esac
+  got_line=${rest%%:*}
+  rest=${rest#*:}
+  got_column=${rest%%:*}
+  rest=${rest#*: }
+  got_kind=${rest%%:*}
+  got_message=${rest#*: }
+
+  problem=''
+  if [ "$got_line" != "$exp_line" ]; then
+    problem="line $got_line, expected $exp_line ($got_message)"
+  elif [ "$got_column" != "$exp_column" ]; then
+    problem="column $got_column, expected $exp_column ($got_message)"
+  elif [ "$got_message" != "$exp_message" ]; then
+    problem="message \"$got_message\", expected \"$exp_message\""
+  fi
+  if [ -n "$problem" ]; then
+    fail "$path" "$problem"
+  else
+    ok_negative=$((ok_negative + 1))
+    pass "$path ($got_kind at $exp_line:$exp_column)"
+  fi
+done <<EOF
+$negatives
+EOF
+
+total=20
+matched=$((ok_positive + ok_negative))
+printf '\n'
+printf 'positive: %d of 10 matched\n' "$ok_positive"
+printf 'negative: %d of 10 matched\n' "$ok_negative"
+printf 'total:    %d of %d matched, %d did not\n' "$matched" "$total" "$failed"
+[ "$failed" -eq 0 ] || exit 1
