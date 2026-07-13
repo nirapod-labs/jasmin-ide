@@ -98,3 +98,77 @@ let test_signature () =
             (signature.Facts.fs_out = [ "u64" ])
       | None -> check "the function has a signature" false)
 
+let test_variables () =
+  with_item "add" (fun item ->
+      let names =
+        List.map (fun (v : Facts.var) -> v.Facts.v_name) item.Facts.i_vars
+      in
+      check
+        ("the variables are the parameters and the local, got "
+       ^ String.concat ", " names)
+        (names = [ "a"; "b"; "c" ]);
+      List.iter
+        (fun (v : Facts.var) ->
+          check
+            ("the kind of " ^ v.Facts.v_name)
+            (v.Facts.v_kind
+            = { Facts.storage = Facts.Reg; pointer = Facts.Direct });
+          check
+            ("the type of " ^ v.Facts.v_name)
+            (String.equal v.Facts.v_ty "u64");
+          check
+            ("the file of " ^ v.Facts.v_name)
+            (String.equal v.Facts.v_dfile file);
+          check ("no annotation on " ^ v.Facts.v_name) (v.Facts.v_annot = []))
+        item.Facts.i_vars;
+      match item.Facts.i_vars with
+      | [ a; b; c ] ->
+          same_span "a is declared where its parameter names it" a.Facts.v_dloc
+            (span_of "reg u64 a," ~offset:8 ~length:1);
+          same_span "b is declared where its parameter names it" b.Facts.v_dloc
+            (span_of "reg u64 b)" ~offset:8 ~length:1);
+          same_span "c is declared where its declaration names it"
+            c.Facts.v_dloc
+            (span_of "reg u64 c;" ~offset:8 ~length:1)
+      | _ -> ())
+
+let test_annotations () =
+  with_item "add" (fun item ->
+      match item.Facts.i_annot with
+      | [ annotation ] ->
+          check "the annotation's key"
+            (String.equal annotation.Facts.a_key "ct");
+          check "the annotation's string"
+            (annotation.Facts.a_value = Some "public -> public");
+          same_span "the annotation's range" annotation.Facts.a_span
+            (span_of "\"public -> public\"")
+      | other ->
+          check
+            ("one annotation, got " ^ string_of_int (List.length other))
+            false)
+
+let test_kind_strings () =
+  let kind storage pointer =
+    Facts.string_of_var_kind { Facts.storage; pointer }
+  in
+  check "a register" (String.equal (kind Facts.Reg Facts.Direct) "reg");
+  check "a writable register pointer"
+    (String.equal (kind Facts.Reg Facts.Pointer_writable) "reg mut ptr");
+  check "a constant stack pointer"
+    (String.equal (kind Facts.Stack Facts.Pointer_constant) "stack const ptr");
+  check "a parameter" (String.equal (kind Facts.Param Facts.Direct) "param");
+  check "a global" (String.equal (kind Facts.Global Facts.Direct) "global");
+  check "an inline value"
+    (String.equal (kind Facts.Inline Facts.Direct) "inline")
+
+let () =
+  test_diagnostics ();
+  test_items ();
+  test_signature ();
+  test_variables ();
+  test_annotations ();
+  test_kind_strings ();
+  if !failures = 0 then print_endline "all facts tests passed"
+  else (
+    Printf.printf "%d facts test(s) failed\n" !failures;
+    exit 1)
