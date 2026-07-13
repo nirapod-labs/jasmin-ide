@@ -219,6 +219,160 @@ let test_annotations () =
             ("one annotation, got " ^ string_of_int (List.length other))
             false)
 
+(* A contract annotation comes in with [ct] and a security annotation with
+   [sct]; both are strings and the adapter reads them the same way. *)
+let test_security_annotation () =
+  with_item "sub_" (fun item ->
+      match item.Facts.i_annot with
+      | [ annotation ] ->
+          check "the security annotation's key"
+            (String.equal annotation.Facts.a_key "sct");
+          check "the security annotation's string"
+            (annotation.Facts.a_value = Some "secret -> public");
+          same_span "the security annotation's range" annotation.Facts.a_span
+            (span_of "\"secret -> public\"")
+      | other ->
+          check
+            ("one security annotation, got " ^ string_of_int (List.length other))
+            false)
+
+(* The item after the first one has to find its own declarations. A
+   parameter, a global and an exec are the other three forms a top level item
+   takes, and an exec is the one that declares nothing at all, so it is also
+   the item whose typing leaves the list of declarations untouched. *)
+
+let with_param =
+  {|
+fn one(reg u64 a) -> reg u64 {
+  reg u64 b;
+  b = a;
+  return b;
+}
+
+param int rounds = 10;
+|}
+
+let with_global =
+  {|
+fn one(reg u64 a) -> reg u64 {
+  reg u64 b;
+  b = a;
+  return b;
+}
+
+u64 counter = 0;
+|}
+
+(* The compiler's grammar takes an [exec] without a trailing semicolon: with
+   one the parser reports an "unexpected token" and the whole file yields
+   nothing. *)
+let with_exec =
+  {|
+fn one(reg u64 a) -> reg u64 {
+  reg u64 b;
+  b = a;
+  return b;
+}
+
+exec one(0:32)
+
+fn two(reg u64 a) -> reg u64 {
+  reg u64 b;
+  b = a;
+  return b;
+}
+|}
+
+let test_second_item_is_a_param () =
+  let facts = facts_of "a parameter second" with_param in
+  check
+    (Printf.sprintf "a parameter second: two items, got %d"
+       (List.length facts.Facts.items))
+    (List.length facts.Facts.items = 2);
+  with_item_in facts "one" (fun item ->
+      check "a parameter second: the first item is a function"
+        (item.Facts.i_kind = Facts.Function));
+  with_item_in facts "rounds" (fun item ->
+      check "a parameter second: the item is a parameter"
+        (item.Facts.i_kind = Facts.Param);
+      same_span "a parameter second: its name is its name"
+        item.Facts.i_name_span
+        (span_in with_param "rounds");
+      check "a parameter second: it has no signature" (item.Facts.i_sig = None);
+      match item.Facts.i_vars with
+      | [ variable ] ->
+          check "a parameter second: one variable named rounds"
+            (String.equal variable.Facts.v_name "rounds");
+          check "a parameter second: its type"
+            (String.equal variable.Facts.v_ty "int");
+          check "a parameter second: its kind"
+            (variable.Facts.v_kind
+            = { Facts.storage = Facts.Param; pointer = Facts.Direct });
+          check "a parameter second: its file"
+            (String.equal variable.Facts.v_dfile file);
+          same_span "a parameter second: its declaration is its name"
+            variable.Facts.v_dloc
+            (span_in with_param "rounds")
+      | other ->
+          check
+            ("a parameter second: one variable, got "
+            ^ string_of_int (List.length other))
+            false)
+
+let test_second_item_is_a_global () =
+  let facts = facts_of "a global second" with_global in
+  check
+    (Printf.sprintf "a global second: two items, got %d"
+       (List.length facts.Facts.items))
+    (List.length facts.Facts.items = 2);
+  with_item_in facts "one" (fun item ->
+      check "a global second: the first item is a function"
+        (item.Facts.i_kind = Facts.Function));
+  with_item_in facts "counter" (fun item ->
+      check "a global second: the item is a global"
+        (item.Facts.i_kind = Facts.Global);
+      same_span "a global second: its name is its name" item.Facts.i_name_span
+        (span_in with_global "counter");
+      check "a global second: it has no signature" (item.Facts.i_sig = None);
+      match item.Facts.i_vars with
+      | [ variable ] ->
+          check "a global second: one variable named counter"
+            (String.equal variable.Facts.v_name "counter");
+          check "a global second: its type"
+            (String.equal variable.Facts.v_ty "u64");
+          check "a global second: its kind"
+            (variable.Facts.v_kind
+            = { Facts.storage = Facts.Global; pointer = Facts.Direct });
+          check "a global second: its file"
+            (String.equal variable.Facts.v_dfile file);
+          same_span "a global second: its declaration is its name"
+            variable.Facts.v_dloc
+            (span_in with_global "counter")
+      | other ->
+          check
+            ("a global second: one variable, got "
+            ^ string_of_int (List.length other))
+            false)
+
+let test_second_item_is_an_exec () =
+  let facts = facts_of "an exec second" with_exec in
+  check
+    (Printf.sprintf "an exec second: two items, got %d"
+       (List.length facts.Facts.items))
+    (List.length facts.Facts.items = 2);
+  check "an exec second: the items are the two functions"
+    (List.map (fun (item : Facts.item) -> item.Facts.i_name) facts.Facts.items
+    = [ "one"; "two" ]);
+  with_item_in facts "one" (fun item ->
+      check "an exec second: the first item is a function"
+        (item.Facts.i_kind = Facts.Function));
+  with_item_in facts "two" (fun item ->
+      check "an exec second: the item after the exec is a function"
+        (item.Facts.i_kind = Facts.Function);
+      check "an exec second: the item after the exec has its variables"
+        (List.map (fun (v : Facts.var) -> v.Facts.v_name) item.Facts.i_vars
+        = [ "a"; "b" ]))
+
 let test_kind_strings () =
   let kind storage pointer =
     Facts.string_of_var_kind { Facts.storage; pointer }
@@ -236,6 +390,7 @@ let test_kind_strings () =
 let () =
   test_diagnostics ();
   test_items ();
+  test_second_item ();
   test_signature ();
   test_variables ();
   test_annotations ();

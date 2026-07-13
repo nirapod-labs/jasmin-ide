@@ -1,0 +1,6 @@
+(test
+ (name test_jide_client)
+ (modules test_jide_client)
+ (libraries jide_test_client unix)
+ (action
+  (run %{test} %{exe:../jide_test_client.exe})))
