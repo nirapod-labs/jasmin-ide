@@ -96,3 +96,57 @@ let read_line reader ~deadline =
   in
   loop ()
 
+let read_exact reader ~deadline count =
+  let body = Bytes.create count in
+  let rec loop filled =
+    if filled = count then Ok (Bytes.to_string body)
+    else
+      match refill reader ~deadline with
+      | Error End_of_input -> Error (Malformed "the body ends before Content-Length bytes")
+      | Error error -> Error error
+      | Ok () ->
+        let take = min (count - filled) (reader.length - reader.offset) in
+        Bytes.blit reader.bytes reader.offset body filled take;
+        reader.offset <- reader.offset + take;
+        loop (filled + take)
+  in
+  loop 0
+
+(* "Content-Length: 12" gives [Ok (Some 12)]; any other header [Ok None]. *)
+let content_length line =
+  match String.index_opt line ':' with
+  | None -> Error (Malformed (Printf.sprintf "expected a header, got %S" line))
+  | Some colon ->
+    let name = String.trim (String.sub line 0 colon) in
+    let value = String.trim (String.sub line (colon + 1) (String.length line - colon - 1)) in
+    if String.lowercase_ascii name <> "content-length" then Ok None
+    else begin
+      match int_of_string_opt value with
+      | Some length when length >= 0 -> Ok (Some length)
+      | Some _ | None -> Error (Malformed (Printf.sprintf "bad Content-Length %S" value))
+    end
+
+let read_message reader ~timeout_ms =
+  let deadline = now () +. (float_of_int timeout_ms /. 1000.) in
+  let rec headers started length =
+    match read_line reader ~deadline with
+    | Error End_of_input when not started -> Error End_of_input
+    | Error End_of_input -> Error (Malformed "the header ends before its blank line")
+    | Error error -> Error error
+    | Ok "" -> (
+      match length with
+      | None -> Error (Malformed "no Content-Length header")
+      | Some count -> read_exact reader ~deadline count)
+    | Ok header -> (
+      match content_length header with
+      | Error error -> Error error
+      | Ok None -> headers true length
+      | Ok (Some count) -> headers true (Some count))
+  in
+  headers false None
+
+let encode body = Printf.sprintf "Content-Length: %d\r\n\r\n" (String.length body) ^ body
+
+let write channel body =
+  output_string channel (encode body);
+  flush channel
