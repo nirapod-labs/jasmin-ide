@@ -1,4 +1,4 @@
-(* The typed facts, checked against a program small enough to read: every
+(* The typed facts, checked against programs small enough to read: every
    range the facts report is written out here by the text it covers. *)
 
 module Facts = Jide_jasmin.Facts
@@ -12,6 +12,10 @@ let check name condition =
 
 let file = "/tmp/hand-checked.jazz"
 
+(* Two functions. The second one is the point: typing pushes an item's
+   declarations in front of the environment it found, so every item after
+   the first must be read from the front of the list while the first item
+   alone cannot show a reader that goes to the wrong end. *)
 let program =
   {|
 #[ct="public -> public"]
@@ -19,6 +23,13 @@ fn add(reg u64 a, reg u64 b) -> reg u64 {
   reg u64 c;
   c = a + b;
   return c;
+}
+
+#[sct="secret -> public"]
+fn sub_(reg u64 x, reg u64 y) -> reg u64 {
+  reg u64 d;
+  d = x - y;
+  return d;
 }
 |}
 
@@ -30,26 +41,40 @@ let result =
 
 let facts = result.Jide_jasmin.Adapter.facts
 
-(* The byte where [needle] first appears in the program. *)
-let index_of needle =
-  let length = String.length program and width = String.length needle in
+(* The facts of [text], with the promise that it types cleanly: a diagnostic
+   would shorten the run of items the assertions below read. *)
+let facts_of name text =
+  let result = Jide_jasmin.Adapter.check x86_64 linux ~file ~text ~idirs:[] in
+  check
+    (name ^ ": the program has no diagnostics")
+    (result.Jide_jasmin.Adapter.diagnostics = []);
+  List.iter
+    (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+      Printf.printf "  %s: %s\n%!" name diagnostic.message)
+    result.Jide_jasmin.Adapter.diagnostics;
+  result.Jide_jasmin.Adapter.facts
+
+(* The byte where [needle] first appears in [text]. *)
+let index_of text needle =
+  let length = String.length text and width = String.length needle in
   let rec loop index =
     if index + width > length then None
-    else if String.equal (String.sub program index width) needle then Some index
+    else if String.equal (String.sub text index width) needle then Some index
     else loop (index + 1)
   in
   loop 0
 
-let offset_of needle =
-  match index_of needle with
+let offset_in text needle =
+  match index_of text needle with
   | Some index -> index
   | None ->
       check ("the program contains " ^ needle) false;
       0
 
-(* The range of [needle], or of the [length] bytes at [offset] inside it. *)
-let span_of ?(offset = 0) ?length needle =
-  let start_byte = offset_of needle + offset in
+(* The range of [needle] in [text], or of the [length] bytes at [offset]
+   inside it. *)
+let span_in text ?(offset = 0) ?length needle =
+  let start_byte = offset_in text needle + offset in
   let width =
     match length with
     | Some width -> width
@@ -57,13 +82,16 @@ let span_of ?(offset = 0) ?length needle =
   in
   Jide_lang.Span.make ~start_byte ~end_byte:(start_byte + width)
 
+let offset_of = offset_in program
+let span_of = span_in program
+
 let same_span name (actual : Jide_lang.Span.t) (expected : Jide_lang.Span.t) =
   check
     (Printf.sprintf "%s: got %d..%d, wanted %d..%d" name actual.start_byte
        actual.end_byte expected.start_byte expected.end_byte)
     (Jide_lang.Span.compare actual expected = 0)
 
-let with_item name f =
+let with_item_in (facts : Facts.t) name f =
   match
     List.find_opt
       (fun (item : Facts.item) -> String.equal item.Facts.i_name name)
@@ -72,12 +100,20 @@ let with_item name f =
   | Some item -> f item
   | None -> check ("the program has an item named " ^ name) false
 
+let with_item = with_item_in facts
+
 let test_diagnostics () =
   check "the program has no diagnostics"
     (result.Jide_jasmin.Adapter.diagnostics = [])
 
 let test_items () =
-  check "the program has one item" (List.length facts.Facts.items = 1);
+  check
+    (Printf.sprintf "the program has two items, got %d"
+       (List.length facts.Facts.items))
+    (List.length facts.Facts.items = 2);
+  check "the items are in source order"
+    (List.map (fun (item : Facts.item) -> item.Facts.i_name) facts.Facts.items
+    = [ "add"; "sub_" ]);
   with_item "add" (fun item ->
       check "the item is a function" (item.Facts.i_kind = Facts.Function);
       same_span "the function's name is its name after fn"
@@ -87,6 +123,42 @@ let test_items () =
         item.Facts.i_span
         (Jide_lang.Span.make ~start_byte:(offset_of "#[ct=")
            ~end_byte:(offset_of "return c;\n}" + String.length "return c;\n}")))
+
+let test_second_item () =
+  with_item "sub_" (fun item ->
+      check "the second item is a function" (item.Facts.i_kind = Facts.Function);
+      same_span "the second function's name is its name after fn"
+        item.Facts.i_name_span
+        (span_of "fn sub_(" ~offset:3 ~length:4);
+      same_span
+        "the second function's range runs from its annotation to its brace"
+        item.Facts.i_span
+        (Jide_lang.Span.make ~start_byte:(offset_of "#[sct=")
+           ~end_byte:(offset_of "return d;\n}" + String.length "return d;\n}"));
+      (match item.Facts.i_sig with
+      | Some signature ->
+          check "the second signature has two arguments"
+            (signature.Facts.fs_in = [ "u64"; "u64" ]);
+          check "the second signature returns one value"
+            (signature.Facts.fs_out = [ "u64" ])
+      | None -> check "the second function has a signature" false);
+      let names =
+        List.map (fun (v : Facts.var) -> v.Facts.v_name) item.Facts.i_vars
+      in
+      check
+        ("the second function's variables are its parameters and its local, \
+          got " ^ String.concat ", " names)
+        (names = [ "x"; "y"; "d" ]);
+      match item.Facts.i_vars with
+      | [ x; y; d ] ->
+          same_span "x is declared where its parameter names it" x.Facts.v_dloc
+            (span_of "reg u64 x," ~offset:8 ~length:1);
+          same_span "y is declared where its parameter names it" y.Facts.v_dloc
+            (span_of "reg u64 y)" ~offset:8 ~length:1);
+          same_span "d is declared where its declaration names it"
+            d.Facts.v_dloc
+            (span_of "reg u64 d;" ~offset:8 ~length:1)
+      | _ -> ())
 
 let test_signature () =
   with_item "add" (fun item ->
