@@ -117,3 +117,71 @@ let timeout () =
   in
   check "timeout exits 1" (outcome.code = 1 && outcome.output = "" && outcome.message = "timeout")
 
+let malformed_content_length () =
+  let bytes = "Content-Length: banana\r\n\r\n{}" in
+  let reader = Jide_framing.make_reader (Jide_framing.string_input bytes) in
+  check "malformed Content-Length (reader)"
+    (match Jide_framing.read_message reader ~timeout_ms:100 with
+    | Error (Jide_framing.Malformed _) -> true
+    | Error (Jide_framing.Timeout | Jide_framing.End_of_input) | Ok _ -> false);
+  let outcome =
+    run_transport ~timeout_ms:1000
+      ~session:{|{"jsonrpc":"2.0","id":6,"method":"initialize"}|}
+      (raw_transport bytes)
+  in
+  check "malformed Content-Length (exit 2)"
+    (outcome.code = 2 && outcome.output = "" && outcome.message <> "")
+
+let framing_details () =
+  let truncated = "Content-Length: 40\r\n\r\n{}" in
+  let reader = Jide_framing.make_reader (Jide_framing.string_input truncated) in
+  check "truncated body is a malformed frame"
+    (match Jide_framing.read_message reader ~timeout_ms:100 with
+    | Error (Jide_framing.Malformed _) -> true
+    | Error (Jide_framing.Timeout | Jide_framing.End_of_input) | Ok _ -> false);
+  let body = {|{"jsonrpc":"2.0","id":14,"result":null}|} in
+  let bytes =
+    Printf.sprintf "content-length: %d\r\nContent-Type: application/json\r\n\r\n%s"
+      (String.length body) body
+  in
+  let outcome =
+    run_transport ~timeout_ms:1000
+      ~session:{|{"jsonrpc":"2.0","id":14,"method":"shutdown"}|}
+      (raw_transport bytes)
+  in
+  check "lower-case header name and extra headers are accepted"
+    (outcome.code = 0 && outcome.output = "14 result null\n")
+
+let session_file_errors () =
+  let directive text = match Jide_session.parse_string text with Error _ -> true | Ok _ -> false in
+  check "session file errors"
+    (directive "#frobnicate 1"
+    && directive "#sleep"
+    && directive "#sleep soon"
+    && (match Jide_session.parse_script_string "#expect-timeout 10" with
+       | Error _ -> true
+       | Ok _ -> false))
+
+let end_of_input () =
+  let reader = Jide_framing.make_reader (Jide_framing.string_input "") in
+  check "end of input (reader)"
+    (match Jide_framing.read_message reader ~timeout_ms:100 with
+    | Error Jide_framing.End_of_input -> true
+    | Error (Jide_framing.Timeout | Jide_framing.Malformed _) | Ok _ -> false);
+  let closed_by_server =
+    run_fake ~timeout_ms:1000
+      ~session:{|{"jsonrpc":"2.0","id":8,"method":"shutdown"}|}
+      ~script:{|#close|}
+  in
+  check "end of input (server closes before replying)"
+    (closed_by_server.code = 3 && closed_by_server.output = "");
+  let closed_by_client =
+    run_fake ~timeout_ms:1000
+      ~session:
+        {|#close
+
+{"jsonrpc":"2.0","id":9,"method":"after/close"}|}
+      ~script:""
+  in
+  check "end of input (client closes stdin)" (closed_by_client.code = 3 && closed_by_client.output = "")
+
