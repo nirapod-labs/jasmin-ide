@@ -185,3 +185,55 @@ let end_of_input () =
   in
   check "end of input (client closes stdin)" (closed_by_client.code = 3 && closed_by_client.output = "")
 
+let server_notification () =
+  let outcome =
+    run_fake ~timeout_ms:1000
+      ~session:{|{"jsonrpc":"2.0","id":10,"method":"textDocument/hover"}|}
+      ~script:
+        {|{"jsonrpc":"2.0","method":"window/logMessage","params":{"type":3,"message":"hello"}}
+
+{"jsonrpc":"2.0","id":10,"result":null}|}
+  in
+  check "server notification before the reply"
+    (outcome.code = 0
+    && outcome.output = "- window/logMessage {\"message\":\"hello\",\"type\":3}\n10 result null\n")
+
+let expect_timeout () =
+  let silent =
+    run_fake ~timeout_ms:1000
+      ~session:
+        {|{"jsonrpc":"2.0","method":"initialized","params":{}}
+
+#expect-timeout 120
+
+{"jsonrpc":"2.0","id":11,"method":"shutdown"}|}
+      ~script:{|{"jsonrpc":"2.0","id":11,"result":null}|}
+  in
+  check "expect-timeout passes on silence" (silent.code = 0 && silent.output = "11 result null\n");
+  let violated =
+    run_transport ~timeout_ms:1000
+      ~session:{|#expect-timeout 120|}
+      (raw_transport (Jide_framing.encode {|{"jsonrpc":"2.0","id":13,"result":null}|}))
+  in
+  check "expect-timeout reports an unexpected reply" (violated.code = 4 && violated.output = "")
+
+let deterministic_output () =
+  let session =
+    {|{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+
+{"jsonrpc":"2.0","method":"initialized","params":{}}
+
+{"jsonrpc":"2.0","id":"two","method":"server/capabilities"}|}
+  in
+  let script =
+    {|{"jsonrpc":"2.0","id":1,"result":{"b":1,"a":{"d":4,"c":3}}}
+
+{"jsonrpc":"2.0","id":"two","error":{"message":"nope","code":-32000}}|}
+  in
+  let first = run_fake ~timeout_ms:1000 ~session ~script in
+  let second = run_fake ~timeout_ms:1000 ~session ~script in
+  check "deterministic output"
+    (first.code = 0 && first.code = second.code && first.output = second.output
+    && first.output
+       = "1 result {\"a\":{\"c\":3,\"d\":4},\"b\":1}\ntwo error {\"code\":-32000,\"message\":\"nope\"}\n")
+

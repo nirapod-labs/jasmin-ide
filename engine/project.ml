@@ -148,3 +148,168 @@ let quoted names = String.concat ", " names
 let resolve ~directory path =
   if Filename.is_relative path then Filename.concat directory path else path
 
+let parse_members ~directory ~bom ranges members =
+  let problems = ref [] in
+  let project = ref empty in
+  let shift span = if bom = 0 then span else Jide_lang.Span.shift span bom in
+  let complain ~span message =
+    problems := { span = shift span; message } :: !problems
+  in
+  let spans_of name =
+    match List.assoc_opt name ranges with
+    | Some (key, value) -> (key, value)
+    | None -> (blank_span, blank_span)
+  in
+  let key_range name = fst (spans_of name) in
+  let value_range name = snd (spans_of name) in
+  (* A version other than 1 is another schema. The fields it holds are not
+     read at all, because none of them would mean what this version means. *)
+  let version_problem =
+    match List.assoc_opt "version" members with
+    | None -> None
+    | Some (`Int 1) -> None
+    | Some (`Intlit text) when String.trim text = "1" -> None
+    | Some (`Int number) ->
+        Some
+          (Printf.sprintf
+             "this project file is version %d; only version 1 is read" number)
+    | Some (`Intlit text) ->
+        Some
+          (Printf.sprintf
+             "this project file is version %s; only version 1 is read" text)
+    | Some _ ->
+        Some "the version field must be the number 1; the defaults are used"
+  in
+  match version_problem with
+  | Some message ->
+      complain ~span:(value_range "version") message;
+      (empty, List.rev !problems)
+  | None ->
+      List.iter
+        (fun (name, value) ->
+          match name with
+          | "version" -> ()
+          | "arch" -> (
+              match value with
+              | `String name -> (
+                  match Jide_jasmin.Adapter.arch_of_string name with
+                  | Some arch -> project := { !project with arch = Some arch }
+                  | None ->
+                      complain ~span:(value_range "arch")
+                        (Printf.sprintf "unknown architecture: %s (known: %s)"
+                           name (quoted arch_names)))
+              | _ ->
+                  complain ~span:(value_range "arch")
+                    "the arch field must be a string; the default is used")
+          | "call_conv" -> (
+              match value with
+              | `String name -> (
+                  match Jide_jasmin.Adapter.call_conv_of_string name with
+                  | Some call_conv ->
+                      project := { !project with call_conv = Some call_conv }
+                  | None ->
+                      complain ~span:(value_range "call_conv")
+                        (Printf.sprintf
+                           "unknown calling convention: %s (known: %s)" name
+                           (quoted call_conv_names)))
+              | _ ->
+                  complain ~span:(value_range "call_conv")
+                    "the call_conv field must be a string; the default is used")
+          | "include" -> (
+              match value with
+              | `Assoc pairs ->
+                  let paths =
+                    List.filter_map
+                      (fun (key, value) ->
+                        match value with
+                        | `String path -> Some (key, resolve ~directory path)
+                        | _ ->
+                            complain ~span:(value_range "include")
+                              (Printf.sprintf
+                                 "the include path %s must be a string" key);
+                            None)
+                      pairs
+                  in
+                  project := { !project with idirs = paths }
+              | _ ->
+                  complain ~span:(value_range "include")
+                    "the include field must be an object of name to path")
+          | "entries" -> (
+              match value with
+              | `List values ->
+                  let entries =
+                    List.filter_map
+                      (fun value ->
+                        match value with
+                        | `String path -> Some (resolve ~directory path)
+                        | _ ->
+                            complain ~span:(value_range "entries")
+                              "every entry must be a string";
+                            None)
+                      values
+                  in
+                  project := { !project with entries }
+              | _ ->
+                  complain ~span:(value_range "entries")
+                    "the entries field must be a list of paths")
+          | unknown ->
+              complain ~span:(key_range unknown)
+                (Printf.sprintf "unknown field: %s" unknown))
+        members;
+      (!project, List.rev !problems)
+
+let parse ?path text =
+  let bom, body = strip_bom text in
+  let broken message =
+    {
+      path;
+      text = body;
+      bom;
+      project = empty;
+      problems = [ { span = blank_span; message } ];
+    }
+  in
+  match Yojson.Safe.from_string body with
+  | exception Yojson.Json_error message -> broken ("not valid JSON: " ^ message)
+  | exception exn -> broken ("cannot be read: " ^ Printexc.to_string exn)
+  | `Assoc members ->
+      let directory =
+        match path with
+        | Some path -> Filename.dirname path
+        | None -> Filename.current_dir_name
+      in
+      let ranges = member_ranges body in
+      let project, problems = parse_members ~directory ~bom ranges members in
+      { path; text = body; bom; project; problems }
+  | _ -> broken "the project file must hold one JSON object"
+
+let load path =
+  match In_channel.with_open_bin path In_channel.input_all with
+  | text -> (
+      match parse ~path text with
+      | loaded -> { loaded with path = Some path }
+      | exception exn ->
+          {
+            path = Some path;
+            text = "";
+            bom = 0;
+            project = empty;
+            problems =
+              [
+                {
+                  span = blank_span;
+                  message = "cannot be read: " ^ Printexc.to_string exn;
+                };
+              ];
+          })
+  | exception Sys_error _ ->
+      (* No file is the ordinary case: the defaults apply and nothing is
+         wrong. *)
+      { path = None; text = ""; bom = 0; project = empty; problems = [] }
+
+let diagnostics ~uri (loaded : loaded) =
+  List.map
+    (fun (problem : problem) ->
+      Jide_lang.Diagnostic.make ~code:"project"
+        ~severity:Jide_lang.Diagnostic.Error problem.span problem.message)
+    loaded.problems
