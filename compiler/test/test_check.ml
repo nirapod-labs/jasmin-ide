@@ -277,6 +277,7 @@ let test_warning_span () =
         Jide_jasmin.Adapter.diagnostics = [];
         warnings =
           [ warning ~file:"f.jazz" ~line:2 ~start_column:4 ~end_column:5 "x" ];
+        facts = Jide_jasmin.Facts.empty;
       }
   in
   (match diagnostics with
@@ -295,6 +296,7 @@ let test_warning_span () =
       {
         Jide_jasmin.Adapter.diagnostics = [];
         warnings = [ warning ~file:"f.jazz" ~line:0 "y" ];
+        facts = Jide_jasmin.Facts.empty;
       }
   in
   (match no_location with
@@ -310,6 +312,7 @@ let test_warning_span () =
           [
             warning ~file:"f.jazz" ~line:1 ~start_column:100 ~end_column:200 "z";
           ];
+        facts = Jide_jasmin.Facts.empty;
       }
   in
   match clamped with
@@ -338,6 +341,7 @@ let test_diagnostic_order () =
           warning ~file:"f.jazz" ~line:1 ~start_column:0 ~end_column:1 "warning";
           warning ~file:"other.jazz" ~line:1 "elsewhere";
         ];
+      facts = Jide_jasmin.Facts.empty;
     }
   in
   let diagnostics = Jide_check.Report.of_check ~file:"f.jazz" ~text result in

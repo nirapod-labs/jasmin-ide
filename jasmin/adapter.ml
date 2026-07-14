@@ -13,6 +13,7 @@ let parse = Parse.parse
 type check_result = Check.result = {
   diagnostics : Jide_lang.Diagnostic.t list;
   warnings : Warnings.t list;
+  facts : Facts.t;
 }
 
 let check = Arch.check

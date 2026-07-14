@@ -26,6 +26,12 @@ type check_result = {
       (** Each warning names the file the compiler printed it for, or [file]
           when it printed no location, so the engine keeps the ones for the
           document it asked about. *)
+  facts : Facts.t;
+      (** What the items that typed left behind: their variables, their
+          function signatures, their annotations and, for the outline, their
+          names and ranges. Every range in it indexes [file] and every value
+          is plain data, so the engine reads it without handling the
+          compiler's program representation. *)
 }
 
 val check :

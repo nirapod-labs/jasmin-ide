@@ -3,9 +3,10 @@ open Jasmin
 type result = {
   diagnostics : Jide_lang.Diagnostic.t list;
   warnings : Warnings.t list;
+  facts : Facts.t;
 }
 
-let empty = { diagnostics = []; warnings = [] }
+let empty = { diagnostics = []; warnings = []; facts = Facts.empty }
 let max_diagnostics = 200
 
 module Make (A : Arch_full.Arch) = struct
@@ -15,6 +16,36 @@ module Make (A : Arch_full.Arch) = struct
     match Pretyping.tt_item A.arch_info environment item with
     | environment -> Ok environment
     | exception exn -> Error exn
+
+  (** [added ~before ~after] is the run of declarations [after] holds and
+      [before] does not. Typing pushes every declaration at the front
+      ([e_decls = P.MIfun v :: env.e_decls] in the compiler's
+      [pretyping.ml]), so an item's own declarations are the head of [after]
+      and the old ones are the tail that follows them. An item that declares
+      nothing, an [exec] for example, leaves the list alone, and a [require]
+      pushes a whole file's declarations, so the size of the run is read from
+      the two lists and never assumed to be one.
+
+      The run is kept only when the tail it leaves is [before] itself. When
+      it is not, the declarations did not arrive by pushing and the whole of
+      [after] is offered instead: the collector keeps only the declarations
+      whose location lies inside the item, so the wider run is read through
+      this item's own range and the item is not left without its
+      declarations. *)
+  let added ~(before : (unit, A.extended_op) Prog.pmod_item list)
+      ~(after : (unit, A.extended_op) Prog.pmod_item list) :
+      (unit, A.extended_op) Prog.pmod_item list =
+    let grown = List.length after - List.length before in
+    let rec split count prefix rest =
+      if count <= 0 then (List.rev prefix, rest)
+      else
+        match rest with
+        | [] -> (List.rev prefix, [])
+        | declaration :: rest -> split (count - 1) (declaration :: prefix) rest
+    in
+    match split (Stdlib.max grown 0) [] after with
+    | prefix, rest when rest == before -> prefix
+    | _ -> after
 
   (** [type_items ~file ~items ~idirs] types the items one by one and
       returns the diagnostics, plus the environment the loop leaves behind
@@ -47,13 +78,30 @@ module Make (A : Arch_full.Arch) = struct
         | Some (environment, _resolved) ->
             let environment = ref environment in
             let diagnostics = ref [] in
+            let facts = ref Facts.empty in
             let stopped = ref false in
             List.iter
               (fun item ->
                 if not !stopped then
                   let snapshot = !environment in
                   match type_item snapshot item with
-                  | Ok next -> environment := next
+                  | Ok next ->
+                      let decls =
+                        added
+                          ~before:(Pretyping.Env.decls snapshot)
+                          ~after:(Pretyping.Env.decls next)
+                      in
+                      (match Collect.of_item ~file ~env:next ~item ~decls with
+                      | collected -> facts := Facts.merge !facts collected
+                      | exception exn ->
+                          (* A fact the adapter cannot read is a failure of
+                             this server, never of the user's file: it is
+                             reported as such instead of ending the check. *)
+                          let error = Error.of_exn exn in
+                          if Error.belongs_to ~file error then
+                            diagnostics :=
+                              Error.to_diagnostic error :: !diagnostics);
+                      environment := next
                   | Error exn ->
                       let error = Error.of_exn exn in
                       (* A span indexes the text of the file its location names.
@@ -67,7 +115,7 @@ module Make (A : Arch_full.Arch) = struct
                         stopped := true)
               items;
             let environment = Pretyping.Env.exit_file !environment in
-            ( { empty with diagnostics = List.rev !diagnostics },
+            ( { empty with diagnostics = List.rev !diagnostics; facts = !facts },
               Some environment ))
 
   let check ~(file : string) ~(text : string) ~(idirs : (string * string) list)

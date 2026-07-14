@@ -394,6 +394,10 @@ let () =
   test_signature ();
   test_variables ();
   test_annotations ();
+  test_security_annotation ();
+  test_second_item_is_a_param ();
+  test_second_item_is_a_global ();
+  test_second_item_is_an_exec ();
   test_kind_strings ();
   if !failures = 0 then print_endline "all facts tests passed"
   else (

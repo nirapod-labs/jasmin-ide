@@ -1,3 +1,9 @@
 (test
  (name test_adapter)
+ (modules test_adapter)
+ (libraries jide_jasmin jide_lang jasmin))
+
+(test
+ (name test_facts)
+ (modules test_facts)
  (libraries jide_jasmin jide_lang jasmin))
