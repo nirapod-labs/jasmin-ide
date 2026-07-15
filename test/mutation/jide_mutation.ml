@@ -116,3 +116,78 @@ let splice text start stop inserted =
   String.sub text 0 start ^ inserted
   ^ String.sub text stop (String.length text - stop)
 
+let token_text text (token : token) =
+  String.sub text token.start (token.stop - token.start)
+
+(** The tokens an insertion may put in. None of them is an item keyword, so
+    an insertion can never add or remove an outline entry of its own: the
+    outline is what the mutation must not disturb, not what it edits. *)
+let insertions =
+  [|
+    ";";
+    "=";
+    "(";
+    ")";
+    "{";
+    "}";
+    "reg";
+    "u64";
+    "return";
+    "x";
+    ",";
+    "[";
+    "]";
+    "+";
+    "-";
+    "/* edited */";
+  |]
+
+let deletion text (tokens : token array) state =
+  let count = Array.length tokens in
+  if count = 0 then []
+  else
+    let token = tokens.(Random.State.int state count) in
+    [
+      {
+        label = "delete";
+        text = splice text token.start token.stop "";
+        start = token.start;
+        stop = token.stop;
+      };
+    ]
+
+let insertion text (tokens : token array) state =
+  let count = Array.length tokens in
+  if count = 0 then []
+  else
+    let token = tokens.(Random.State.int state count) in
+    let inserted =
+      insertions.(Random.State.int state (Array.length insertions))
+    in
+    let at = token.stop in
+    [
+      {
+        label = "insert";
+        text = splice text at at (" " ^ inserted);
+        start = at;
+        stop = at;
+      };
+    ]
+
+(** A duplicated token is the one insertion that carries a name from the
+    file: it is the compiler's own text for the token, put back beside it. *)
+let duplication text (tokens : token array) state =
+  let count = Array.length tokens in
+  if count = 0 then []
+  else
+    let token = tokens.(Random.State.int state count) in
+    let at = token.stop in
+    [
+      {
+        label = "duplicate";
+        text = splice text at at (" " ^ token_text text token);
+        start = at;
+        stop = at;
+      };
+    ]
+
