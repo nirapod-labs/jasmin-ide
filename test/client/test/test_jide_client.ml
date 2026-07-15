@@ -237,3 +237,64 @@ let deterministic_output () =
     && first.output
        = "1 result {\"a\":{\"c\":3,\"d\":4},\"b\":1}\ntwo error {\"code\":-32000,\"message\":\"nope\"}\n")
 
+let executable =
+  if Array.length Sys.argv > 1 then Sys.argv.(1)
+  else failwith "the test needs the client executable as its first argument"
+
+let run_binary arguments =
+  let output_path = Filename.temp_file "jide_test_client_cli_out" ".txt" in
+  let error_path = Filename.temp_file "jide_test_client_cli_err" ".txt" in
+  let out = Unix.openfile output_path [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
+  let err = Unix.openfile error_path [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
+  let input = Unix.openfile "/dev/null" [ Unix.O_RDONLY ] 0o600 in
+  let argv = Array.of_list (executable :: arguments) in
+  let pid = Unix.create_process executable argv input out err in
+  List.iter Unix.close [ out; err; input ];
+  let _, status = Unix.waitpid [] pid in
+  let code = match status with Unix.WEXITED code -> code | Unix.WSIGNALED n | Unix.WSTOPPED n -> 128 + n in
+  let outcome =
+    { code; output = read_file output_path; message = read_file error_path }
+  in
+  Sys.remove output_path;
+  Sys.remove error_path;
+  outcome
+
+let command_line () =
+  let session = {|{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}|} in
+  let script = {|{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}|} in
+  with_file session (fun session_file ->
+      with_file script (fun script_file ->
+          let outcome =
+            run_binary
+              [ "--fake-server"; script_file; "--timeout"; "1000"; session_file ]
+          in
+          check "command line (numeric id accepted)"
+            (outcome.code = 0 && outcome.output = "1 result {\"capabilities\":{}}\n"
+            && outcome.message = "");
+          let slow = {|#sleep 5000
+
+{"jsonrpc":"2.0","id":1,"result":null}|} in
+          with_file slow (fun slow_file ->
+              let outcome =
+                run_binary [ "--fake-server"; slow_file; "--timeout"; "120"; session_file ]
+              in
+              check "command line (timeout reported)"
+                (outcome.code = 1 && outcome.output = "" && outcome.message <> ""))))
+
+let () =
+  numeric_id ();
+  string_id ();
+  notification_is_not_answered ();
+  error_reply ();
+  nested_key_sorting ();
+  timeout ();
+  malformed_content_length ();
+  framing_details ();
+  session_file_errors ();
+  end_of_input ();
+  server_notification ();
+  expect_timeout ();
+  deterministic_output ();
+  command_line ();
+  Printf.printf "%d failure(s)\n%!" !failures;
+  Stdlib.exit (if !failures = 0 then 0 else 1)
