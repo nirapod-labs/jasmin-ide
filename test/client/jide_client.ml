@@ -20,6 +20,11 @@ let is_request = function
     | Some _ -> true)
   | _ -> false
 
+(* The four exit codes of the card, and nothing else: 0 every reply arrived,
+   1 a timeout, 2 anything the client cannot accept (a malformed frame, a
+   reply that is not JSON-RPC, a malformed session or script file, a usage
+   error, or a reply where the session forbade one), 3 the server left
+   before replying. *)
 let code_of_error = function
   | Jide_framing.Timeout -> 1
   | Jide_framing.End_of_input -> 3
@@ -72,7 +77,11 @@ let run ~out ~transport ~timeout_ms steps =
       match transport.recv ~timeout_ms:milliseconds with
       | Error Jide_framing.Timeout -> go rest
       | Error error -> Error (error_failure error)
-      | Ok body -> Error (failure 4 ("a reply arrived where a timeout was expected: " ^ body)))
+      (* A message where the session promised silence breaks the session's
+         contract, so it is reported as a malformed input (2). The card has
+         no fifth code, and reusing 1 would read as a timeout that did not
+         happen. *)
+      | Ok body -> Error (failure 2 ("a reply arrived where a timeout was expected: " ^ body)))
   in
   go steps
 

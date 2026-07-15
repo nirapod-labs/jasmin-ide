@@ -38,3 +38,42 @@ A message with an `id` that is not `null` is a request: the client waits for
 its reply. A message without one is a notification, and the client never
 waits for a reply to it.
 
+## Output
+
+One line per message, in arrival order:
+
+```
+<id> <method-or-kind> <json>
+```
+
+The id is printed as the server sent it (a string without its quotes), or
+`-` when the message carries no id. For a reply, the kind is `result` or
+`error` and the JSON is the `result` or the `error` object; an error
+therefore prints its code and message. For a notification sent by the server
+while a reply is outstanding, the kind is the method name and the JSON is its
+`params`; reading goes on until the reply itself arrives. Every JSON is
+printed with object keys sorted lexicographically at every depth and no
+spaces. The same session always prints the same bytes. A request sent by the
+server is printed the same way and is not answered: the client is a driver
+for replies, not an editor.
+
+## The fake server
+
+`--fake-server` answers the session from a script file with the same block
+format, so the client's own framing and normalisation are tested without a
+server. Each request that arrives consumes the next step of the script:
+
+- a JSON message is sent back, framed;
+- `#sleep <ms>` delays the answer, which is how a timeout is provoked;
+- `#close` closes the fake server's output, which is how "the server exited
+  before replying" is provoked;
+- a script that runs out leaves the request unanswered.
+
+`#expect-timeout` belongs to the client and is refused in a script.
+
+## Layout
+
+`jide_framing` writes and reads the frames, `jide_session` parses session and
+script files, `jide_normalise` sorts keys and formats a reply line,
+`jide_client` runs a session over a transport, `jide_fake` is the scripted
+server, and `jide_test_client.ml` is the command line.

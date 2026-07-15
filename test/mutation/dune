@@ -1,0 +1,15 @@
+(library
+ (name jide_mutation)
+ (wrapped false)
+ (modules jide_mutation)
+ (libraries jide_jasmin jide_lang jasmin unix))
+
+(executable
+ (name mutation_main)
+ (modules mutation_main)
+ (libraries jide_mutation unix))
+
+(test
+ (name test_mutation)
+ (modules test_mutation)
+ (libraries jide_mutation unix))

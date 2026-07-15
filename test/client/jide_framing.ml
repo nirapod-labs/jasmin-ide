@@ -112,6 +112,10 @@ let read_exact reader ~deadline count =
   in
   loop 0
 
+(* A body larger than this is refused before it is read, so a broken or
+   hostile server cannot make the client allocate an arbitrary buffer. *)
+let max_body_bytes = 8 * 1024 * 1024
+
 (* "Content-Length: 12" gives [Ok (Some 12)]; any other header [Ok None]. *)
 let content_length line =
   match String.index_opt line ':' with
@@ -122,8 +126,10 @@ let content_length line =
     if String.lowercase_ascii name <> "content-length" then Ok None
     else begin
       match int_of_string_opt value with
-      | Some length when length >= 0 -> Ok (Some length)
-      | Some _ | None -> Error (Malformed (Printf.sprintf "bad Content-Length %S" value))
+      | Some length when length >= 0 && length <= max_body_bytes ->
+        Ok (Some length)
+      | Some _ | None ->
+        Error (Malformed (Printf.sprintf "bad Content-Length %S" value))
     end
 
 let read_message reader ~timeout_ms =
