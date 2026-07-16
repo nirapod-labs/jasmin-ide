@@ -96,13 +96,16 @@ let read_line reader ~deadline =
   in
   loop ()
 
+(* The body of a frame whose header arrived in full. An input that ends
+   inside the body is the server leaving before it replied, not a malformed
+   frame: the header said how much was coming and the peer stopped. *)
 let read_exact reader ~deadline count =
   let body = Bytes.create count in
   let rec loop filled =
     if filled = count then Ok (Bytes.to_string body)
     else
       match refill reader ~deadline with
-      | Error End_of_input -> Error (Malformed "the body ends before Content-Length bytes")
+      | Error End_of_input -> Error End_of_input
       | Error error -> Error error
       | Ok () ->
         let take = min (count - filled) (reader.length - reader.offset) in

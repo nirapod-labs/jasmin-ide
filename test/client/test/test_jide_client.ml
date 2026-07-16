@@ -135,8 +135,20 @@ let malformed_content_length () =
 let framing_details () =
   let truncated = "Content-Length: 40\r\n\r\n{}" in
   let reader = Jide_framing.make_reader (Jide_framing.string_input truncated) in
-  check "truncated body is a malformed frame"
+  check "truncated body is the server leaving"
     (match Jide_framing.read_message reader ~timeout_ms:100 with
+    | Error Jide_framing.End_of_input -> true
+    | Error (Jide_framing.Timeout | Jide_framing.Malformed _) | Ok _ -> false);
+  let truncated_run =
+    run_transport ~timeout_ms:1000
+      ~session:{|{"jsonrpc":"2.0","id":16,"method":"shutdown"}|}
+      (raw_transport truncated)
+  in
+  check "truncated body exits 3"
+    (truncated_run.code = 3 && truncated_run.output = "" && truncated_run.message <> "");
+  let cut_header = Jide_framing.make_reader (Jide_framing.string_input "Content-Len") in
+  check "a header cut short is a malformed frame"
+    (match Jide_framing.read_message cut_header ~timeout_ms:100 with
     | Error (Jide_framing.Malformed _) -> true
     | Error (Jide_framing.Timeout | Jide_framing.End_of_input) | Ok _ -> false);
   let body = {|{"jsonrpc":"2.0","id":14,"result":null}|} in
@@ -151,6 +163,42 @@ let framing_details () =
   in
   check "lower-case header name and extra headers are accepted"
     (outcome.code = 0 && outcome.output = "14 result null\n")
+
+(* One frame body of exactly [count] bytes: {"s":"<count - 8 characters>"}. *)
+let body_of_length count =
+  Printf.sprintf {|{"s":"%s"}|} (String.make (count - 8) 'x')
+
+let body_limit () =
+  let limit = Jide_framing.max_body_bytes in
+  let accepted = body_of_length (limit - 1) in
+  let frame =
+    Printf.sprintf "Content-Length: %d\r\n\r\n%s" (String.length accepted) accepted
+  in
+  let reader = Jide_framing.make_reader (Jide_framing.string_input frame) in
+  let read_accepted () =
+    match Jide_framing.read_message reader ~timeout_ms:1000 with
+    | Ok received -> String.length received = limit - 1
+    | Error _ -> false
+  in
+  check "a body just under the limit is accepted"
+    (String.length accepted = limit - 1 && read_accepted ());
+  let over = Printf.sprintf "Content-Length: %d\r\n\r\n" (limit + 1) in
+  let over_reader = Jide_framing.make_reader (Jide_framing.string_input over) in
+  check "a body above the limit is refused before it is read"
+    (match Jide_framing.read_message over_reader ~timeout_ms:1000 with
+    | Error (Jide_framing.Malformed _) -> true
+    | Error (Jide_framing.Timeout | Jide_framing.End_of_input) | Ok _ -> false);
+  check "an absurd Content-Length is refused without allocating"
+    (match Jide_framing.content_length "Content-Length: 999999999999" with
+    | Error (Jide_framing.Malformed _) -> true
+    | Error (Jide_framing.Timeout | Jide_framing.End_of_input) | Ok _ -> false);
+  let over_run =
+    run_transport ~timeout_ms:1000
+      ~session:{|{"jsonrpc":"2.0","id":17,"method":"shutdown"}|}
+      (raw_transport over)
+  in
+  check "a body above the limit exits 2"
+    (over_run.code = 2 && over_run.output = "" && over_run.message <> "")
 
 let session_file_errors () =
   let directive text = match Jide_session.parse_string text with Error _ -> true | Ok _ -> false in

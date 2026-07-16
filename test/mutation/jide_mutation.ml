@@ -191,3 +191,154 @@ let duplication text (tokens : token array) state =
       };
     ]
 
+let swap text (tokens : token array) state =
+  let candidates =
+    List.filter
+      (fun (token : token) ->
+        match token_text text token with ";" | "}" -> true | _ -> false)
+      (Array.to_list tokens)
+  in
+  match candidates with
+  | [] -> []
+  | _ ->
+      let token : token =
+        List.nth candidates (Random.State.int state (List.length candidates))
+      in
+      let from = token_text text token in
+      let to_ = if from = ";" then "}" else ";" in
+      [
+        {
+          label = "swap";
+          text = splice text token.start token.stop to_;
+          start = token.start;
+          stop = token.stop;
+        };
+      ]
+
+(** Four cuts, at a fifth, two fifths, three fifths and four fifths of the
+    tokens, each at the start of a token. *)
+let truncations text (tokens : token array) =
+  let count = Array.length tokens in
+  if count = 0 then []
+  else
+    List.filter_map
+      (fun fifth ->
+        let index = count * fifth / 5 in
+        if index >= count then None
+        else
+          let token : token = tokens.(index) in
+          Some
+            {
+              label = "truncate";
+              text = String.sub text 0 token.start;
+              start = token.start;
+              stop = String.length text;
+            })
+      [ 1; 2; 3; 4 ]
+
+let mutations ~(seed : int) ~(text : string) ~(tokens : token list) :
+    mutation list =
+  let state = Random.State.make [| seed |] in
+  let tokens = Array.of_list tokens in
+  deletion text tokens state
+  @ insertion text tokens state
+  @ duplication text tokens state
+  @ swap text tokens state @ truncations text tokens
+
+let is_single_token (mutation : mutation) = mutation.label <> "truncate"
+
+(* The criteria. *)
+
+let contains ~fragment text =
+  let fragment_length = String.length fragment in
+  let text_length = String.length text in
+  let rec loop index =
+    index + fragment_length <= text_length
+    && (String.sub text index fragment_length = fragment || loop (index + 1))
+  in
+  loop 0
+
+(** The architecture the corpus's own test records choose: a directory named
+    [arm-m4], [armv8a] or [risc-v] selects it and everything else is x86-64. *)
+let arch_of_file path =
+  let name =
+    if contains ~fragment:"/arm-m4/" path then "arm-m4"
+    else if contains ~fragment:"/armv8a/" path then "armv8a"
+    else if contains ~fragment:"/risc-v/" path then "risc-v"
+    else "x86-64"
+  in
+  match Jide_jasmin.Adapter.arch_of_string name with
+  | Some arch -> arch
+  | None -> Option.get (Jide_jasmin.Adapter.arch_of_string "x86-64")
+
+let call_conv = Option.get (Jide_jasmin.Adapter.call_conv_of_string "linux")
+
+exception Timeout
+
+(** The per-case wall clock. It is far above a check of any corpus unit, so a
+    case that reaches it is a hang rather than a slow file. *)
+let timeout = 5.0
+
+let with_timeout seconds f =
+  let off = { Unix.it_interval = 0.0; it_value = 0.0 } in
+  ignore (Unix.setitimer Unix.ITIMER_REAL { off with Unix.it_value = seconds });
+  Fun.protect
+    ~finally:(fun () -> ignore (Unix.setitimer Unix.ITIMER_REAL off))
+    f
+
+let () = Sys.set_signal Sys.sigalrm (Sys.Signal_handle (fun _ -> raise Timeout))
+
+type case = {
+  file : string;
+  label : string;
+  errors : int option;
+      (** the error count, or [None] when the checker raised *)
+  raised : string option;
+  hung : bool;
+  outline : [ `Same | `Different | `Unavailable ] option;
+  single : bool;
+}
+
+type report = {
+  seed : int;
+  files : int;
+  cases : int;
+  raised : (string * string * string) list;  (** file, mutation, message *)
+  hung : (string * string) list;
+  outline_same : int;
+  outline_different : (string * string) list;
+  outline_unavailable : (string * string) list;
+  histogram : (int * int) list;
+  single_histogram : (int * int) list;
+  within_two : int;
+  single_within_two : int;
+  single_over_two : (string * string * int) list;
+  single_cases : int;
+}
+
+(** [touched_item items start] is the outline entry whose region holds the
+    edit, where a region starts at the entry's header and runs to the next
+    header. [None] means the edit sits before the first header, which is a
+    part of no item. *)
+let touched_item (items : item list) ~(start : int) : item option =
+  match items with
+  | [] -> None
+  | first :: _ when start < first.start -> None
+  | _ ->
+      List.fold_left
+        (fun candidate (item : item) ->
+          if item.start <= start then Some item else candidate)
+        None items
+
+let signature (items : item list) =
+  List.map (fun (item : item) -> (item.kind, item.name)) items
+
+let rec is_subsequence (needle : (string * string) list)
+    (haystack : (string * string) list) =
+  match (needle, haystack) with
+  | [], _ -> true
+  | _, [] -> false
+  | entry :: rest, candidate :: candidates ->
+      if entry = candidate then is_subsequence rest candidates
+      else is_subsequence needle candidates
+
