@@ -342,3 +342,71 @@ let rec is_subsequence (needle : (string * string) list)
       if entry = candidate then is_subsequence rest candidates
       else is_subsequence needle candidates
 
+let rec is_prefix (candidate : (string * string) list)
+    (reference : (string * string) list) =
+  match (candidate, reference) with
+  | [], _ -> true
+  | _ :: _, [] -> false
+  | entry :: rest, expected :: expected_rest ->
+      entry = expected && is_prefix rest expected_rest
+
+(** The outline of the original away from the edit, against the outline of the
+    altered text.
+
+    A deletion, an insertion or a duplication edits one item: the item whose
+    region holds the edit is the one the alteration is allowed to change.
+    Every other entry must still be reported by the altered text's outline,
+    with the same kind and the same name, in the same order. An entry may be
+    added or dropped where the edit sits — an edited header still reads as an
+    item when its keyword and its name survive, and stops reading as one when
+    they do not — but nothing away from the edit may go missing or change.
+
+    A cut leaves a prefix: the entries away from the edit are the ones the
+    prefix still holds in full, so the altered outline must be the original's
+    first entries. The entry the cut runs into has no complete header in the
+    prefix and is the one it may lack.
+
+    Two items that share a name are two entries here: the touched item is
+    identified by where its header starts, not by its name. *)
+let outline_away ~(items : item list) ~(mutated : item list option)
+    ~(touched : item option) ~(start : int) ~(cut : bool) =
+  match mutated with
+  | None -> `Unavailable
+  | Some mutated ->
+      if cut then
+        if is_prefix (signature mutated) (signature items) then `Same
+        else `Different
+      else
+        let touched =
+          match touched with
+          | Some item -> Some item
+          | None -> touched_item items ~start
+        in
+        let away =
+          match touched with
+          | None -> items
+          | Some touched ->
+              List.filter
+                (fun (item : item) -> item.start <> touched.start)
+                items
+        in
+        if is_subsequence (signature away) (signature mutated) then `Same
+        else `Different
+
+let errors_of_check ~file ~text =
+  let result =
+    Jide_jasmin.Adapter.check (arch_of_file file) call_conv ~file ~text
+      ~idirs:[]
+  in
+  List.length
+    (List.filter
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         diagnostic.severity = Jide_lang.Diagnostic.Error)
+       result.Jide_jasmin.Adapter.diagnostics)
+
+(* The check runs in a child process, once per case. Two reasons. A check that
+   hangs can then be killed from outside; in this process the library's own
+   handler catches every exception, so a check that never returns would be
+   reported as one parse error instead of as a hang. And a check that dies on
+   a signal is then one case's outcome instead of the harness's death. *)
+

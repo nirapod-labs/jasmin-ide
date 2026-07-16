@@ -57,6 +57,27 @@ spaces. The same session always prints the same bytes. A request sent by the
 server is printed the same way and is not answered: the client is a driver
 for replies, not an editor.
 
+## Exit codes
+
+The client exits with one of four codes, and with nothing else:
+
+| code | meaning |
+| ---- | ------- |
+| 0 | every reply arrived |
+| 1 | a reply did not arrive within the timeout |
+| 2 | a malformed input: a bad `Content-Length`, a header that ends mid-line, a reply that is not JSON-RPC, a `Content-Length` above the body limit, a malformed session or script file, a usage error, or a reply where `#expect-timeout` expected silence |
+| 3 | the server left before replying, including a frame whose body ends before its `Content-Length` bytes have arrived |
+
+A frame whose header arrived in full and whose body then ends is the server
+leaving before it replied (3), not a malformed frame (2): the header said how
+much was coming and the peer stopped. A header cut off before its blank line
+is still a malformed frame.
+
+The body of one frame is capped at 8 MiB (`Jide_framing.max_body_bytes`). A
+`Content-Length` above the cap is refused before a single body byte is
+allocated, so a broken or hostile server cannot make the client allocate an
+arbitrary buffer; the run ends with exit 2.
+
 ## The fake server
 
 `--fake-server` answers the session from a script file with the same block

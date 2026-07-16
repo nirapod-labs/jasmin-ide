@@ -263,7 +263,7 @@ let expect_timeout () =
       ~session:{|#expect-timeout 120|}
       (raw_transport (Jide_framing.encode {|{"jsonrpc":"2.0","id":13,"result":null}|}))
   in
-  check "expect-timeout reports an unexpected reply" (violated.code = 4 && violated.output = "")
+  check "expect-timeout reports an unexpected reply" (violated.code = 2 && violated.output = "")
 
 let deterministic_output () =
   let session =
@@ -319,6 +319,9 @@ let command_line () =
           check "command line (numeric id accepted)"
             (outcome.code = 0 && outcome.output = "1 result {\"capabilities\":{}}\n"
             && outcome.message = "");
+          let no_session = run_binary [ "--fake-server"; script_file ] in
+          check "fake server needs a session file"
+            (no_session.code = 2 && no_session.output = "" && no_session.message <> "");
           let slow = {|#sleep 5000
 
 {"jsonrpc":"2.0","id":1,"result":null}|} in
@@ -329,6 +332,39 @@ let command_line () =
               check "command line (timeout reported)"
                 (outcome.code = 1 && outcome.output = "" && outcome.message <> ""))))
 
+(* The card asks for the binary itself to print the same bytes twice on one
+   session, so both runs are real processes over the same two files. *)
+let binary_twice () =
+  let session =
+    {|{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+
+{"jsonrpc":"2.0","method":"initialized","params":{}}
+
+{"jsonrpc":"2.0","id":"two","method":"server/capabilities"}|}
+  in
+  let script =
+    {|{"jsonrpc":"2.0","id":1,"result":{"b":1,"a":{"d":4,"c":3}}}
+
+{"jsonrpc":"2.0","id":"two","error":{"message":"nope","code":-32000}}|}
+  in
+  with_file session (fun session_file ->
+      with_file script (fun script_file ->
+          let arguments =
+            [ "--fake-server"; script_file; "--timeout"; "1000"; session_file ]
+          in
+          let first = run_binary arguments in
+          let second = run_binary arguments in
+          check "the binary prints the same bytes twice"
+            (first.code = 0 && second.code = 0 && first.output = second.output
+            && first.message = "" && second.message = ""
+            && first.output
+               = "1 result {\"a\":{\"c\":3,\"d\":4},\"b\":1}\ntwo error {\"code\":-32000,\"message\":\"nope\"}\n")))
+
+let usage_error () =
+  let outcome = run_binary [] in
+  check "usage error exits 2"
+    (outcome.code = 2 && outcome.output = "" && outcome.message <> "")
+
 let () =
   numeric_id ();
   string_id ();
@@ -338,11 +374,14 @@ let () =
   timeout ();
   malformed_content_length ();
   framing_details ();
+  body_limit ();
   session_file_errors ();
   end_of_input ();
   server_notification ();
   expect_timeout ();
   deterministic_output ();
   command_line ();
+  binary_twice ();
+  usage_error ();
   Printf.printf "%d failure(s)\n%!" !failures;
   Stdlib.exit (if !failures = 0 then 0 else 1)
