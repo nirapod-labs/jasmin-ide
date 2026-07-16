@@ -410,3 +410,162 @@ let errors_of_check ~file ~text =
    reported as one parse error instead of as a hang. And a check that dies on
    a signal is then one case's outcome instead of the harness's death. *)
 
+type checked = { errors : int option; raised : string option; hung : bool }
+
+let read_all (descriptor : Unix.file_descr) : string =
+  let buffer = Buffer.create 64 in
+  let bytes = Bytes.create 512 in
+  let rec loop () =
+    match Unix.read descriptor bytes 0 (Bytes.length bytes) with
+    | 0 -> Buffer.contents buffer
+    | count ->
+        Buffer.add_subbytes buffer bytes 0 count;
+        loop ()
+    | exception Unix.Unix_error (Unix.EINTR, _, _) -> loop ()
+  in
+  loop ()
+
+let write_all (descriptor : Unix.file_descr) (text : string) : unit =
+  let bytes = Bytes.of_string text in
+  let rec loop offset =
+    if offset < Bytes.length bytes then
+      match
+        Unix.write descriptor bytes offset (Bytes.length bytes - offset)
+      with
+      | count -> loop (offset + count)
+      | exception Unix.Unix_error (Unix.EINTR, _, _) -> loop offset
+  in
+  loop 0
+
+(** What the child reports, one line, so that the message of an exception
+    survives the process boundary. *)
+let report_in_child ~(file : string) ~(text : string) : string =
+  match errors_of_check ~file ~text with
+  | errors -> Printf.sprintf "errors %d" errors
+  | exception exn ->
+      let message =
+        String.map
+          (fun character ->
+            match character with '\n' | '\r' -> ' ' | character -> character)
+          (Printexc.to_string exn)
+      in
+      Printf.sprintf "raised %s" message
+
+let wait_for_child ~(seconds : float) (pid : int) =
+  let wait () =
+    match Unix.waitpid [] pid with
+    | _, status -> `Status status
+    | exception Unix.Unix_error (Unix.EINTR, _, _) -> raise Timeout
+  in
+  match with_timeout seconds wait with
+  | outcome -> outcome
+  | exception Timeout -> (
+      (* The alarm can fire as the child exits, so ask again before calling the
+         case a hang. *)
+      match Unix.waitpid [ Unix.WNOHANG ] pid with
+      | 0, _ ->
+          (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
+          (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ());
+          `Hung
+      | _, status -> `Status status)
+
+let measure ~(file : string) ~(text : string) : checked =
+  let read_end, write_end = Unix.pipe () in
+  match Unix.fork () with
+  | exception Unix.Unix_error (code, _, _) ->
+      Unix.close read_end;
+      Unix.close write_end;
+      {
+        errors = None;
+        raised = Some ("cannot fork: " ^ Unix.error_message code);
+        hung = false;
+      }
+  | 0 ->
+      Unix.close read_end;
+      let line =
+        match report_in_child ~file ~text with
+        | line -> line
+        | exception _ -> "raised an exception with no message"
+      in
+      (try write_all write_end line with Unix.Unix_error _ -> ());
+      (try Unix.close write_end with Unix.Unix_error _ -> ());
+      Unix._exit 0
+  | pid -> (
+      Unix.close write_end;
+      let outcome = wait_for_child ~seconds:timeout pid in
+      let line = try read_all read_end with Unix.Unix_error _ -> "" in
+      Unix.close read_end;
+      let no_report =
+        {
+          errors = None;
+          raised = Some ("the check wrote no report (" ^ String.trim line ^ ")");
+          hung = false;
+        }
+      in
+      match outcome with
+      | `Hung -> { errors = None; raised = None; hung = true }
+      | `Status (Unix.WEXITED 0) -> (
+          match String.split_on_char ' ' (String.trim line) with
+          | [ "errors"; count ] -> (
+              match int_of_string_opt count with
+              | Some errors ->
+                  { errors = Some errors; raised = None; hung = false }
+              | None -> no_report)
+          | "raised" :: message ->
+              {
+                errors = None;
+                raised = Some (String.concat " " message);
+                hung = false;
+              }
+          | _ -> no_report)
+      | `Status (Unix.WEXITED code) ->
+          {
+            errors = None;
+            raised = Some (Printf.sprintf "the check exited %d" code);
+            hung = false;
+          }
+      | `Status (Unix.WSIGNALED signal) ->
+          {
+            errors = None;
+            raised = Some (Printf.sprintf "the check died on signal %d" signal);
+            hung = false;
+          }
+      | `Status (Unix.WSTOPPED signal) ->
+          {
+            errors = None;
+            raised =
+              Some (Printf.sprintf "the check stopped on signal %d" signal);
+            hung = false;
+          })
+
+let check_case ~file ~label ~single ~text ~items ~touched ~start ~cut =
+  let checked = measure ~file ~text in
+  let mutated, _ = Jide_jasmin.Warnings.with_capture (fun () -> outline text) in
+  {
+    file;
+    label;
+    errors = checked.errors;
+    raised = checked.raised;
+    hung = checked.hung;
+    outline = Some (outline_away ~items ~mutated ~touched ~start ~cut);
+    single;
+  }
+
+let histogram (cases : case list) =
+  let table = Hashtbl.create 16 in
+  List.iter
+    (fun (case : case) ->
+      match case.errors with
+      | None -> ()
+      | Some errors ->
+          let previous =
+            match Hashtbl.find_opt table errors with
+            | Some count -> count
+            | None -> 0
+          in
+          Hashtbl.replace table errors (previous + 1))
+    cases;
+  List.sort
+    (fun (a, _) (b, _) -> compare a b)
+    (Hashtbl.fold (fun errors count acc -> (errors, count) :: acc) table [])
+
