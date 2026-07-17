@@ -4,7 +4,6 @@
     protocol types, so the engine stays testable without a protocol. *)
 
 type location = { uri : string; span : Jide_lang.Span.t }
-
 type diagnostic = Jide_lang.Diagnostic.t
 
 type symbol_kind =
@@ -29,7 +28,6 @@ type symbol = {
 }
 
 type markdown = { value : string }
-
 type hover = { span : Jide_lang.Span.t; contents : markdown list }
 
 type completion_kind =
@@ -66,11 +64,8 @@ type signature_help = {
 }
 
 type text_edit = { span : Jide_lang.Span.t; new_text : string }
-
 type workspace_edit = { changes : (string * text_edit list) list }
-
 type highlight_kind = Text_ | Read | Write
-
 type highlight = { span : Jide_lang.Span.t; kind : highlight_kind }
 
 type semantic_token_type =

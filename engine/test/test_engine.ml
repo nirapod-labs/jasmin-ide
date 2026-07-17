@@ -6,7 +6,6 @@ let check name condition =
     Printf.printf "FAIL %s\n" name)
 
 let create () = Jide_engine.Engine.create ()
-
 let uri_of name = "file:///tmp/" ^ name ^ ".jazz"
 
 (* The store's own contract, without the controller in the way: only a
@@ -45,8 +44,10 @@ let test_open_then_change_updates_the_text () =
     ~text:"fn g() -> reg u32 { return 1; }";
   match Jide_engine.Engine.document engine ~uri with
   | Some document ->
-    check "open then change: text" (Jide_engine.Document.text document = "fn g() -> reg u32 { return 1; }");
-    check "open then change: version" (Jide_engine.Document.version document = 3)
+      check "open then change: text"
+        (Jide_engine.Document.text document = "fn g() -> reg u32 { return 1; }");
+      check "open then change: version"
+        (Jide_engine.Document.version document = 3)
   | None -> check "open then change: document kept" false
 
 let test_close_removes_the_document () =
@@ -54,7 +55,8 @@ let test_close_removes_the_document () =
   let uri = uri_of "removed" in
   Jide_engine.Engine.open_document engine ~uri ~version:1 ~text:"fn f()";
   Jide_engine.Engine.close_document engine ~uri;
-  check "close: document removed" (Jide_engine.Engine.document engine ~uri = None);
+  check "close: document removed"
+    (Jide_engine.Engine.document engine ~uri = None);
   check "close: the store is empty" (Jide_engine.Engine.documents engine = [])
 
 let () =

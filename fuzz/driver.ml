@@ -1,0 +1,52 @@
+(** The harness: one child per case, a bounded run, and one line per run.
+
+    Each case runs in a child of its own ([Child.run]) with a wall clock over
+    it, so a case that raises its way out of the library's handler, dies on a
+    signal or never returns is a result that is printed rather than a lost
+    run. The clock a caller sets with [--seconds] bounds the whole run; the
+    case count with [--cases] bounds it exactly, which is how a run is made
+    short in a test and how a failure is replayed. *)
+
+type surface = Both | Text_only | Edit_only
+
+type options = {
+  seconds : float;
+  seed : int;
+  cases : int;
+  corpus : string option;
+  surface : surface;
+}
+
+let default_seconds = 120.0
+let default_seed = 1
+let default_surface = Both
+
+(* A case that outlives this is a hang: a 64 KB unit of the corpus is checked
+   in milliseconds, so ten seconds is two orders of magnitude of room. *)
+let case_timeout = 10.0
+
+let usage =
+  "usage: fuzz [--seconds S] [--seed N] [--cases N] [--surface both|text|edit]\n\
+  \            [--corpus DIR]\n\n\
+   Write source texts (from the corpus when one is given, from the generator\n\
+   otherwise) and check them, and drive the protocol state machine with opens,\n\
+   changes, closes and requests the server does not serve. Every case runs in\n\
+   a child with a wall clock over it.\n\n\
+   options:\n\
+  \  --seconds S    run for S seconds (default: 120)\n\
+  \  --seed N       the seed of the generators (default: 1)\n\
+  \  --cases N      run N cases exactly, whatever the clock says (default: 0,\n\
+  \                 which runs until --seconds is up)\n\
+  \  --surface S    text, edit or both (default: both)\n\
+  \  --corpus DIR   read the .jazz units of DIR as texts to alter\n\
+  \  -h, --help     print this text\n\n\
+   exit status: 0 when every case held, 1 when one did not, and 2 when the\n\
+   command line cannot be used. A case's stream comes from the seed and the\n\
+   case's ordinal, so a failure is replayed with the seed it printed and at\n\
+   least that many cases.\n"
+
+let surface_name = function
+  | Both -> "both"
+  | Text_only -> "text"
+  | Edit_only -> "edit"
+

@@ -44,3 +44,73 @@ let write_all (descriptor : Unix.file_descr) (text : string) : unit =
 
 exception Timeout
 
+let wait_for_child ~(seconds : float) (pid : int) =
+  let off = { Unix.it_interval = 0.0; it_value = 0.0 } in
+  let wait () =
+    ignore
+      (Unix.setitimer Unix.ITIMER_REAL { off with Unix.it_value = seconds });
+    Fun.protect
+      ~finally:(fun () -> ignore (Unix.setitimer Unix.ITIMER_REAL off))
+      (fun () ->
+        match Unix.waitpid [] pid with
+        | _, status -> `Status status
+        | exception Unix.Unix_error (Unix.EINTR, _, _) -> raise Timeout)
+  in
+  match wait () with
+  | outcome -> outcome
+  | exception Timeout -> (
+      (* The alarm can fire as the child exits, so ask again before calling the
+         case a hang. *)
+      match Unix.waitpid [ Unix.WNOHANG ] pid with
+      | 0, _ ->
+          (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
+          (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ());
+          `Hung
+      | _, status -> `Status status)
+
+let () = Sys.set_signal Sys.sigalrm (Sys.Signal_handle (fun _ -> raise Timeout))
+
+(** [run ~timeout case] runs [case] with [timeout] seconds over it. The case
+    returns [""] when it holds, and a one-line description of the first
+    property that does not. *)
+let run ~(timeout : float) (case : unit -> string) : outcome =
+  let read_end, write_end = Unix.pipe () in
+  match Unix.fork () with
+  | exception Unix.Unix_error (code, _, _) ->
+      Unix.close read_end;
+      Unix.close write_end;
+      Crashed ("cannot fork: " ^ Unix.error_message code)
+  | 0 ->
+      Unix.close read_end;
+      let line =
+        match case () with
+        | report -> report
+        | exception exn ->
+            let message =
+              String.map
+                (fun character ->
+                  match character with
+                  | '\n' | '\r' -> ' '
+                  | character -> character)
+                (Printexc.to_string exn)
+            in
+            "raised " ^ message
+      in
+      (try write_all write_end line with Unix.Unix_error _ -> ());
+      (try Unix.close write_end with Unix.Unix_error _ -> ());
+      Unix._exit 0
+  | pid -> (
+      Unix.close write_end;
+      let outcome = wait_for_child ~seconds:timeout pid in
+      let line = try read_all read_end with Unix.Unix_error _ -> "" in
+      Unix.close read_end;
+      match outcome with
+      | `Hung -> Hung
+      | `Status (Unix.WEXITED 0) -> (
+          match String.trim line with "" -> Passed | report -> Failed report)
+      | `Status (Unix.WEXITED code) ->
+          Crashed (Printf.sprintf "the case exited %d" code)
+      | `Status (Unix.WSIGNALED signal) ->
+          Crashed (Printf.sprintf "the case died on signal %d" signal)
+      | `Status (Unix.WSTOPPED signal) ->
+          Crashed (Printf.sprintf "the case stopped on signal %d" signal))
