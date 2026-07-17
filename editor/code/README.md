@@ -18,3 +18,12 @@ separately.
 - Diagnostics, navigation and the other features the language server supports,
   once it is installed.
 
+## Files from other extensions
+
+Two other extensions also claim `.jazz` files. If you have one of them and this
+extension does not highlight your files, add an association:
+
+```json
+"files.associations": { "*.jazz": "jasmin-crypto" }
+```
+
