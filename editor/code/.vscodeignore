@@ -1,0 +1,12 @@
+.artifacts/**
+.vscode/**
+.gitignore
+fixtures/**
+node_modules/**
+scripts/**
+src/**
+tests/**
+esbuild.mjs
+pnpm-lock.yaml
+pnpm-workspace.yaml
+tsconfig.json

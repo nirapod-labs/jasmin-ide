@@ -569,3 +569,129 @@ let histogram (cases : case list) =
     (fun (a, _) (b, _) -> compare a b)
     (Hashtbl.fold (fun errors count acc -> (errors, count) :: acc) table [])
 
+let summarise ~seed ~files (cases : case list) =
+  let raised =
+    List.filter_map
+      (fun (case : case) ->
+        match case.raised with
+        | None -> None
+        | Some message -> Some (case.file, case.label, message))
+      cases
+  in
+  let hung =
+    List.filter_map
+      (fun (case : case) ->
+        if case.hung then Some (case.file, case.label) else None)
+      cases
+  in
+  let outline_same, outline_different, outline_unavailable =
+    List.fold_left
+      (fun (same, different, unavailable) (case : case) ->
+        match case.outline with
+        | Some `Same -> (same + 1, different, unavailable)
+        | Some `Different ->
+            (same, (case.file, case.label) :: different, unavailable)
+        | Some `Unavailable ->
+            (same, different, (case.file, case.label) :: unavailable)
+        | None -> (same, different, unavailable))
+      (0, [], []) cases
+  in
+  let at_most_two (case : case) =
+    match case.errors with Some errors -> errors <= 2 | None -> false
+  in
+  let within_two = List.length (List.filter at_most_two cases) in
+  let single = List.filter (fun (case : case) -> case.single) cases in
+  let single_over_two =
+    List.filter_map
+      (fun (case : case) ->
+        if at_most_two case then None
+        else
+          let errors =
+            match case.errors with Some errors -> errors | None -> -1
+          in
+          Some (case.file, case.label, errors))
+      single
+  in
+  {
+    seed;
+    files;
+    cases = List.length cases;
+    raised;
+    hung;
+    outline_same;
+    outline_different = List.rev outline_different;
+    outline_unavailable = List.rev outline_unavailable;
+    histogram = histogram cases;
+    single_histogram = histogram single;
+    within_two;
+    single_within_two = List.length (List.filter at_most_two single);
+    single_over_two;
+    single_cases = List.length single;
+  }
+
+(** No exception, no hang, every readable outline unchanged, and two errors
+    in at least 95% of the single-token cases. *)
+let passed (report : report) =
+  report.raised = [] && report.hung = []
+  && report.outline_different = []
+  && report.single_cases > 0
+  && report.single_within_two * 100 >= 95 * report.single_cases
+
+let string_of_histogram histogram =
+  String.concat ", "
+    (List.map
+       (fun (errors, count) -> Printf.sprintf "%d:%d" errors count)
+       histogram)
+
+let show label entries =
+  if entries <> [] then (
+    Printf.printf "mutation: %s\n" label;
+    List.filteri (fun index _ -> index < 10) entries
+    |> List.iter (fun entry -> Printf.printf "mutation:   %s\n" entry))
+
+let print_report (report : report) =
+  Printf.printf "mutation: seed %d, %d files, %d cases\n" report.seed
+    report.files report.cases;
+  Printf.printf "mutation: no exception in %d cases, no hang in %d cases\n"
+    (report.cases - List.length report.raised)
+    (report.cases - List.length report.hung);
+  Printf.printf
+    "mutation: outline away from the edit unchanged in %d of %d readable \
+     cases, %d unreadable\n"
+    report.outline_same
+    (report.outline_same + List.length report.outline_different)
+    (List.length report.outline_unavailable);
+  Printf.printf "mutation: at most two errors in %d of %d cases (%.2f%%)\n"
+    report.within_two report.cases
+    (if report.cases = 0 then 0.0
+     else 100.0 *. float_of_int report.within_two /. float_of_int report.cases);
+  Printf.printf
+    "mutation: at most two errors in %d of %d single-token cases (%.2f%%)\n"
+    report.single_within_two report.single_cases
+    (if report.single_cases = 0 then 0.0
+     else
+       100.0
+       *. float_of_int report.single_within_two
+       /. float_of_int report.single_cases);
+  Printf.printf "mutation: error counts (errors:cases): %s\n"
+    (string_of_histogram report.histogram);
+  Printf.printf "mutation: single-token error counts (errors:cases): %s\n"
+    (string_of_histogram report.single_histogram);
+  show "exceptions"
+    (List.map
+       (fun (file, label, message) -> file ^ " " ^ label ^ ": " ^ message)
+       report.raised);
+  show "hangs" (List.map (fun (file, label) -> file ^ " " ^ label) report.hung);
+  show "outline differences"
+    (List.map
+       (fun (file, label) -> file ^ " " ^ label)
+       report.outline_different);
+  show "single-token cases over two errors"
+    (List.map
+       (fun (file, label, errors) ->
+         Printf.sprintf "%s %s: %d errors" file label errors)
+       report.single_over_two);
+  if report.cases = 0 then Printf.printf "mutation: no case ran\n";
+  Printf.printf "mutation: %s\n" (if passed report then "pass" else "fail")
+
+(** The files of a corpus, in a stable order. *)

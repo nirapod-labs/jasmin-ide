@@ -27,3 +27,7 @@ extension does not highlight your files, add an association:
 "files.associations": { "*.jazz": "jasmin-crypto" }
 ```
 
+## Licence
+
+MIT. The grammar is derived from `dsprenkels/vscode-jasmin`, copyright Daan
+Sprenkels, and is credited in `NOTICE.md`.
