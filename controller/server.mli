@@ -14,7 +14,6 @@
     the server serving. *)
 
 type state = Uninitialized | Running | Shutting_down | Exited
-
 type t
 
 val create : log:(string -> unit) -> t
@@ -22,12 +21,12 @@ val state : t -> state
 val exit_code : t -> int
 val exited : t -> bool
 
+val eof_exit_code : t -> int
 (** The code to exit with when the input stream closes: 0 when [shutdown]
     was answered, 1 otherwise (the rules are in the protocol). *)
-val eof_exit_code : t -> int
 
-(** Handle one incoming packet. Returns the packets to write, in order. *)
 val handle_packet : t -> Jide_lsp.Framing.packet -> Jide_lsp.Framing.packet list
+(** Handle one incoming packet. Returns the packets to write, in order. *)
 
-(** The engine, so that tests and the batch checker can read documents. *)
 val engine : t -> Jide_engine.Engine.t
+(** The engine, so that tests and the batch checker can read documents. *)
