@@ -40,7 +40,7 @@ let send server packet = Jide_controller.Server.handle_packet server packet
 let error_code packet =
   match packet with
   | Jsonrpc.Packet.Response { result = Error error; _ } ->
-    Some error.Jsonrpc.Response.Error.code
+      Some error.Jsonrpc.Response.Error.code
   | _ -> None
 
 let result_json packet =
@@ -62,20 +62,28 @@ let initialize server =
   ignore (send server (request ~params:initialize_params 1 "initialize"))
 
 let shutdown server = ignore (send server (request 2 "shutdown"))
-
 let send_exit server = ignore (send server (notification "exit"))
 
 let open_params ~uri ~version ~text =
   `Assoc
-    [ ( "textDocument",
+    [
+      ( "textDocument",
         `Assoc
-          [ ("uri", `String uri); ("languageId", `String "jasmin-crypto");
-            ("version", `Int version); ("text", `String text) ] ) ]
+          [
+            ("uri", `String uri);
+            ("languageId", `String "jasmin-crypto");
+            ("version", `Int version);
+            ("text", `String text);
+          ] );
+    ]
 
 let change_params ~uri ~version ~text =
   `Assoc
-    [ ("textDocument", `Assoc [ ("uri", `String uri); ("version", `Int version) ]);
-      ("contentChanges", `List [ `Assoc [ ("text", `String text) ] ]) ]
+    [
+      ( "textDocument",
+        `Assoc [ ("uri", `String uri); ("version", `Int version) ] );
+      ("contentChanges", `List [ `Assoc [ ("text", `String text) ] ]);
+    ]
 
 let close_params ~uri =
   `Assoc [ ("textDocument", `Assoc [ ("uri", `String uri) ]) ]
@@ -83,13 +91,15 @@ let close_params ~uri =
 let did_open server ~uri ~text =
   ignore
     (send server
-       (notification ~params:(open_params ~uri ~version:1 ~text)
+       (notification
+          ~params:(open_params ~uri ~version:1 ~text)
           "textDocument/didOpen"))
 
 let did_change server ~uri ~version ~text =
   ignore
     (send server
-       (notification ~params:(change_params ~uri ~version ~text)
+       (notification
+          ~params:(change_params ~uri ~version ~text)
           "textDocument/didChange"))
 
 let did_close server ~uri =
@@ -107,29 +117,33 @@ let stored_text server ~uri =
 
 let test_initialize () =
   let server = create () in
-  let replies = send server (request ~params:initialize_params 1 "initialize") in
+  let replies =
+    send server (request ~params:initialize_params 1 "initialize")
+  in
   check "initialize: one reply" (List.length replies = 1);
   match replies with
   | [ reply ] -> (
-    match result_json reply with
-    | Some (`Assoc fields) ->
-      check "initialize: capabilities are exactly full text sync"
-        (List.assoc_opt "capabilities" fields
-        = Some (`Assoc [ ("textDocumentSync", `Int 1) ]));
-      check "initialize: serverInfo names the server"
-        (match List.assoc_opt "serverInfo" fields with
-         | Some (`Assoc info) ->
-           List.assoc_opt "name" info
-           = Some (`String Jide_controller.Version.server_name)
-         | _ -> false)
-    | Some _ -> check "initialize: result is an object" false
-    | None -> check "initialize: result shape" false)
+      match result_json reply with
+      | Some (`Assoc fields) ->
+          check "initialize: capabilities are exactly full text sync"
+            (List.assoc_opt "capabilities" fields
+            = Some (`Assoc [ ("textDocumentSync", `Int 1) ]));
+          check "initialize: serverInfo names the server"
+            (match List.assoc_opt "serverInfo" fields with
+            | Some (`Assoc info) ->
+                List.assoc_opt "name" info
+                = Some (`String Jide_controller.Version.server_name)
+            | _ -> false)
+      | Some _ -> check "initialize: result is an object" false
+      | None -> check "initialize: result shape" false)
   | _ -> check "initialize: reply count" false
 
 let test_second_initialize () =
   let server = create () in
   initialize server;
-  let replies = send server (request ~params:initialize_params 2 "initialize") in
+  let replies =
+    send server (request ~params:initialize_params 2 "initialize")
+  in
   check_single_error "second initialize"
     Jsonrpc.Response.Error.Code.InvalidRequest replies
 
@@ -157,8 +171,9 @@ let test_shutdown_sequence () =
   initialize server;
   let replies = send server (request 2 "shutdown") in
   (match replies with
-   | [ reply ] -> check "shutdown: result is null" (result_json reply = Some `Null)
-   | _ -> check "shutdown: one reply" false);
+  | [ reply ] ->
+      check "shutdown: result is null" (result_json reply = Some `Null)
+  | _ -> check "shutdown: one reply" false);
   check "shutdown: state"
     (Jide_controller.Server.state server = Jide_controller.Server.Shutting_down);
   let replies = send server (notification "exit") in
@@ -183,11 +198,14 @@ let test_exit_before_initialize () =
     (Jide_controller.Server.exit_code server = 1)
 
 let test_cancel_request_is_not_gated () =
-  let cancel = notification ~params:(`Assoc [ ("id", `Int 7) ]) "$/cancelRequest" in
+  let cancel =
+    notification ~params:(`Assoc [ ("id", `Int 7) ]) "$/cancelRequest"
+  in
   let in_state name state server =
     let replies = send server cancel in
     check (name ^ ": no reply") (replies = []);
-    check (name ^ ": state unchanged")
+    check
+      (name ^ ": state unchanged")
       (Jide_controller.Server.state server = state)
   in
   let uninitialized, uninitialized_log = create_logging () in
@@ -211,10 +229,12 @@ let test_cancel_request_is_not_gated () =
   List.iter
     (fun (name, messages) ->
       check (name ^ ": the handler ran") (List.mem "cancel request" !messages))
-    [ ("cancel before initialize", uninitialized_log);
+    [
+      ("cancel before initialize", uninitialized_log);
       ("cancel while running", running_log);
       ("cancel while shutting down", shutting_down_log);
-      ("cancel after exit", exited_log) ]
+      ("cancel after exit", exited_log);
+    ]
 
 let test_shutdown_before_initialize () =
   let server = create () in
@@ -230,11 +250,11 @@ let test_document_sync () =
   check "didOpen: document stored" (document server ~uri <> None);
   did_change server ~uri ~version:2 ~text:"fn g() -> reg u32 { return 1; }";
   (match document server ~uri with
-   | Some document ->
-     check "didChange: version" (Jide_engine.Document.version document = 2);
-     check "didChange: text"
-       (Jide_engine.Document.text document = "fn g() -> reg u32 { return 1; }")
-   | None -> check "didChange: document kept" false);
+  | Some document ->
+      check "didChange: version" (Jide_engine.Document.version document = 2);
+      check "didChange: text"
+        (Jide_engine.Document.text document = "fn g() -> reg u32 { return 1; }")
+  | None -> check "didChange: document kept" false);
   did_close server ~uri;
   check "didClose: document removed" (document server ~uri = None)
 
@@ -245,17 +265,17 @@ let test_multiple_changes_use_the_last () =
   did_open server ~uri ~text:"fn f() -> reg u32 { return 0; }";
   let change =
     `Assoc
-      [ ( "textDocument",
-          `Assoc [ ("uri", `String uri); ("version", `Int 2) ] );
+      [
+        ("textDocument", `Assoc [ ("uri", `String uri); ("version", `Int 2) ]);
         ( "contentChanges",
           `List
-            [ `Assoc [ ("text", `String "fn first() -> reg u32 { return 1; }") ];
-              `Assoc [ ("text", `String "fn last() -> reg u32 { return 2; }") ] ] )
+            [
+              `Assoc [ ("text", `String "fn first() -> reg u32 { return 1; }") ];
+              `Assoc [ ("text", `String "fn last() -> reg u32 { return 2; }") ];
+            ] );
       ]
   in
-  ignore
-    (send server
-       (notification ~params:change "textDocument/didChange"));
+  ignore (send server (notification ~params:change "textDocument/didChange"));
   check "two changes: the last one is applied"
     (stored_text server ~uri = Some "fn last() -> reg u32 { return 2; }")
 
@@ -265,7 +285,8 @@ let test_malformed_params () =
   let bad =
     Jsonrpc.Packet.Request
       (Jsonrpc.Request.create ~id:(`Int 2) ~method_:"textDocument/hover"
-         ~params:(`Assoc [ ("not", `String "a hover") ]) ())
+         ~params:(`Assoc [ ("not", `String "a hover") ])
+         ())
   in
   let replies = send server bad in
   check_single_error "malformed params"
@@ -278,9 +299,10 @@ let test_empty_change_keeps_document () =
   did_open server ~uri ~text:"fn f() -> reg u32 { return 0; }";
   let change =
     `Assoc
-      [ ( "textDocument",
-          `Assoc [ ("uri", `String uri); ("version", `Int 2) ] );
-        ("contentChanges", `List []) ]
+      [
+        ("textDocument", `Assoc [ ("uri", `String uri); ("version", `Int 2) ]);
+        ("contentChanges", `List []);
+      ]
   in
   ignore (send server (notification ~params:change "textDocument/didChange"));
   check "empty change keeps the text"
@@ -293,18 +315,25 @@ let test_ranged_change_ignored () =
   did_open server ~uri ~text:"fn f() -> reg u32 { return 0; }";
   let change =
     `Assoc
-      [ ( "textDocument",
-          `Assoc [ ("uri", `String uri); ("version", `Int 2) ] );
+      [
+        ("textDocument", `Assoc [ ("uri", `String uri); ("version", `Int 2) ]);
         ( "contentChanges",
           `List
-            [ `Assoc
-                [ ( "range",
+            [
+              `Assoc
+                [
+                  ( "range",
                     `Assoc
-                      [ ( "start",
+                      [
+                        ( "start",
                           `Assoc [ ("line", `Int 0); ("character", `Int 0) ] );
                         ( "end",
-                          `Assoc [ ("line", `Int 0); ("character", `Int 5) ] ) ] );
-                  ("text", `String "fn g") ] ] ) ]
+                          `Assoc [ ("line", `Int 0); ("character", `Int 5) ] );
+                      ] );
+                  ("text", `String "fn g");
+                ];
+            ] );
+      ]
   in
   ignore (send server (notification ~params:change "textDocument/didChange"));
   check "ranged change ignored"
@@ -314,13 +343,15 @@ let test_change_for_unopened_document_is_dropped () =
   let server = create () in
   initialize server;
   let unopened = "file:///tmp/never-opened.jazz" in
-  did_change server ~uri:unopened ~version:1 ~text:"fn f() -> reg u32 { return 0; }";
+  did_change server ~uri:unopened ~version:1
+    ~text:"fn f() -> reg u32 { return 0; }";
   check "didChange without didOpen: no document created"
     (document server ~uri:unopened = None);
   let closed = "file:///tmp/closed.jazz" in
   did_open server ~uri:closed ~text:"fn f() -> reg u32 { return 0; }";
   did_close server ~uri:closed;
-  did_change server ~uri:closed ~version:2 ~text:"fn g() -> reg u32 { return 1; }";
+  did_change server ~uri:closed ~version:2
+    ~text:"fn g() -> reg u32 { return 1; }";
   check "didChange after didClose: the document stays closed"
     (document server ~uri:closed = None)
 
@@ -328,8 +359,7 @@ let test_notification_before_initialize_is_dropped () =
   let server = create () in
   let uri = "file:///tmp/before.jazz" in
   did_open server ~uri ~text:"fn f() -> reg u32 { return 0; }";
-  check "didOpen before initialize: no document"
-    (document server ~uri = None);
+  check "didOpen before initialize: no document" (document server ~uri = None);
   check "didOpen before initialize: still uninitialized"
     (Jide_controller.Server.state server = Jide_controller.Server.Uninitialized)
 
@@ -360,7 +390,8 @@ let test_notification_parse_error_names_the_state () =
   send_exit server;
   let replies =
     send server
-      (notification ~params:(`Assoc [ ("textDocument", `Assoc []) ])
+      (notification
+         ~params:(`Assoc [ ("textDocument", `Assoc []) ])
          "textDocument/didOpen")
   in
   check "parse error after exit: no reply" (replies = []);
