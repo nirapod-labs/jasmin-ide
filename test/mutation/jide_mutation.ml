@@ -695,3 +695,69 @@ let print_report (report : report) =
   Printf.printf "mutation: %s\n" (if passed report then "pass" else "fail")
 
 (** The files of a corpus, in a stable order. *)
+let files_of_corpus corpus =
+  let rec walk acc directory =
+    match Sys.readdir directory with
+    | exception Sys_error _ -> acc
+    | entries ->
+        Array.fold_left
+          (fun acc entry ->
+            let path = Filename.concat directory entry in
+            if Sys.is_directory path then walk acc path
+            else if Filename.check_suffix path ".jazz" then path :: acc
+            else acc)
+          acc entries
+  in
+  List.sort compare (walk [] corpus)
+
+let read_file path = In_channel.with_open_bin path In_channel.input_all
+
+(** Run the harness over the first [limit] files of [corpus]. The run happens
+    with [corpus] as the working directory, so a [require] inside a file
+    resolves the way it does for the batch checker, which is always started
+    from the corpus root.
+
+    A file whose own text the lexer refuses has no token to alter and
+    contributes no case. An altered text the lexer refuses is still a case:
+    the checker sees it, and its outline is reported as unreadable. *)
+let run ?(limit = max_int) ?(seed = 1) ~(corpus : string) () : report =
+  match Sys.chdir corpus with
+  | exception Sys_error _ -> summarise ~seed ~files:0 []
+  | () ->
+      let previous = Sys.getcwd () in
+      Fun.protect
+        ~finally:(fun () -> Sys.chdir previous)
+        (fun () ->
+          let files =
+            List.filteri (fun index _ -> index < limit) (files_of_corpus ".")
+          in
+          let cases = ref [] in
+          let processed = ref 0 in
+          List.iter
+            (fun file ->
+              match read_file file with
+              | exception Sys_error _ -> ()
+              | text -> (
+                  incr processed;
+                  match
+                    Jide_jasmin.Warnings.with_capture (fun () -> lex text)
+                  with
+                  | None, _ -> ()
+                  | Some tokens, _ ->
+                      let items = outline_of_tokens tokens in
+                      List.iter
+                        (fun mutation ->
+                          let touched =
+                            touched_item items ~start:mutation.start
+                          in
+                          let case =
+                            check_case ~file ~label:mutation.label
+                              ~single:(is_single_token mutation)
+                              ~text:mutation.text ~items ~touched
+                              ~start:mutation.start
+                              ~cut:(mutation.label = "truncate")
+                          in
+                          cases := case :: !cases)
+                        (mutations ~seed ~text ~tokens)))
+            files;
+          summarise ~seed ~files:!processed (List.rev !cases))
