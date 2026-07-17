@@ -50,3 +50,69 @@ let surface_name = function
   | Text_only -> "text"
   | Edit_only -> "edit"
 
+let parse (arguments : string list) : (options, string) result =
+  let seconds = ref default_seconds in
+  let seed = ref default_seed in
+  let cases = ref 0 in
+  let corpus = ref None in
+  let surface = ref default_surface in
+  let problem = ref None in
+  let number value =
+    match float_of_string_opt value with
+    | Some number when number >= 0.0 -> Some number
+    | _ -> None
+  in
+  let rec walk = function
+    | [] -> ()
+    | ("-h" | "--help") :: _ -> problem := Some ""
+    | "--seconds" :: value :: rest -> (
+        match number value with
+        | Some number ->
+            seconds := number;
+            walk rest
+        | None -> problem := Some ("--seconds takes a number, not " ^ value))
+    | "--seed" :: value :: rest -> (
+        match int_of_string_opt value with
+        | Some number ->
+            seed := number;
+            walk rest
+        | None -> problem := Some ("--seed takes an integer, not " ^ value))
+    | "--cases" :: value :: rest -> (
+        match int_of_string_opt value with
+        | Some number when number >= 0 ->
+            cases := number;
+            walk rest
+        | _ -> problem := Some ("--cases takes a count, not " ^ value))
+    | "--corpus" :: value :: rest ->
+        corpus := Some value;
+        walk rest
+    | "--surface" :: value :: rest -> (
+        match value with
+        | "both" ->
+            surface := Both;
+            walk rest
+        | "text" ->
+            surface := Text_only;
+            walk rest
+        | "edit" ->
+            surface := Edit_only;
+            walk rest
+        | _ ->
+            problem := Some ("--surface takes both, text or edit, not " ^ value)
+        )
+    | argument :: _ -> problem := Some ("unknown argument " ^ argument)
+  in
+  walk arguments;
+  match !problem with
+  | Some "" -> Error ""
+  | Some message -> Error message
+  | None ->
+      Ok
+        {
+          seconds = !seconds;
+          seed = !seed;
+          cases = !cases;
+          corpus = !corpus;
+          surface = !surface;
+        }
+
