@@ -22,8 +22,7 @@ let lines t = t.lines
 let byte_of_position t position =
   Jide_lang.Line_index.byte_of_position t.lines position
 
-let position_of_byte t byte =
-  Jide_lang.Line_index.position_of_byte t.lines byte
+let position_of_byte t byte = Jide_lang.Line_index.position_of_byte t.lines byte
 
 let span_of_bytes t ~start_byte ~end_byte =
   let length = String.length t.text in
