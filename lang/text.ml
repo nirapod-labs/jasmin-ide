@@ -21,7 +21,7 @@ let utf8_byte_length text start stop =
    when the bytes there are not one. *)
 let sequence_width text pos =
   let length = String.length text in
-  let is_continuation code = (code land 0xC0) = 0x80 in
+  let is_continuation code = code land 0xC0 = 0x80 in
   let byte index = Char.code (String.get text index) in
   if pos >= length then 0
   else
@@ -35,12 +35,10 @@ let sequence_width text pos =
       else
         let b1 = byte (pos + 1) in
         let b2 = byte (pos + 2) in
-        if not (is_continuation b1) || not (is_continuation b2) then 0
+        if (not (is_continuation b1)) || not (is_continuation b2) then 0
         else
           let code_point =
-            ((b0 land 0x0F) lsl 12)
-            lor ((b1 land 0x3F) lsl 6)
-            lor (b2 land 0x3F)
+            ((b0 land 0x0F) lsl 12) lor ((b1 land 0x3F) lsl 6) lor (b2 land 0x3F)
           in
           if code_point < 0x800 then 0
           else if code_point >= 0xD800 && code_point <= 0xDFFF then 0
@@ -52,8 +50,8 @@ let sequence_width text pos =
         let b2 = byte (pos + 2) in
         let b3 = byte (pos + 3) in
         if
-          not (is_continuation b1)
-          || not (is_continuation b2)
+          (not (is_continuation b1))
+          || (not (is_continuation b2))
           || not (is_continuation b3)
         then 0
         else

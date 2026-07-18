@@ -1,0 +1,28 @@
+(library
+ (name jide_fuzz)
+ (modules child gen text edit driver)
+ (libraries
+  jide_lang
+  jide_engine
+  jide_jasmin
+  jide_controller
+  jide_lsp
+  jsonrpc
+  yojson
+  unix))
+
+(executable
+ (name fuzz_main)
+ (modules fuzz_main)
+ (libraries jide_fuzz unix))
+
+(test
+ (name test_fuzz)
+ (modules test_fuzz)
+ (libraries jide_fuzz jide_engine jide_lang unix))
+
+(rule
+ (alias runtest)
+ (deps test_fuzz.sh)
+ (action
+  (run sh test_fuzz.sh %{exe:fuzz_main.exe})))

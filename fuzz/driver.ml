@@ -154,3 +154,67 @@ let report_failure ~(options : options) ~(case : int) ~(report : string) =
   Printf.printf "fuzz: replay with --seed %d --cases %d\n%!" options.seed
     (case + 1)
 
+let run (options : options) : int =
+  let corpus =
+    match options.corpus with
+    | Some directory -> Gen.corpus directory
+    | None -> [||]
+  in
+  let start = Unix.gettimeofday () in
+  let deadline = start +. options.seconds in
+  (match options.corpus with
+  | Some directory ->
+      Printf.printf "fuzz: seed %d, surfaces %s, %d corpus texts from %s\n%!"
+        options.seed
+        (surface_name options.surface)
+        (Array.length corpus) directory;
+      if Array.length corpus = 0 then
+        Printf.printf
+          "fuzz: the corpus holds no .jazz unit; texts are generated\n%!"
+  | None ->
+      Printf.printf "fuzz: seed %d, surfaces %s, generated texts\n%!"
+        options.seed
+        (surface_name options.surface));
+  let heartbeat = ref start in
+  let rec loop case =
+    let now = Unix.gettimeofday () in
+    let finished =
+      if options.cases > 0 then case >= options.cases else now >= deadline
+    in
+    if finished then case
+    else
+      let report = run_case ~options ~corpus ~case in
+      if not (String.equal report "") then (
+        report_failure ~options ~case ~report;
+        exit 1);
+      if now -. !heartbeat >= 5.0 then (
+        Printf.printf "fuzz: %d cases, %.0f s\n%!" case (now -. start);
+        heartbeat := now);
+      loop (case + 1)
+  in
+  let cases = loop 0 in
+  let elapsed = Unix.gettimeofday () -. start in
+  let per_surface =
+    match options.surface with
+    | Both -> (cases, cases)
+    | Text_only -> (cases, 0)
+    | Edit_only -> (0, cases)
+  in
+  Printf.printf
+    "fuzz: seed %d, surfaces %s, %d cases (text %d, edit %d), 0 failures, %.1fs\n\
+     %!"
+    options.seed
+    (surface_name options.surface)
+    cases (fst per_surface) (snd per_surface) elapsed;
+  0
+
+let main (argv : string list) : int =
+  match parse argv with
+  | Error "" ->
+      print_string usage;
+      2
+  | Error message ->
+      Printf.printf "fuzz: %s\n" message;
+      print_string usage;
+      2
+  | Ok options -> run options

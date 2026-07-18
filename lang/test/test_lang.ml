@@ -15,7 +15,6 @@ let astral = "\xF0\x9D\x94\xB8"
 
 (* A UTF-8 byte-order mark. *)
 let bom = "\xEF\xBB\xBF"
-
 let failures = ref 0
 let tests = ref 0
 let current = ref ""
@@ -269,8 +268,7 @@ let span_containment_and_merging () =
   check_bool "touching spans do not overlap" (not (Span.overlaps a d));
   check_bool "touching spans do not overlap, the other way"
     (not (Span.overlaps d a));
-  check_bool "an empty span overlaps nothing"
-    (not (Span.overlaps (span 4 4) a));
+  check_bool "an empty span overlaps nothing" (not (Span.overlaps (span 4 4) a));
   check_bool "an empty span inside another overlaps nothing"
     (not (Span.overlaps (span 4 4) (span 0 10)));
   check_bool "a reversed span overlaps nothing"
@@ -300,8 +298,8 @@ let diagnostic_fields () =
   check_int "related count" 1 (List.length diagnostic.related);
   (match diagnostic.related with
   | [ (place, message) ] ->
-    check_span "related span" (span 10 12) place;
-    check_string "related message" "declared here" message
+      check_span "related span" (span 10 12) place;
+      check_string "related message" "declared here" message
   | _ -> fail "related should hold one entry");
   let bare = Diagnostic.make ~severity:Diagnostic.Error place "boom" in
   check_bool "code defaults to none" (bare.code = None);
@@ -344,7 +342,8 @@ let file_uri_with_non_ascii () =
   let from_path = Uri.of_path ("/tmp/" ^ e_acute ^ " x") in
   check_string "a path is encoded" "file:///tmp/%C3%A9%20x"
     (Uri.to_string from_path);
-  check_path "a path is decoded again" ("/tmp/" ^ e_acute ^ " x")
+  check_path "a path is decoded again"
+    ("/tmp/" ^ e_acute ^ " x")
     (Uri.path from_path);
   check_bool "the scheme is case insensitive"
     (Uri.equal (Uri.of_string "FILE:///a") (Uri.of_string "file:///a"));
@@ -419,14 +418,11 @@ let text_measurements () =
   check_bool "past the last code point is not utf8"
     (not (Text.is_utf8 "\xF5\x80\x80\x80"));
   check_bool "a mark is utf8" (Text.is_utf8 bom);
-  check_int "byte length" 5
-    (Text.utf8_byte_length ("a" ^ e_acute ^ euro) 0 5);
+  check_int "byte length" 5 (Text.utf8_byte_length ("a" ^ e_acute ^ euro) 0 5);
   check_int "byte length clamps the end" 6
     (Text.utf8_byte_length ("a" ^ e_acute ^ euro) 0 99);
-  check_int "byte length clamps the start" 0
-    (Text.utf8_byte_length "abc" 9 4);
-  check_int "byte length of an empty range" 0
-    (Text.utf8_byte_length "abc" 2 2)
+  check_int "byte length clamps the start" 0 (Text.utf8_byte_length "abc" 9 4);
+  check_int "byte length of an empty range" 0 (Text.utf8_byte_length "abc" 2 2)
 
 (* Every byte maps to a position that maps back to the start of its
    character, and that position maps to itself again. *)
@@ -472,8 +468,7 @@ let () =
     last_line_without_trailing_newline;
   test "text measurements" text_measurements;
   test "position round trip" position_round_trip;
-  if !failures > 0 then begin
+  if !failures > 0 then (
     Printf.printf "\n%d tests, %d failed checks\n" !tests !failures;
-    exit 1
-  end
+    exit 1)
   else Printf.printf "\n%d tests, no failed checks\n" !tests

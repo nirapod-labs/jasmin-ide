@@ -1,20 +1,21 @@
 {
-  "name": "jasmin-crypto-vscode",
-  "displayName": "Jasmin Crypto",
-  "description": "Community-maintained syntax highlighting for Jasmin (.jazz and .jinc).",
+  "name": "jasmin-ide",
+  "displayName": "Jasmin IDE",
+  "description": "Jasmin language support: syntax highlighting and the Jasmin language server.",
   "version": "0.1.0",
   "publisher": "nirapod-labs",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/nirapod-labs/jasmin-crypto-vscode.git"
+    "url": "https://github.com/nirapod-labs/jasmin-ide.git",
+    "directory": "editor/code"
   },
   "bugs": {
-    "url": "https://github.com/nirapod-labs/jasmin-crypto-vscode/issues"
+    "url": "https://github.com/nirapod-labs/jasmin-ide/issues"
   },
-  "homepage": "https://github.com/nirapod-labs/jasmin-crypto-vscode#readme",
+  "homepage": "https://github.com/nirapod-labs/jasmin-ide/tree/main/editor/code#readme",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.91.0"
   },
   "categories": [
     "Programming Languages"
@@ -22,15 +23,11 @@
   "keywords": [
     "jasmin",
     "cryptography",
-    "syntax-highlighting"
+    "language-server"
   ],
-  "files": [
-    "syntaxes/**",
-    "language-configuration.json",
-    "package.json",
-    "README.md",
-    "LICENSE",
-    "NOTICE.md"
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:jasmin-crypto"
   ],
   "contributes": {
     "languages": [
@@ -53,16 +50,86 @@
         "scopeName": "source.jasmin.crypto",
         "path": "./syntaxes/jasmin.tmLanguage.json"
       }
-    ]
+    ],
+    "commands": [
+      {
+        "command": "jasminIde.restartServer",
+        "title": "Restart server",
+        "category": "Jasmin"
+      },
+      {
+        "command": "jasminIde.showServerLog",
+        "title": "Show server log",
+        "category": "Jasmin"
+      }
+    ],
+    "configuration": {
+      "title": "Jasmin IDE",
+      "properties": {
+        "jasminIde.server.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to the `jasmin-lsp` executable. When it is empty, the extension looks for `server/jasmin-lsp` inside its own installation and then for `jasmin-lsp` on `PATH`."
+        },
+        "jasminIde.server.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Additional arguments passed to the language server."
+        },
+        "jasminIde.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace the messages between the client and the server in the Jasmin IDE output channel."
+        },
+        "jasminIde.diagnostics.delay": {
+          "type": "number",
+          "default": 250,
+          "minimum": 50,
+          "maximum": 1000,
+          "description": "Delay in milliseconds before the server checks a file again after a change."
+        },
+        "jasminIde.arch": {
+          "type": "string",
+          "default": "x86-64",
+          "markdownDescription": "Target architecture used when the workspace has no `jasmin-project.json`."
+        },
+        "jasminIde.include": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "markdownDescription": "Named include paths, as a map from name to directory, used when the workspace has no `jasmin-project.json`. Relative paths are resolved against the workspace folder."
+        }
+      }
+    }
   },
   "scripts": {
     "check": "node scripts/validate-json.mjs",
     "test": "node --test tests/*.test.mjs",
+    "compile": "tsc --noEmit",
+    "bundle": "node esbuild.mjs",
     "package:check": "node scripts/package-check.mjs",
-    "validate": "pnpm run check && pnpm run test && pnpm run package:check"
+    "validate": "pnpm run check && pnpm run test && pnpm run compile && pnpm run bundle && pnpm run package:check",
+    "vscode:prepublish": "pnpm run bundle"
+  },
+  "dependencies": {
+    "vscode-languageclient": "11.0.0"
   },
   "devDependencies": {
-    "@vscode/vsce": "^3.7.1",
+    "@types/node": "^20.19.43",
+    "@types/vscode": "~1.91.0",
+    "@vscode/vsce": "^4.1.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
     "vscode-oniguruma": "^2.0.1",
     "vscode-textmate": "^9.2.0"
   },
