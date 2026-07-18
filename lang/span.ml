@@ -1,7 +1,6 @@
 type t = { start_byte : int; end_byte : int }
 
 let make ~start_byte ~end_byte = { start_byte; end_byte }
-
 let is_empty span = span.end_byte <= span.start_byte
 
 let compare a b =
@@ -11,7 +10,8 @@ let compare a b =
 let contains span ~byte = byte >= span.start_byte && byte < span.end_byte
 
 let overlaps a b =
-  (not (is_empty a)) && (not (is_empty b))
+  (not (is_empty a))
+  && (not (is_empty b))
   && a.start_byte < b.end_byte && b.start_byte < a.end_byte
 
 let merge a b =

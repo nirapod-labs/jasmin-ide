@@ -9,15 +9,13 @@ let line_starts text =
   let starts = Array.make !count 0 in
   let next = ref 1 in
   for i = 0 to length - 1 do
-    if String.get text i = '\n' then begin
+    if String.get text i = '\n' then (
       starts.(!next) <- i + 1;
-      incr next
-    end
+      incr next)
   done;
   starts
 
 let create text = { text; starts = line_starts text }
-
 let line_count index = Array.length index.starts
 
 let clamp_line index line =
@@ -41,7 +39,7 @@ let line_end index line =
    code unit, so the walk always moves forward and never fails. *)
 let char_width text pos =
   let length = String.length text in
-  let is_continuation code = (code land 0xC0) = 0x80 in
+  let is_continuation code = code land 0xC0 = 0x80 in
   if pos >= length then (1, 1)
   else
     let b0 = Char.code (String.get text pos) in
@@ -57,12 +55,10 @@ let char_width text pos =
       else
         let b1 = Char.code (String.get text (pos + 1)) in
         let b2 = Char.code (String.get text (pos + 2)) in
-        if not (is_continuation b1) || not (is_continuation b2) then (1, 1)
+        if (not (is_continuation b1)) || not (is_continuation b2) then (1, 1)
         else
           let code_point =
-            ((b0 land 0x0F) lsl 12)
-            lor ((b1 land 0x3F) lsl 6)
-            lor (b2 land 0x3F)
+            ((b0 land 0x0F) lsl 12) lor ((b1 land 0x3F) lsl 6) lor (b2 land 0x3F)
           in
           if code_point < 0x800 then (1, 1)
           else if code_point >= 0xD800 && code_point <= 0xDFFF then (1, 1)
@@ -74,8 +70,8 @@ let char_width text pos =
         let b2 = Char.code (String.get text (pos + 2)) in
         let b3 = Char.code (String.get text (pos + 3)) in
         if
-          not (is_continuation b1)
-          || not (is_continuation b2)
+          (not (is_continuation b1))
+          || (not (is_continuation b2))
           || not (is_continuation b3)
         then (1, 1)
         else
@@ -105,8 +101,7 @@ let line_of_byte index byte =
   let high = ref (Array.length index.starts - 1) in
   while !low < !high do
     let middle = (!low + !high + 1) / 2 in
-    if index.starts.(middle) <= byte then low := middle
-    else high := middle - 1
+    if index.starts.(middle) <= byte then low := middle else high := middle - 1
   done;
   !low
 

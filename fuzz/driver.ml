@@ -116,3 +116,41 @@ let parse (arguments : string list) : (options, string) result =
           surface = !surface;
         }
 
+let surfaces = function
+  | Both -> [ Gen.Text; Gen.Edit ]
+  | Text_only -> [ Gen.Text ]
+  | Edit_only -> [ Gen.Edit ]
+
+let surface_label = function Gen.Text -> "text" | Gen.Edit -> "edit"
+
+let run_case ~(options : options) ~(corpus : string array) ~(case : int) :
+    string =
+  let work () =
+    let rec first = function
+      | [] -> ""
+      | (surface : Gen.surface) :: rest -> (
+          let st = Gen.make ~seed:options.seed ~surface ~case in
+          let report =
+            match surface with
+            | Gen.Text -> Text.case ~corpus st
+            | Gen.Edit -> Edit.case ~corpus st
+          in
+          match report with
+          | "" -> first rest
+          | report -> Printf.sprintf "%s: %s" (surface_label surface) report)
+    in
+    first (surfaces options.surface)
+  in
+  match Child.run ~timeout:case_timeout work with
+  | Child.Passed -> ""
+  | Child.Failed report -> report
+  | Child.Hung ->
+      Printf.sprintf "the case outlived the %.0f s clock" case_timeout
+  | Child.Crashed report -> report
+
+let report_failure ~(options : options) ~(case : int) ~(report : string) =
+  Printf.printf "fuzz: FAIL seed %d case %d\nfuzz: %s\n" options.seed case
+    report;
+  Printf.printf "fuzz: replay with --seed %d --cases %d\n%!" options.seed
+    (case + 1)
+
