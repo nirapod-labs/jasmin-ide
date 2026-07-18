@@ -17,9 +17,7 @@ let scheme_end text =
   in
   if length = 0 then None
   else
-    match String.get text 0 with
-    | 'a' .. 'z' | 'A' .. 'Z' -> scan 1
-    | _ -> None
+    match String.get text 0 with 'a' .. 'z' | 'A' .. 'Z' -> scan 1 | _ -> None
 
 let hex_value c =
   match c with
@@ -36,18 +34,15 @@ let decode text =
     else if Char.equal (String.get text index) '%' && index + 2 < length then
       let high = hex_value (String.get text (index + 1)) in
       let low = hex_value (String.get text (index + 2)) in
-      if high < 0 || low < 0 then begin
+      if high < 0 || low < 0 then (
         Buffer.add_char buffer (String.get text index);
-        go (index + 1)
-      end
-      else begin
+        go (index + 1))
+      else (
         Buffer.add_char buffer (Char.chr ((high * 16) + low));
-        go (index + 3)
-      end
-    else begin
+        go (index + 3))
+    else (
       Buffer.add_char buffer (String.get text index);
-      go (index + 1)
-    end
+      go (index + 1))
   in
   go 0;
   Buffer.contents buffer
@@ -62,10 +57,9 @@ let encode text =
   String.iter
     (fun c ->
       if is_unreserved c || Char.equal c '/' then Buffer.add_char buffer c
-      else begin
+      else (
         Buffer.add_string buffer "%";
-        Buffer.add_string buffer (Printf.sprintf "%02X" (Char.code c))
-      end)
+        Buffer.add_string buffer (Printf.sprintf "%02X" (Char.code c))))
     text;
   Buffer.contents buffer
 
@@ -87,31 +81,31 @@ let of_string text =
   match scheme_end text with
   | None -> { scheme = ""; authority = None; path = text }
   | Some colon ->
-    let scheme = String.lowercase_ascii (String.sub text 0 colon) in
-    let start = colon + 1 in
-    let length = String.length text in
-    if
-      start + 1 < length
-      && Char.equal (String.get text start) '/'
-      && Char.equal (String.get text (start + 1)) '/'
-    then begin
-      let authority_start = start + 2 in
-      let authority_stop = stop_at text authority_start is_authority_end in
-      let path_stop = stop_at text authority_stop is_path_end in
-      let authority =
-        String.sub text authority_start (authority_stop - authority_start)
-      in
-      let path = String.sub text authority_stop (path_stop - authority_stop) in
-      { scheme; authority = Some authority; path = decode path }
-    end
-    else begin
-      let path_stop = stop_at text start is_path_end in
-      {
-        scheme;
-        authority = None;
-        path = decode (String.sub text start (path_stop - start));
-      }
-    end
+      let scheme = String.lowercase_ascii (String.sub text 0 colon) in
+      let start = colon + 1 in
+      let length = String.length text in
+      if
+        start + 1 < length
+        && Char.equal (String.get text start) '/'
+        && Char.equal (String.get text (start + 1)) '/'
+      then
+        let authority_start = start + 2 in
+        let authority_stop = stop_at text authority_start is_authority_end in
+        let path_stop = stop_at text authority_stop is_path_end in
+        let authority =
+          String.sub text authority_start (authority_stop - authority_start)
+        in
+        let path =
+          String.sub text authority_stop (path_stop - authority_stop)
+        in
+        { scheme; authority = Some authority; path = decode path }
+      else
+        let path_stop = stop_at text start is_path_end in
+        {
+          scheme;
+          authority = None;
+          path = decode (String.sub text start (path_stop - start));
+        }
 
 let to_string uri =
   if String.equal uri.scheme "" then uri.path
