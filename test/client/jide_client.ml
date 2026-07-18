@@ -15,9 +15,9 @@ let failure code message = { code; message }
 (* A message asks for a reply when it carries an id that is not null. *)
 let is_request = function
   | `Assoc fields -> (
-    match List.assoc_opt "id" fields with
-    | None | Some `Null -> false
-    | Some _ -> true)
+      match List.assoc_opt "id" fields with
+      | None | Some `Null -> false
+      | Some _ -> true)
   | _ -> false
 
 (* The four exit codes of the card, and nothing else: 0 every reply arrived,
@@ -30,7 +30,8 @@ let code_of_error = function
   | Jide_framing.End_of_input -> 3
   | Jide_framing.Malformed _ -> 2
 
-let error_failure error = failure (code_of_error error) (Jide_framing.error_message error)
+let error_failure error =
+  failure (code_of_error error) (Jide_framing.error_message error)
 
 let send transport body =
   try Ok (transport.send body) with
@@ -44,44 +45,49 @@ let rec receive ~out transport ~timeout_ms =
   match transport.recv ~timeout_ms with
   | Error error -> Error (error_failure error)
   | Ok body -> (
-    match Yojson.Safe.from_string body with
-    | exception Yojson.Json_error message ->
-      Error (failure 2 ("the message is not JSON: " ^ message))
-    | json -> (
-      match Jide_normalise.message_of_json json with
-      | Error message -> Error (failure 2 message)
-      | Ok message ->
-        output_string out (Jide_normalise.line message ^ "\n");
-        flush out;
-        if Jide_normalise.is_reply json then Ok () else receive ~out transport ~timeout_ms))
+      match Yojson.Safe.from_string body with
+      | exception Yojson.Json_error message ->
+          Error (failure 2 ("the message is not JSON: " ^ message))
+      | json -> (
+          match Jide_normalise.message_of_json json with
+          | Error message -> Error (failure 2 message)
+          | Ok message ->
+              output_string out (Jide_normalise.line message ^ "\n");
+              flush out;
+              if Jide_normalise.is_reply json then Ok ()
+              else receive ~out transport ~timeout_ms))
 
 let run ~out ~transport ~timeout_ms steps =
   let rec go = function
     | [] -> Ok ()
     | Jide_session.Sleep milliseconds :: rest ->
-      Unix.sleepf (float_of_int milliseconds /. 1000.);
-      go rest
+        Unix.sleepf (float_of_int milliseconds /. 1000.);
+        go rest
     | Jide_session.Close :: rest ->
-      transport.close_input ();
-      go rest
+        transport.close_input ();
+        go rest
     | Jide_session.Message json :: rest -> (
-      match send transport (Yojson.Safe.to_string json) with
-      | Error message -> Error (failure 3 ("cannot write to the server: " ^ message))
-      | Ok () ->
-        if not (is_request json) then go rest
-        else (
-          match receive ~out transport ~timeout_ms with
-          | Error failure -> Error failure
-          | Ok () -> go rest))
+        match send transport (Yojson.Safe.to_string json) with
+        | Error message ->
+            Error (failure 3 ("cannot write to the server: " ^ message))
+        | Ok () -> (
+            if not (is_request json) then go rest
+            else
+              match receive ~out transport ~timeout_ms with
+              | Error failure -> Error failure
+              | Ok () -> go rest))
     | Jide_session.Expect_timeout milliseconds :: rest -> (
-      match transport.recv ~timeout_ms:milliseconds with
-      | Error Jide_framing.Timeout -> go rest
-      | Error error -> Error (error_failure error)
-      (* A message where the session promised silence breaks the session's
-         contract, so it is reported as a malformed input (2). The card has
-         no fifth code, and reusing 1 would read as a timeout that did not
-         happen. *)
-      | Ok body -> Error (failure 2 ("a reply arrived where a timeout was expected: " ^ body)))
+        match transport.recv ~timeout_ms:milliseconds with
+        | Error Jide_framing.Timeout -> go rest
+        | Error error -> Error (error_failure error)
+        (* A message where the session promised silence breaks the session's
+           contract, so it is reported as a malformed input (2). The card has
+           no fifth code, and reusing 1 would read as a timeout that did not
+           happen. *)
+        | Ok body ->
+            Error
+              (failure 2
+                 ("a reply arrived where a timeout was expected: " ^ body)))
   in
   go steps
 
