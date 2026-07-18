@@ -95,25 +95,35 @@ let spawn ~(server : string) : (transport, string) result =
   let to_server_read, to_server_write = Unix.pipe () in
   let from_server_read, from_server_write = Unix.pipe () in
   let close_noerr fd = try Unix.close fd with Unix.Unix_error _ -> () in
-  match Unix.create_process server [| server |] to_server_read from_server_write Unix.stderr with
+  match
+    Unix.create_process server [| server |] to_server_read from_server_write
+      Unix.stderr
+  with
   | exception Unix.Unix_error (error, _, _) ->
-    List.iter close_noerr [ to_server_read; to_server_write; from_server_read; from_server_write ];
-    Error (Printf.sprintf "cannot start %s: %s" server (Unix.error_message error))
+      List.iter close_noerr
+        [ to_server_read; to_server_write; from_server_read; from_server_write ];
+      Error
+        (Printf.sprintf "cannot start %s: %s" server (Unix.error_message error))
   | pid ->
-    Unix.close to_server_read;
-    Unix.close from_server_write;
-    let to_server = Unix.out_channel_of_descr to_server_write in
-    let reader = Jide_framing.make_reader (Jide_framing.fd_input from_server_read) in
-    let transport =
-      {
-        send = (fun body -> Jide_framing.write to_server body);
-        recv = (fun ~timeout_ms -> Jide_framing.read_message reader ~timeout_ms);
-        close_input = (fun () -> close_out_noerr to_server);
-        shutdown =
-          (fun () ->
-            close_out_noerr to_server;
-            try ignore (Unix.waitpid [ Unix.WNOHANG ] pid) with Unix.Unix_error _ -> ();
-            close_noerr from_server_read);
-      }
-    in
-    Ok transport
+      Unix.close to_server_read;
+      Unix.close from_server_write;
+      let to_server = Unix.out_channel_of_descr to_server_write in
+      let reader =
+        Jide_framing.make_reader (Jide_framing.fd_input from_server_read)
+      in
+      let transport =
+        {
+          send = (fun body -> Jide_framing.write to_server body);
+          recv =
+            (fun ~timeout_ms -> Jide_framing.read_message reader ~timeout_ms);
+          close_input = (fun () -> close_out_noerr to_server);
+          shutdown =
+            (fun () ->
+              close_out_noerr to_server;
+              try ignore (Unix.waitpid [ Unix.WNOHANG ] pid)
+              with Unix.Unix_error _ ->
+                ();
+                close_noerr from_server_read);
+        }
+      in
+      Ok transport
