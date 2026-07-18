@@ -283,29 +283,40 @@ let parse ?path text =
       { path; text = body; bom; project; problems }
   | _ -> broken "the project file must hold one JSON object"
 
+(* One problem for a file that is there and could not be read: the text is
+   empty, the defaults apply and the reader is told, which is what the
+   interface promises. *)
+let unreadable path exn =
+  {
+    path = Some path;
+    text = "";
+    bom = 0;
+    project = empty;
+    problems =
+      [
+        {
+          span = blank_span;
+          message = "cannot be read: " ^ Printexc.to_string exn;
+        };
+      ];
+  }
+
+(* A file that is not there is the ordinary case: the defaults apply and
+   nothing is wrong. [In_channel.with_open_bin] raises [Sys_error] for that
+   case and for every other read failure, so the two are told apart before
+   the read, with [Sys.file_exists]. A file removed between the two calls is
+   reported as unreadable, which is the honest answer: it was there when the
+   project was looked for. *)
 let load path =
-  match In_channel.with_open_bin path In_channel.input_all with
-  | text -> (
-      match parse ~path text with
-      | loaded -> { loaded with path = Some path }
-      | exception exn ->
-          {
-            path = Some path;
-            text = "";
-            bom = 0;
-            project = empty;
-            problems =
-              [
-                {
-                  span = blank_span;
-                  message = "cannot be read: " ^ Printexc.to_string exn;
-                };
-              ];
-          })
-  | exception Sys_error _ ->
-      (* No file is the ordinary case: the defaults apply and nothing is
-         wrong. *)
-      { path = None; text = ""; bom = 0; project = empty; problems = [] }
+  if not (Sys.file_exists path) then
+    { path = None; text = ""; bom = 0; project = empty; problems = [] }
+  else
+    match In_channel.with_open_bin path In_channel.input_all with
+    | text -> (
+        match parse ~path text with
+        | loaded -> { loaded with path = Some path }
+        | exception exn -> unreadable path exn)
+    | exception exn -> unreadable path exn
 
 let diagnostics ~uri (loaded : loaded) =
   List.map

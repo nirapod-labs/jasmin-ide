@@ -9,40 +9,51 @@ type step =
   | Expect_timeout of int
 
 let words text =
-  String.split_on_char ' ' text |> List.concat_map (String.split_on_char '\t')
+  String.split_on_char ' ' text
+  |> List.concat_map (String.split_on_char '\t')
   |> List.filter (fun word -> word <> "")
 
 let parse_milliseconds name argument =
   match int_of_string_opt argument with
   | Some milliseconds when milliseconds >= 0 -> Ok milliseconds
   | Some _ | None ->
-    Error (Printf.sprintf "%s needs a number of milliseconds, got %S" name argument)
+      Error
+        (Printf.sprintf "%s needs a number of milliseconds, got %S" name
+           argument)
 
 let parse_directive text =
   match words text with
   | [ "#close" ] -> Ok Close
-  | [ "#sleep"; argument ] -> Result.map (fun ms -> Sleep ms) (parse_milliseconds "#sleep" argument)
+  | [ "#sleep"; argument ] ->
+      Result.map (fun ms -> Sleep ms) (parse_milliseconds "#sleep" argument)
   | [ "#expect-timeout"; argument ] ->
-    Result.map (fun ms -> Expect_timeout ms) (parse_milliseconds "#expect-timeout" argument)
+      Result.map
+        (fun ms -> Expect_timeout ms)
+        (parse_milliseconds "#expect-timeout" argument)
   | [ name ] ->
-    if name = "#sleep" || name = "#expect-timeout" then
-      Error (Printf.sprintf "%s needs a number of milliseconds" name)
-    else Error (Printf.sprintf "unknown directive %S" name)
+      if name = "#sleep" || name = "#expect-timeout" then
+        Error (Printf.sprintf "%s needs a number of milliseconds" name)
+      else Error (Printf.sprintf "unknown directive %S" name)
   | name :: _ -> Error (Printf.sprintf "unknown directive %S" name)
   | [] -> Error "empty directive"
 
 (* Blank lines separate blocks; a block keeps its own line breaks. *)
 let blocks text =
   let rec go finished current = function
-    | [] -> List.rev (if current = [] then finished else List.rev current :: finished)
+    | [] ->
+        List.rev
+          (if current = [] then finished else List.rev current :: finished)
     | line :: rest ->
-      let line = if String.length line > 0 && line.[String.length line - 1] = '\r' then
-          String.sub line 0 (String.length line - 1)
-        else line
-      in
-      if String.trim line = "" then
-        go (if current = [] then finished else List.rev current :: finished) [] rest
-      else go finished (line :: current) rest
+        let line =
+          if String.length line > 0 && line.[String.length line - 1] = '\r' then
+            String.sub line 0 (String.length line - 1)
+          else line
+        in
+        if String.trim line = "" then
+          go
+            (if current = [] then finished else List.rev current :: finished)
+            [] rest
+        else go finished (line :: current) rest
   in
   go [] [] (String.split_on_char '\n' text)
 
@@ -50,19 +61,19 @@ let parse_block block =
   let text = String.concat "\n" block in
   let trimmed = String.trim text in
   if String.length trimmed > 0 && trimmed.[0] = '#' then parse_directive trimmed
-  else begin
+  else
     match Yojson.Safe.from_string text with
     | json -> Ok (Message json)
-    | exception Yojson.Json_error message -> Error (Printf.sprintf "not JSON: %s" message)
-  end
+    | exception Yojson.Json_error message ->
+        Error (Printf.sprintf "not JSON: %s" message)
 
 let parse_string text =
   let rec go steps = function
     | [] -> Ok (List.rev steps)
     | block :: rest -> (
-      match parse_block block with
-      | Error message -> Error message
-      | Ok step -> go (step :: steps) rest)
+        match parse_block block with
+        | Error message -> Error message
+        | Ok step -> go (step :: steps) rest)
   in
   go [] (blocks text)
 

@@ -96,3 +96,12 @@ run short. `--surface` picks one surface; the default runs both on every case.
 Exit status: 0 when every case held, 1 when one did not, 2 when the command
 line cannot be used.
 
+## The harness's own test
+
+`fuzz/test_fuzz.ml` checks the properties of the pieces: the stream is a
+function of the seed and the ordinal, a generated program is not a parse error,
+the surfaces hold on a fixed set of cases, a child reports a failure, an
+exception, an exit, a signal and a hang as itself, and the command line refuses
+what it should. `fuzz/test_fuzz.sh` runs the built harness on its own command
+line and on short runs. Both run under `dune runtest` in a few seconds and need
+no corpus.

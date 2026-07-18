@@ -191,6 +191,82 @@ let test_a_missing_file () =
   check "missing: the defaults apply"
     (loaded.project = Jide_engine.Project.empty)
 
+(* A file that is there and cannot be read is not the same thing as a file
+   that is not there: the first is reported, the second is the ordinary case
+   the test above pins. *)
+let test_an_unreadable_file () =
+  let directory = Filename.temp_file "jide-project" "" in
+  Sys.remove directory;
+  Sys.mkdir directory 0o700;
+  let path = Filename.concat directory Jide_engine.Project.file_name in
+  let channel = open_out_bin path in
+  output_string channel "{\"arch\": \"arm-m4\"}";
+  close_out channel;
+  (* Take every permission bit away. A process that may override the mode, or a
+     filesystem that does not enforce it, still reads the file; the directory
+     case below then carries the rule, and this one says it was skipped. *)
+  Unix.chmod path 0o000;
+  let readable =
+    match In_channel.with_open_bin path In_channel.input_all with
+    | _ -> true
+    | exception Sys_error _ -> false
+  in
+  (if readable then
+     Printf.printf
+       "note: the permission case is skipped; a file with no permission bit is \
+        still readable here\n\
+        %!"
+   else
+     let loaded = Jide_engine.Project.load path in
+     check "unreadable: one problem" (List.length (messages loaded) = 1);
+     check "unreadable: the message says it cannot be read"
+       (contains (one_message loaded) "cannot be read");
+     check "unreadable: the file it came from" (loaded.path = Some path);
+     check "unreadable: no text" (loaded.text = "");
+     check "unreadable: the defaults apply"
+       (loaded.project = Jide_engine.Project.empty);
+     check "unreadable: the diagnostic reaches the reader"
+       (match Jide_engine.Project.diagnostics ~uri:"file:///p" loaded with
+       | [ diagnostic ] -> diagnostic.Jide_lang.Diagnostic.code = Some "project"
+       | _ -> false));
+  Unix.chmod path 0o600;
+  (* A path that exists and cannot be read as a project file: a directory is
+     the case no permission bit can make readable. *)
+  let loaded = Jide_engine.Project.load directory in
+  check "unreadable: a directory is one problem"
+    (List.length (messages loaded) = 1);
+  check "unreadable: a directory names itself" (loaded.path = Some directory);
+  check "unreadable: a directory applies the defaults"
+    (loaded.project = Jide_engine.Project.empty);
+  Sys.remove path;
+  Sys.rmdir directory
+
+let test_the_engine_reports_an_unreadable_project () =
+  let directory = Filename.temp_file "jide-project" "" in
+  Sys.remove directory;
+  Sys.mkdir directory 0o700;
+  (* The workspace holds a [jasmin-project.json] that cannot be read as one. *)
+  let path = Filename.concat directory Jide_engine.Project.file_name in
+  Sys.mkdir path 0o700;
+  let engine = Jide_engine.Engine.create () in
+  Jide_engine.Engine.set_root engine (Some directory);
+  check "engine unreadable: one diagnostic"
+    (List.length (Jide_engine.Engine.project_diagnostics engine) = 1);
+  check "engine unreadable: the defaults apply"
+    (Jide_engine.Engine.settings engine = Jide_engine.Engine.default_settings);
+  check "engine unreadable: the file is remembered"
+    (match Jide_engine.Engine.project engine with
+    | Some loaded -> loaded.Jide_engine.Project.path = Some path
+    | None -> false);
+  check "engine unreadable: a check still runs"
+    (Jide_engine.Engine.open_document engine ~uri:"file:///tmp/c.jazz"
+       ~version:1 ~text:"fn f(reg u32 a) -> reg u32 { return a; }";
+     match Jide_engine.Engine.check engine ~uri:"file:///tmp/c.jazz" with
+     | Some analysis -> analysis.Jide_engine.Engine.diagnostics = []
+     | None -> false);
+  Sys.rmdir path;
+  Sys.rmdir directory
+
 let test_a_file_on_disk () =
   let directory = Filename.temp_file "jide-project" "" in
   Sys.remove directory;
@@ -300,8 +376,10 @@ let () =
   test_a_bom ();
   test_not_json ();
   test_a_missing_file ();
+  test_an_unreadable_file ();
   test_a_file_on_disk ();
   test_the_engine_reads_the_project ();
+  test_the_engine_reports_an_unreadable_project ();
   test_an_unknown_architecture_never_reaches_the_settings ();
   test_the_include_paths_reach_the_checker ();
   if !failures = 0 then print_endline "all project tests passed"
