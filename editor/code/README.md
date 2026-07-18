@@ -70,6 +70,12 @@ is `Trace`, using the level selector at the right of the Output panel.
 - **Jasmin: Show server log** opens the Jasmin IDE output channel, which holds
   the server's messages and, when tracing is on, the protocol trace.
 
+## Version check
+
+When the server starts, the extension compares its own version with the version
+the server reports in `serverInfo` and shows one warning if they differ. A
+server that reports no version is not treated as an error.
+
 ## Files from other extensions
 
 Two other extensions also claim `.jazz` files. If you have one of them and this

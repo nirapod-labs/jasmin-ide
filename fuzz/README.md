@@ -54,3 +54,45 @@ holds when:
   or a refusal;
 - the exit status after a `shutdown` is 0.
 
+## Seeds, and replaying a failure
+
+Every case derives its random stream from the seed, the surface and the case's
+ordinal. The ordinal does not depend on how long the run took or how fast the
+host is, so a case is the same input on every run:
+
+```
+fuzz: FAIL seed 1 case 5301
+fuzz: text: the engine reported the span 12..40 in a text of 20 bytes: ...
+fuzz: replay with --seed 1 --cases 5302
+```
+
+The run's last line carries the seed, the case counts and the elapsed time:
+
+```
+fuzz: seed 1, surfaces both, 5917 cases (text 5917, edit 5917), 0 failures, 10.0s
+```
+
+A failure found this way belongs in `test/` as a case that fails without the
+fix, not in this directory.
+
+## The child process
+
+Each case runs in a child of its own, forked, with a wall clock over it
+(`fuzz/child.ml`). That is what makes a hang observable: a case that never
+returns is reported after ten seconds and the run goes on to report it rather
+than stopping. A case that raises out of the library's handler is reported with
+the exception, one that dies on a signal with the signal, and one that exits
+with its code.
+
+## Command line
+
+```
+fuzz [--seconds S] [--seed N] [--cases N] [--surface both|text|edit] [--corpus DIR]
+```
+
+`--seconds` bounds the run (default 120), `--cases` bounds it exactly and wins
+over the clock, which is how a failure is replayed and how the test keeps the
+run short. `--surface` picks one surface; the default runs both on every case.
+Exit status: 0 when every case held, 1 when one did not, 2 when the command
+line cannot be used.
+
