@@ -1,10 +1,9 @@
 type channels = { input : in_channel; output : out_channel }
-
 type packet = Jsonrpc.Packet.t
-
 type read_result = (packet, string) result option
 
-module Wire = Lsp.Io.Make
+module Wire =
+  Lsp.Io.Make
     (struct
       type 'a t = 'a
 
@@ -36,7 +35,7 @@ let read { input; _ } =
   | Some packet -> Some (Ok packet)
   | exception Lsp.Io.Error msg -> Some (Error msg)
   | exception Jsonrpc.Json.Of_json (what, _) ->
-    Some (Error ("invalid packet: " ^ what))
+      Some (Error ("invalid packet: " ^ what))
   | exception Yojson.Json_error msg -> Some (Error ("invalid json: " ^ msg))
   | exception End_of_file -> None
   | exception Sys_error msg -> Some (Error ("read error: " ^ msg))

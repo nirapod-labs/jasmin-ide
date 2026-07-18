@@ -142,3 +142,160 @@ let uris =
     "file:///fuzz/four.jazz";
   |]
 
+let case ?(corpus = [||]) (st : Gen.state) : string =
+  let server = Jide_controller.Server.create ~log:(fun _ -> ()) in
+  let open_documents : (string, int * string) Hashtbl.t = Hashtbl.create 8 in
+  let next_id = ref 0 in
+  let new_id () =
+    incr next_id;
+    !next_id
+  in
+  let document_id = ref 0 in
+  let source () =
+    incr document_id;
+    Gen.document_text ~corpus st ^ string_of_int !document_id
+  in
+  let open_one uri =
+    let version = 1 in
+    let text = source () in
+    expect_no_reply "a didOpen"
+      (send server
+         (notification
+            ~params:(open_params ~uri ~version ~text)
+            "textDocument/didOpen"));
+    Hashtbl.replace open_documents uri (version, text);
+    check_document server ~what:"a didOpen" ~uri ~version ~text
+  in
+  let change_one uri =
+    match Hashtbl.find_opt open_documents uri with
+    | None -> open_one uri
+    | Some (version, _) ->
+        let version = version + 1 in
+        let text = source () in
+        expect_no_reply "a didChange"
+          (send server
+             (notification
+                ~params:(change_params ~uri ~version ~text)
+                "textDocument/didChange"));
+        Hashtbl.replace open_documents uri (version, text);
+        check_document server ~what:"a didChange" ~uri ~version ~text
+  in
+  let close_one uri =
+    match Hashtbl.find_opt open_documents uri with
+    | None -> ()
+    | Some _ ->
+        expect_no_reply "a didClose"
+          (send server
+             (notification ~params:(close_params ~uri) "textDocument/didClose"));
+        Hashtbl.remove open_documents uri;
+        if Option.is_some (stored server uri) then
+          fail "a didClose left %s in the store" uri
+  in
+  let open_another () =
+    let free =
+      Array.to_list uris
+      |> List.filter (fun uri -> not (Hashtbl.mem open_documents uri))
+    in
+    match free with
+    | [] -> change_one (Gen.pick st uris)
+    | uri :: _ -> open_one uri
+  in
+  try
+    (* Before initialize: one answer the protocol names and one notification
+       the server must not act on. *)
+    let id = new_id () in
+    expect_reply ~what:"a request before initialize" ~id
+      ~expect:(Any_error [ Jsonrpc.Response.Error.Code.ServerNotInitialized ])
+      (send server (request ~id "textDocument/hover"));
+    expect_no_reply "a didOpen before initialize"
+      (send server
+         (notification
+            ~params:(open_params ~uri:uris.(0) ~version:1 ~text:"fn f() {\n}\n")
+            "textDocument/didOpen"));
+    if List.length (Jide_engine.Engine.documents (engine server)) > 0 then
+      fail "a notification before initialize reached the document store";
+    let id = new_id () in
+    expect_reply ~what:"initialize" ~id ~expect:Any_result
+      (send server (request ~id ~params:initialize_params "initialize"));
+    if Jide_controller.Server.state server <> Jide_controller.Server.Running
+    then fail "initialize did not leave the server running";
+    expect_no_reply "an initialized notification"
+      (send server (notification "initialized"));
+    (* The session proper. *)
+    for _ = 1 to Gen.between st 4 24 do
+      match Gen.int st 10 with
+      | 0 | 1 | 2 -> open_another ()
+      | 3 | 4 | 5 -> change_one (Gen.pick st uris)
+      | 6 -> close_one (Gen.pick st uris)
+      | 7 ->
+          let id = new_id () in
+          expect_reply ~what:"an unsupported request" ~id
+            ~expect:
+              (Any_error
+                 [
+                   Jsonrpc.Response.Error.Code.InvalidRequest;
+                   Jsonrpc.Response.Error.Code.MethodNotFound;
+                 ])
+            (send server (request ~id "textDocument/hover"))
+      | 8 ->
+          let id = new_id () in
+          expect_reply ~what:"a request with malformed params" ~id
+            ~expect:
+              (Any_error
+                 [
+                   Jsonrpc.Response.Error.Code.InvalidRequest;
+                   Jsonrpc.Response.Error.Code.MethodNotFound;
+                 ])
+            (send server
+               (request ~id
+                  ~params:(`Assoc [ ("textDocument", `Int 1) ])
+                  "textDocument/hover"))
+      | _ ->
+          expect_no_reply "a notification the server does not know"
+            (send server (notification "fuzz/unknown"));
+          expect_no_reply "a didChange with malformed params"
+            (send server
+               (notification
+                  ~params:(`Assoc [ ("textDocument", `String "not an object") ])
+                  "textDocument/didChange"))
+    done;
+    (* The store holds every document still open, at the version last sent. *)
+    Hashtbl.iter
+      (fun uri (version, text) ->
+        match stored server uri with
+        | None -> fail "the store lost %s, which was never closed" uri
+        | Some document ->
+            if Jide_engine.Document.version document <> version then
+              fail "the store holds %s at another version" uri;
+            if not (String.equal (Jide_engine.Document.text document) text) then
+              fail "the store holds other text for %s" uri)
+      open_documents;
+    (* Shutdown, then the states the protocol names after it. *)
+    let id = new_id () in
+    expect_reply ~what:"shutdown" ~id ~expect:Any_result
+      (send server (request ~id "shutdown"));
+    if
+      Jide_controller.Server.state server
+      <> Jide_controller.Server.Shutting_down
+    then fail "shutdown did not leave the server shutting down";
+    let id = new_id () in
+    expect_reply ~what:"a request after shutdown" ~id
+      ~expect:(Any_error [ Jsonrpc.Response.Error.Code.InvalidRequest ])
+      (send server (request ~id "shutdown"));
+    let before = List.length (Jide_engine.Engine.documents (engine server)) in
+    expect_no_reply "a didOpen after shutdown"
+      (send server
+         (notification
+            ~params:
+              (open_params ~uri:"untitled:fuzz/after.jazz" ~version:1
+                 ~text:"fn f() {\n}\n")
+            "textDocument/didOpen"));
+    if List.length (Jide_engine.Engine.documents (engine server)) <> before then
+      fail "a notification after shutdown reached the document store";
+    expect_no_reply "exit" (send server (notification "exit"));
+    if not (Jide_controller.Server.exited server) then
+      fail "exit did not leave the server exited";
+    if Jide_controller.Server.exit_code server <> 0 then
+      fail "the exit code after a shutdown is not 0";
+    ""
+  with Found report -> report

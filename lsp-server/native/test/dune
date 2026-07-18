@@ -1,9 +1,8 @@
 ; The end-to-end check drives the built server over pipes, so it needs the
 ; executable itself, not a library.
+
 (rule
  (alias runtest)
- (deps
-  e2e.sh
-  %{exe:../main.exe})
+ (deps e2e.sh %{exe:../main.exe})
  (action
   (run sh %{dep:e2e.sh} %{exe:../main.exe})))
