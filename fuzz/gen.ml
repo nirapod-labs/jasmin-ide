@@ -35,3 +35,83 @@ let identifier st =
 let int_types =
   [| "u8"; "u16"; "u32"; "u64"; "bool"; "int"; "word"; "sptr"; "ptr" |]
 
+let keywords =
+  [|
+    "fn";
+    "export";
+    "inline";
+    "param";
+    "reg";
+    "stack";
+    "mem";
+    "global";
+    "require";
+    "return";
+    "if";
+    "while";
+    "for";
+    "while";
+    "else";
+    "let";
+    "in";
+    "true";
+    "false";
+    "and";
+    "or";
+    "not";
+    "sub";
+    "ptr";
+    "word";
+    "eval";
+    "call";
+    "jmp";
+    "jz";
+    "jnz";
+    "module";
+    "type";
+    "import";
+    "from";
+    "as";
+  |]
+
+let punctuation =
+  [|
+    "(";
+    ")";
+    "{";
+    "}";
+    "[";
+    "]";
+    ";";
+    ",";
+    "=";
+    ":";
+    "->";
+    "+";
+    "-";
+    "*";
+    "/";
+    "&&";
+    "||";
+    "!";
+    "#";
+    "//";
+    "/*";
+    "*/";
+    "\"";
+    "\\";
+    ".";
+    "_";
+    "@";
+    "$";
+    "?";
+    "|";
+    "&";
+    "<";
+    ">";
+    "%";
+    "~";
+    "`";
+    "'";
+  |]
+

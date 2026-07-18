@@ -29,7 +29,7 @@ let with_writer chunks f =
     close_out oc
   in
   let thread = Thread.create writer () in
-  let result = f (Jide_lsp.Framing.{ input = ic; output = stdout }) in
+  let result = f Jide_lsp.Framing.{ input = ic; output = stdout } in
   Thread.join thread;
   close_in_noerr ic;
   result
@@ -50,7 +50,7 @@ let test_notification () =
   let body = {|{"jsonrpc":"2.0","method":"initialized","params":{}}|} in
   match read_all [ frame body ] with
   | [ Ok (Jsonrpc.Packet.Notification n) ] ->
-    check "notification method" (String.equal n.method_ "initialized")
+      check "notification method" (String.equal n.method_ "initialized")
   | other -> check ("notification: " ^ show_result (List.hd other)) false
 
 let test_request_numeric_id () =
@@ -59,17 +59,17 @@ let test_request_numeric_id () =
   in
   match read_all [ frame body ] with
   | [ Ok (Jsonrpc.Packet.Request req) ] ->
-    check "request id" (req.id = `Int 7);
-    check "request method" (String.equal req.method_ "textDocument/hover")
+      check "request id" (req.id = `Int 7);
+      check "request method" (String.equal req.method_ "textDocument/hover")
   | other -> check ("request: " ^ show_result (List.hd other)) false
 
 let test_response_ok () =
   let body = {|{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}|} in
   match read_all [ frame body ] with
   | [ Ok (Jsonrpc.Packet.Response response) ] -> (
-    match response.result with
-    | Ok _ -> check "response ok" true
-    | Error _ -> check "response ok is an error" false)
+      match response.result with
+      | Ok _ -> check "response ok" true
+      | Error _ -> check "response ok is an error" false)
   | other -> check ("response: " ^ show_result (List.hd other)) false
 
 let test_response_error () =
@@ -78,11 +78,12 @@ let test_response_error () =
   in
   match read_all [ frame body ] with
   | [ Ok (Jsonrpc.Packet.Response response) ] -> (
-    match response.result with
-    | Ok _ -> check "response error is a result" false
-    | Error error ->
-      check "response error code"
-        (error.Jsonrpc.Response.Error.code = Jsonrpc.Response.Error.Code.MethodNotFound))
+      match response.result with
+      | Ok _ -> check "response error is a result" false
+      | Error error ->
+          check "response error code"
+            (error.Jsonrpc.Response.Error.code
+           = Jsonrpc.Response.Error.Code.MethodNotFound))
   | other -> check ("response error: " ^ show_result (List.hd other)) false
 
 let test_split_frame () =
@@ -90,15 +91,20 @@ let test_split_frame () =
   let full = frame body in
   let half = String.length full / 2 in
   match
-    read_all [ String.sub full 0 half; String.sub full half (String.length full - half) ]
+    read_all
+      [
+        String.sub full 0 half; String.sub full half (String.length full - half);
+      ]
   with
   | [ Ok (Jsonrpc.Packet.Notification n) ] ->
-    check "split frame" (String.equal n.method_ "exit")
+      check "split frame" (String.equal n.method_ "exit")
   | other -> check ("split frame: " ^ show_result (List.hd other)) false
 
 let test_header_casing () =
   let body = {|{"jsonrpc":"2.0","method":"exit"}|} in
-  let raw = Printf.sprintf "content-length: %d\r\n\r\n%s" (String.length body) body in
+  let raw =
+    Printf.sprintf "content-length: %d\r\n\r\n%s" (String.length body) body
+  in
   match read_all [ raw ] with
   | [ Ok (Jsonrpc.Packet.Notification _) ] -> check "header casing" true
   | other -> check ("header casing: " ^ show_result (List.hd other)) false
@@ -133,10 +139,15 @@ let test_two_frames_one_chunk () =
   let b = frame {|{"jsonrpc":"2.0","method":"exit"}|} in
   match read_all [ a ^ b ] with
   | [ Ok _; Ok _ ] -> check "two frames" true
-  | other -> check ("two frames: " ^ String.concat " " (List.map show_result other)) false
+  | other ->
+      check
+        ("two frames: " ^ String.concat " " (List.map show_result other))
+        false
 
 let test_end_of_input () =
-  match read_all [] with [] -> check "end of input" true | other -> check ("end of input: " ^ string_of_int (List.length other)) false
+  match read_all [] with
+  | [] -> check "end of input" true
+  | other -> check ("end of input: " ^ string_of_int (List.length other)) false
 
 let test_write_round_trip () =
   let request =
@@ -158,13 +169,18 @@ let test_write_round_trip () =
   let blank = strip_cr (input_line ic) in
   let prefix = "Content-Length: " in
   let body_length =
-    if String.length header > String.length prefix
-       && String.sub header 0 (String.length prefix) = prefix
-    then int_of_string (String.sub header (String.length prefix)
-                          (String.length header - String.length prefix))
+    if
+      String.length header > String.length prefix
+      && String.sub header 0 (String.length prefix) = prefix
+    then
+      int_of_string
+        (String.sub header (String.length prefix)
+           (String.length header - String.length prefix))
     else -1
   in
-  let body = if body_length >= 0 then really_input_string ic body_length else "" in
+  let body =
+    if body_length >= 0 then really_input_string ic body_length else ""
+  in
   close_in_noerr ic;
   check "written header" (body_length > 0);
   check "written content type" (String.length content_type > 0);
@@ -172,8 +188,9 @@ let test_write_round_trip () =
   let parsed = Yojson.Safe.from_string body in
   check "written body"
     (match parsed with
-     | `Assoc fields -> List.mem_assoc "id" fields && List.mem_assoc "method" fields
-     | _ -> false)
+    | `Assoc fields ->
+        List.mem_assoc "id" fields && List.mem_assoc "method" fields
+    | _ -> false)
 
 let () =
   test_notification ();
