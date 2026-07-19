@@ -240,13 +240,13 @@ let end_of_input () =
     (closed_by_server.code = 3 && closed_by_server.output = "");
   let closed_by_client =
     run_fake ~timeout_ms:1000
-      ~session:
-        {|#close
+      ~session:{|#close
 
 {"jsonrpc":"2.0","id":9,"method":"after/close"}|}
       ~script:""
   in
-  check "end of input (client closes stdin)" (closed_by_client.code = 3 && closed_by_client.output = "")
+  check "end of input (client closes stdin)"
+    (closed_by_client.code = 3 && closed_by_client.output = "")
 
 let server_notification () =
   let outcome =
@@ -259,7 +259,9 @@ let server_notification () =
   in
   check "server notification before the reply"
     (outcome.code = 0
-    && outcome.output = "- window/logMessage {\"message\":\"hello\",\"type\":3}\n10 result null\n")
+    && outcome.output
+       = "- window/logMessage {\"message\":\"hello\",\"type\":3}\n\
+          10 result null\n")
 
 let expect_timeout () =
   let silent =
@@ -272,13 +274,15 @@ let expect_timeout () =
 {"jsonrpc":"2.0","id":11,"method":"shutdown"}|}
       ~script:{|{"jsonrpc":"2.0","id":11,"result":null}|}
   in
-  check "expect-timeout passes on silence" (silent.code = 0 && silent.output = "11 result null\n");
+  check "expect-timeout passes on silence"
+    (silent.code = 0 && silent.output = "11 result null\n");
   let violated =
-    run_transport ~timeout_ms:1000
-      ~session:{|#expect-timeout 120|}
-      (raw_transport (Jide_framing.encode {|{"jsonrpc":"2.0","id":13,"result":null}|}))
+    run_transport ~timeout_ms:1000 ~session:{|#expect-timeout 120|}
+      (raw_transport
+         (Jide_framing.encode {|{"jsonrpc":"2.0","id":13,"result":null}|}))
   in
-  check "expect-timeout reports an unexpected reply" (violated.code = 2 && violated.output = "")
+  check "expect-timeout reports an unexpected reply"
+    (violated.code = 2 && violated.output = "")
 
 let deterministic_output () =
   let session =
@@ -296,9 +300,11 @@ let deterministic_output () =
   let first = run_fake ~timeout_ms:1000 ~session ~script in
   let second = run_fake ~timeout_ms:1000 ~session ~script in
   check "deterministic output"
-    (first.code = 0 && first.code = second.code && first.output = second.output
+    (first.code = 0 && first.code = second.code
+    && first.output = second.output
     && first.output
-       = "1 result {\"a\":{\"c\":3,\"d\":4},\"b\":1}\ntwo error {\"code\":-32000,\"message\":\"nope\"}\n")
+       = "1 result {\"a\":{\"c\":3,\"d\":4},\"b\":1}\n\
+          two error {\"code\":-32000,\"message\":\"nope\"}\n")
 
 let executable =
   if Array.length Sys.argv > 1 then Sys.argv.(1)
@@ -314,7 +320,11 @@ let run_binary arguments =
   let pid = Unix.create_process executable argv input out err in
   List.iter Unix.close [ out; err; input ];
   let _, status = Unix.waitpid [] pid in
-  let code = match status with Unix.WEXITED code -> code | Unix.WSIGNALED n | Unix.WSTOPPED n -> 128 + n in
+  let code =
+    match status with
+    | Unix.WEXITED code -> code
+    | Unix.WSIGNALED n | Unix.WSTOPPED n -> 128 + n
+  in
   let outcome =
     { code; output = read_file output_path; message = read_file error_path }
   in
@@ -323,29 +333,39 @@ let run_binary arguments =
   outcome
 
 let command_line () =
-  let session = {|{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}|} in
+  let session =
+    {|{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}|}
+  in
   let script = {|{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}|} in
   with_file session (fun session_file ->
       with_file script (fun script_file ->
           let outcome =
             run_binary
-              [ "--fake-server"; script_file; "--timeout"; "1000"; session_file ]
+              [
+                "--fake-server"; script_file; "--timeout"; "1000"; session_file;
+              ]
           in
           check "command line (numeric id accepted)"
-            (outcome.code = 0 && outcome.output = "1 result {\"capabilities\":{}}\n"
+            (outcome.code = 0
+            && outcome.output = "1 result {\"capabilities\":{}}\n"
             && outcome.message = "");
           let no_session = run_binary [ "--fake-server"; script_file ] in
           check "fake server needs a session file"
-            (no_session.code = 2 && no_session.output = "" && no_session.message <> "");
+            (no_session.code = 2 && no_session.output = ""
+           && no_session.message <> "");
           let slow = {|#sleep 5000
 
 {"jsonrpc":"2.0","id":1,"result":null}|} in
           with_file slow (fun slow_file ->
               let outcome =
-                run_binary [ "--fake-server"; slow_file; "--timeout"; "120"; session_file ]
+                run_binary
+                  [
+                    "--fake-server"; slow_file; "--timeout"; "120"; session_file;
+                  ]
               in
               check "command line (timeout reported)"
-                (outcome.code = 1 && outcome.output = "" && outcome.message <> ""))))
+                (outcome.code = 1 && outcome.output = ""
+               && outcome.message <> ""))))
 
 (* The card asks for the binary itself to print the same bytes twice on one
    session, so both runs are real processes over the same two files. *)
@@ -370,10 +390,12 @@ let binary_twice () =
           let first = run_binary arguments in
           let second = run_binary arguments in
           check "the binary prints the same bytes twice"
-            (first.code = 0 && second.code = 0 && first.output = second.output
+            (first.code = 0 && second.code = 0
+            && first.output = second.output
             && first.message = "" && second.message = ""
             && first.output
-               = "1 result {\"a\":{\"c\":3,\"d\":4},\"b\":1}\ntwo error {\"code\":-32000,\"message\":\"nope\"}\n")))
+               = "1 result {\"a\":{\"c\":3,\"d\":4},\"b\":1}\n\
+                  two error {\"code\":-32000,\"message\":\"nope\"}\n")))
 
 let usage_error () =
   let outcome = run_binary [] in
