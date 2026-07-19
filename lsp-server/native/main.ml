@@ -20,7 +20,7 @@ let run channels server =
 
 let () =
   let server = Jide_controller.Server.create ~log in
-  let channels = Jide_lsp.Framing.{ input = stdin; output = stdout } in
+  let channels = Jide_lsp.Framing.create ~input:stdin ~output:stdout in
   let code =
     try run channels server with
     | Sys_error message ->

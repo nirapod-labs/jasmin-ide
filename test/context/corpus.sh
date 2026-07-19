@@ -108,35 +108,56 @@ context)
 scoped)
   # The same consts.jinc, unchanged, behind an entry that declares the
   # parameters first: the context the rule builds, supplied by hand until
-  # the engine supplies it.
+  # the engine supplies it. The entry uses jdmontx16, the last array
+  # consts.jinc declares, so its verdict is about the file and not about
+  # the clearance of the two requires: a require whose items fail leaves
+  # the environment it found, and then no declaration of the file is in
+  # scope. The second check is that control, over a copy of the file whose
+  # first MLKEM_Q at 73:18, the token the `alone` row reports, is
+  # MLKEM_NOPE.
   rm -rf "$work/scoped"
-  mkdir -p "$work/scoped"
+  mkdir -p "$work/scoped/control"
   cp "$params" "$work/scoped/params.jinc"
+  cp "$params" "$work/scoped/control/params.jinc"
   cp "$consts" "$work/scoped/consts.jinc"
   cat >"$work/scoped/entry.jazz" <<'EOF'
 require "params.jinc"
 require "consts.jinc"
+
+fn probe() -> reg u16 {
+  reg u16 x;
+  x = jdmontx16[0];
+  return x;
+}
 EOF
+  cp "$work/scoped/entry.jazz" "$work/scoped/control/entry.jazz"
   printf 'consts.jinc sha256 %s\n' "$(digest "$work/scoped/consts.jinc")"
   check "$work/scoped" entry.jazz
+  sed '73s/MLKEM_Q/MLKEM_NOPE/' "$consts" >"$work/scoped/control/consts.jinc"
+  printf 'control: consts.jinc:73:18 is MLKEM_NOPE, not MLKEM_Q\n'
+  printf 'consts.jinc sha256 %s\n' "$(digest "$work/scoped/control/consts.jinc")"
+  check "$work/scoped/control" entry.jazz
   ;;
 required)
   # The same consts.jinc behind an entry that does not declare them, so the
-  # file holds the error the `alone` row records. The count of diagnostics
-  # the check places in consts.jinc is printed after the entry's own lines.
+  # file holds the error the `alone` row records. The digest pins the bytes
+  # as the other rows pin theirs. The last line counts the diagnostic lines
+  # the check placed in consts.jinc, `consts.jinc:<line>:...`, and not the
+  # per-file summary `consts.jinc: <n> error`, which names the file too.
   rm -rf "$work/required"
   mkdir -p "$work/required"
   cp "$consts" "$work/required/consts.jinc"
   cat >"$work/required/entry.jazz" <<'EOF'
 require "consts.jinc"
 EOF
+  printf 'consts.jinc sha256 %s\n' "$(digest "$work/required/consts.jinc")"
   output=$(cd -- "$work/required" && "$server" check entry.jazz 2>&1)
   status=$?
   if [ -n "$output" ]; then
     printf '%s\n' "$output"
   fi
   printf 'status %s\n' "$status"
-  in_file=$(printf '%s\n' "$output" | grep -c '^consts\.jinc:')
+  in_file=$(printf '%s\n' "$output" | grep -c '^consts\.jinc:[0-9]')
   printf 'diagnostics in consts.jinc: %s\n' "$in_file"
   ;;
 *)
