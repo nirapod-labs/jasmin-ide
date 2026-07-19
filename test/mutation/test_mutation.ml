@@ -22,6 +22,14 @@ let temp_dir () =
   Unix.mkdir path 0o700;
   path
 
+(* The directory the process is in, or a name for the failure when it has
+   none: a process left in a directory that was removed cannot say where it
+   is, and that has to be a printed failure rather than an exception. *)
+let current_dir () =
+  match Sys.getcwd () with
+  | cwd -> cwd
+  | exception Sys_error _ -> "<no directory>"
+
 let rec remove_tree path =
   if not (Sys.file_exists path) then ()
   else if Sys.is_directory path then (
@@ -78,6 +86,23 @@ let () =
   check "lexing: no tokens in an empty text" (tokens "" = []);
   check "lexing: the lexer refuses an unterminated comment"
     (Jide_mutation.lex "fn f() { /* " = None);
+
+  (* The architecture a corpus file is checked under. A corpus directory names
+     it as the corpus does, and the name the checker takes is the adapter's:
+     the last group's directory is [risc-v] and its architecture is [riscv].
+     A mapping that is not the adapter's own must not fall back to x86-64,
+     because it would report the group as checked under another one. *)
+  let arch name = Option.get (Jide_jasmin.Adapter.arch_of_string name) in
+  check "arch: a risc-v file is the adapter's riscv"
+    (Jide_mutation.arch_of_file "/corpus/risc-v/a.jazz" = arch "riscv");
+  check "arch: the adapter has no risc-v spelling"
+    (Jide_jasmin.Adapter.arch_of_string "risc-v" = None);
+  check "arch: an arm-m4 file"
+    (Jide_mutation.arch_of_file "/corpus/arm-m4/a.jazz" = arch "arm-m4");
+  check "arch: an armv8a file"
+    (Jide_mutation.arch_of_file "/corpus/armv8a/a.jazz" = arch "armv8a");
+  check "arch: a file in no architecture directory is x86-64"
+    (Jide_mutation.arch_of_file "/corpus/success/a.jazz" = arch "x86-64");
 
   (* The outline reads the headers the grammar puts in the token sequence. *)
   let outlined = Jide_mutation.outline_of_tokens (tokens program) in
@@ -279,6 +304,23 @@ let () =
   let report = Jide_mutation.run ~corpus:missing () in
   check "missing corpus: no case" (report.Jide_mutation.cases = 0);
   check "missing corpus: not a pass" (not (Jide_mutation.passed report));
+
+  (* The run enters the corpus so a [require] resolves as it does for the batch
+     checker, and it has to put the caller's own directory back: a process
+     left in a corpus the caller then deletes cannot answer [getcwd] at all. *)
+  let caller = current_dir () in
+  let corpus = temp_dir () in
+  write (Filename.concat corpus "one.jazz") program;
+  write (Filename.concat corpus "two.jazz") program;
+  Fun.protect
+    ~finally:(fun () -> remove_tree corpus)
+    (fun () ->
+      let report = Jide_mutation.run ~seed:3 ~corpus () in
+      check "cwd: the run did work" (report.Jide_mutation.cases > 0);
+      check "cwd: the caller's directory is back" (current_dir () = caller));
+  ignore (Jide_mutation.run ~corpus:missing ());
+  check "cwd: a corpus that is not there leaves it alone"
+    (current_dir () = caller);
 
   if !failures = 0 then Printf.printf "all mutation tests passed\n";
   exit (if !failures = 0 then 0 else 1)

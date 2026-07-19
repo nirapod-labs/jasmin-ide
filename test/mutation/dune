@@ -12,4 +12,4 @@
 (test
  (name test_mutation)
  (modules test_mutation)
- (libraries jide_mutation unix))
+ (libraries jide_mutation jide_jasmin unix))

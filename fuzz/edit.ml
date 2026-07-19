@@ -143,7 +143,7 @@ let uris =
   |]
 
 let case ?(corpus = [||]) (st : Gen.state) : string =
-  let server = Jide_controller.Server.create ~log:(fun _ -> ()) in
+  let server = Jide_controller.Server.create ~log:(fun _ -> ()) () in
   let open_documents : (string, int * string) Hashtbl.t = Hashtbl.create 8 in
   let next_id = ref 0 in
   let new_id () =

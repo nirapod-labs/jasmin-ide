@@ -1,3 +1,3 @@
 (library
  (name jide_check)
- (libraries jide_jasmin jide_lang))
+ (libraries jide_engine jide_jasmin jide_lang))

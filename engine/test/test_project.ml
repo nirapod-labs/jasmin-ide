@@ -347,7 +347,11 @@ let test_the_include_paths_reach_the_checker () =
   let seen = ref [] in
   let check_captures ~arch:_ ~call_conv:_ ~file:_ ~text:_ ~idirs =
     seen := idirs;
-    { Jide_jasmin.Adapter.diagnostics = []; warnings = [] }
+    {
+      Jide_jasmin.Adapter.diagnostics = [];
+      warnings = [];
+      facts = Jide_jasmin.Facts.empty;
+    }
   in
   let directory = Filename.temp_file "jide-project" "" in
   Sys.remove directory;

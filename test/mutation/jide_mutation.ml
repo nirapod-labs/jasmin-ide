@@ -259,17 +259,22 @@ let contains ~fragment text =
   loop 0
 
 (** The architecture the corpus's own test records choose: a directory named
-    [arm-m4], [armv8a] or [risc-v] selects it and everything else is x86-64. *)
+    [arm-m4], [armv8a] or [risc-v] selects it and everything else is x86-64.
+    The directory names are the corpus's; the architecture names are the
+    adapter's, which calls the last one [riscv]. An unknown name is a defect
+    in this function, not a corpus fact, so it raises rather than falling back
+    to x86-64: a silent fallback would report a group as checked when it was
+    checked under another architecture. *)
 let arch_of_file path =
   let name =
     if contains ~fragment:"/arm-m4/" path then "arm-m4"
     else if contains ~fragment:"/armv8a/" path then "armv8a"
-    else if contains ~fragment:"/risc-v/" path then "risc-v"
+    else if contains ~fragment:"/risc-v/" path then "riscv"
     else "x86-64"
   in
   match Jide_jasmin.Adapter.arch_of_string name with
   | Some arch -> arch
-  | None -> Option.get (Jide_jasmin.Adapter.arch_of_string "x86-64")
+  | None -> invalid_arg ("the adapter does not know the architecture " ^ name)
 
 let call_conv = Option.get (Jide_jasmin.Adapter.call_conv_of_string "linux")
 
@@ -715,16 +720,18 @@ let read_file path = In_channel.with_open_bin path In_channel.input_all
 (** Run the harness over the first [limit] files of [corpus]. The run happens
     with [corpus] as the working directory, so a [require] inside a file
     resolves the way it does for the batch checker, which is always started
-    from the corpus root.
+    from the corpus root. The directory the caller is in is read before the
+    change and put back after it, so a caller that runs the harness keeps its
+    own working directory.
 
     A file whose own text the lexer refuses has no token to alter and
     contributes no case. An altered text the lexer refuses is still a case:
     the checker sees it, and its outline is reported as unreadable. *)
 let run ?(limit = max_int) ?(seed = 1) ~(corpus : string) () : report =
+  let previous = Sys.getcwd () in
   match Sys.chdir corpus with
   | exception Sys_error _ -> summarise ~seed ~files:0 []
   | () ->
-      let previous = Sys.getcwd () in
       Fun.protect
         ~finally:(fun () -> Sys.chdir previous)
         (fun () ->
