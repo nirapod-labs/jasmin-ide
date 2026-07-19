@@ -5,10 +5,9 @@ let failures = ref 0
 
 let check name condition =
   if condition then Printf.printf "ok: %s\n%!" name
-  else begin
+  else (
     incr failures;
-    Printf.printf "not ok: %s\n%!" name
-  end
+    Printf.printf "not ok: %s\n%!" name)
 
 let read_file path =
   let channel = open_in_bin path in
@@ -21,7 +20,9 @@ let with_file contents body =
   let channel = open_out_bin path in
   output_string channel contents;
   close_out channel;
-  Fun.protect ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ()) (fun () -> body path)
+  Fun.protect
+    ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ())
+    (fun () -> body path)
 
 type outcome = { code : int; output : string; message : string }
 
@@ -33,9 +34,10 @@ let run_transport ~timeout_ms ~session transport =
     match Jide_session.parse_string session with
     | Error message -> (2, message)
     | Ok steps -> (
-      match Jide_client.run ~out ~transport ~timeout_ms steps with
-      | Ok () -> (0, "")
-      | Error failure -> (failure.Jide_client.code, failure.Jide_client.message))
+        match Jide_client.run ~out ~transport ~timeout_ms steps with
+        | Ok () -> (0, "")
+        | Error failure ->
+            (failure.Jide_client.code, failure.Jide_client.message))
   in
   close_out out;
   let output = read_file output_path in
@@ -45,7 +47,8 @@ let run_transport ~timeout_ms ~session transport =
 let run_fake ~timeout_ms ~script ~session =
   match Jide_session.parse_script_string script with
   | Error message -> { code = 2; output = ""; message }
-  | Ok script -> run_transport ~timeout_ms ~session (Jide_fake.transport ~script)
+  | Ok script ->
+      run_transport ~timeout_ms ~session (Jide_fake.transport ~script)
 
 (* A transport that reads raw bytes, for frames that the fake server cannot
    express as a JSON step. *)
@@ -64,7 +67,8 @@ let numeric_id () =
       ~session:{|{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}|}
       ~script:{|{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}|}
   in
-  check "numeric id" (outcome.code = 0 && outcome.output = "1 result {\"capabilities\":{}}\n")
+  check "numeric id"
+    (outcome.code = 0 && outcome.output = "1 result {\"capabilities\":{}}\n")
 
 let string_id () =
   let outcome =
@@ -83,7 +87,8 @@ let notification_is_not_answered () =
 {"jsonrpc":"2.0","id":7,"method":"shutdown"}|}
       ~script:{|{"jsonrpc":"2.0","id":7,"result":null}|}
   in
-  check "notification is not answered" (outcome.code = 0 && outcome.output = "7 result null\n")
+  check "notification is not answered"
+    (outcome.code = 0 && outcome.output = "7 result null\n")
 
 let error_reply () =
   let outcome =
@@ -94,7 +99,8 @@ let error_reply () =
   in
   check "error reply"
     (outcome.code = 0
-    && outcome.output = "3 error {\"code\":-32601,\"message\":\"method not found\"}\n")
+    && outcome.output
+       = "3 error {\"code\":-32601,\"message\":\"method not found\"}\n")
 
 let nested_key_sorting () =
   let outcome =
@@ -104,18 +110,21 @@ let nested_key_sorting () =
         {|{"jsonrpc":"2.0","id":4,"result":{"b":{"z":1,"a":2},"a":[{"y":true,"x":null}]}}|}
   in
   check "nested key sorting"
-    (outcome.code = 0 && outcome.output = "4 result {\"a\":[{\"x\":null,\"y\":true}],\"b\":{\"a\":2,\"z\":1}}\n")
+    (outcome.code = 0
+    && outcome.output
+       = "4 result {\"a\":[{\"x\":null,\"y\":true}],\"b\":{\"a\":2,\"z\":1}}\n"
+    )
 
 let timeout () =
   let outcome =
     run_fake ~timeout_ms:120
       ~session:{|{"jsonrpc":"2.0","id":5,"method":"slow"}|}
-      ~script:
-        {|#sleep 5000
+      ~script:{|#sleep 5000
 
 {"jsonrpc":"2.0","id":5,"result":null}|}
   in
-  check "timeout exits 1" (outcome.code = 1 && outcome.output = "" && outcome.message = "timeout")
+  check "timeout exits 1"
+    (outcome.code = 1 && outcome.output = "" && outcome.message = "timeout")
 
 let malformed_content_length () =
   let bytes = "Content-Length: banana\r\n\r\n{}" in
@@ -145,15 +154,19 @@ let framing_details () =
       (raw_transport truncated)
   in
   check "truncated body exits 3"
-    (truncated_run.code = 3 && truncated_run.output = "" && truncated_run.message <> "");
-  let cut_header = Jide_framing.make_reader (Jide_framing.string_input "Content-Len") in
+    (truncated_run.code = 3 && truncated_run.output = ""
+    && truncated_run.message <> "");
+  let cut_header =
+    Jide_framing.make_reader (Jide_framing.string_input "Content-Len")
+  in
   check "a header cut short is a malformed frame"
     (match Jide_framing.read_message cut_header ~timeout_ms:100 with
     | Error (Jide_framing.Malformed _) -> true
     | Error (Jide_framing.Timeout | Jide_framing.End_of_input) | Ok _ -> false);
   let body = {|{"jsonrpc":"2.0","id":14,"result":null}|} in
   let bytes =
-    Printf.sprintf "content-length: %d\r\nContent-Type: application/json\r\n\r\n%s"
+    Printf.sprintf
+      "content-length: %d\r\nContent-Type: application/json\r\n\r\n%s"
       (String.length body) body
   in
   let outcome =
@@ -172,7 +185,8 @@ let body_limit () =
   let limit = Jide_framing.max_body_bytes in
   let accepted = body_of_length (limit - 1) in
   let frame =
-    Printf.sprintf "Content-Length: %d\r\n\r\n%s" (String.length accepted) accepted
+    Printf.sprintf "Content-Length: %d\r\n\r\n%s" (String.length accepted)
+      accepted
   in
   let reader = Jide_framing.make_reader (Jide_framing.string_input frame) in
   let read_accepted () =
@@ -201,14 +215,15 @@ let body_limit () =
     (over_run.code = 2 && over_run.output = "" && over_run.message <> "")
 
 let session_file_errors () =
-  let directive text = match Jide_session.parse_string text with Error _ -> true | Ok _ -> false in
+  let directive text =
+    match Jide_session.parse_string text with Error _ -> true | Ok _ -> false
+  in
   check "session file errors"
-    (directive "#frobnicate 1"
-    && directive "#sleep"
-    && directive "#sleep soon"
-    && (match Jide_session.parse_script_string "#expect-timeout 10" with
-       | Error _ -> true
-       | Ok _ -> false))
+    (directive "#frobnicate 1" && directive "#sleep" && directive "#sleep soon"
+    &&
+    match Jide_session.parse_script_string "#expect-timeout 10" with
+    | Error _ -> true
+    | Ok _ -> false)
 
 let end_of_input () =
   let reader = Jide_framing.make_reader (Jide_framing.string_input "") in

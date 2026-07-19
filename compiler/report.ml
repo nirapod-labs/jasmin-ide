@@ -7,45 +7,11 @@ let internal message =
     (Span.make ~start_byte:0 ~end_byte:0)
     message
 
-(** A warning's span. The compiler prints a warning with a line number
-    starting at 1 and byte columns counted from the start of that line, so
-    the line index gives the line's first byte and the columns offset from
-    it. Line 0 means the printer wrote no location. *)
-let span_of_warning ~(text : string) (warning : Jide_jasmin.Warnings.t) =
-  if warning.line <= 0 then Span.make ~start_byte:0 ~end_byte:0
-  else
-    let index = Line_index.create text in
-    let line = warning.line - 1 in
-    let start = Line_index.line_start index line in
-    let limit = Line_index.line_end index line - start in
-    let clamp column = start + min (max column 0) limit in
-    Span.make
-      ~start_byte:(clamp warning.start_column)
-      ~end_byte:(clamp warning.end_column)
-
-let diagnostic_of_warning ~text (warning : Jide_jasmin.Warnings.t) =
-  Diagnostic.make ~code:"warning" ~severity:Diagnostic.Warning
-    (span_of_warning ~text warning)
-    warning.message
-
-let rank (diagnostic : Diagnostic.t) =
-  match diagnostic.severity with Diagnostic.Error -> 0 | _ -> 1
-
-let compare a b =
-  match Int.compare (rank a) (rank b) with
-  | 0 -> Diagnostic.compare a b
-  | order -> order
-
+(** A warning's span, from the line and byte columns the compiler prints.
+    The conversion lives in the engine, so the checker and the server report
+    one warning the same way. *)
 let of_check ~file ~text (result : Jide_jasmin.Adapter.check_result) =
-  let warnings =
-    List.filter
-      (fun (warning : Jide_jasmin.Warnings.t) -> String.equal warning.file file)
-      result.warnings
-  in
-  let diagnostics =
-    result.diagnostics @ List.map (diagnostic_of_warning ~text) warnings
-  in
-  List.stable_sort compare diagnostics
+  Jide_engine.Engine.diagnostics_of_check ~file ~text result
 
 let line_column ~(text : string) (span : Span.t) =
   let index = Line_index.create text in
