@@ -22,9 +22,6 @@
    (echo %{env:JASMIN_CONTEXT_CORPUS=none}))))
 
 (cram
- (deps
-  corpus-root.txt
-  corpus.sh
-  %{exe:../../lsp-server/native/main.exe})
+ (deps corpus-root.txt corpus.sh %{exe:../../lsp-server/native/main.exe})
  (enabled_if
   (<> %{env:JASMIN_CONTEXT_CORPUS=none} "none")))
