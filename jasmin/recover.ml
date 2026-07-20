@@ -279,3 +279,114 @@ let next_attempt state ~failure =
   in
   match statement () with Some attempt -> Some attempt | None -> item ()
 
+let recover ~name ~text : t =
+  let counters = no_counters () in
+  let dropped = ref [] in
+  let recovered = ref [] in
+  let diagnostics = ref [] in
+  let raised = ref 0 in
+  let note_raise exn =
+    if !raised < 3 then begin
+      incr raised;
+      diagnostics := Error.to_diagnostic (Error.of_exn exn) :: !diagnostics
+    end
+  in
+  (* Where an item restart would go, or the end of the buffer when the
+     broken item is the last one. *)
+  let target_of state ~failure =
+    match Scan.next_item state.scan ~from:failure with
+    | Some target -> target
+    | None -> Scan.count state.scan
+  in
+  let note_dropped state ~from ~upto =
+    dropped := dropped_of state.scan ~from ~upto :: !dropped;
+    recovered :=
+      Scan.span state.scan ~start_byte:(Scan.start_byte state.scan from)
+        ~end_byte:(Scan.start_byte state.scan upto)
+      :: !recovered
+  in
+  (* One pass over one buffer: checkpoint restarts until the parser accepts,
+     a rewrite when no checkpoint is left, the prefix alone when even that is
+     gone. *)
+  let rec pass ~depth text : Syntax.pprogram =
+    match Scan.make ~name text with
+    | Error diagnostic ->
+        diagnostics := diagnostic :: !diagnostics;
+        []
+    | Ok scan -> run (new_state counters scan) ~depth
+  and run state ~depth : Syntax.pprogram =
+    match drive state ~index:0 ~eof_sent:false state.initial with
+    | Accepted items -> items
+    | Raised (_, exn) ->
+        note_raise exn;
+        finish state ~depth
+    | Failed failure -> step state ~depth ~failure
+  and step state ~depth ~failure : Syntax.pprogram =
+    if counters.recoveries >= max_recoveries then finish state ~depth
+    else
+      match next_attempt state ~failure with
+      | Some (Restart { source; target; checkpoint; statement }) ->
+          counters.recoveries <- counters.recoveries + 1;
+          if statement then
+            counters.statement_restarts <- counters.statement_restarts + 1
+          else counters.item_restarts <- counters.item_restarts + 1;
+          state.tried := (source, target) :: !(state.tried);
+          prune state source;
+          if statement then begin
+            recovered :=
+              Scan.span state.scan ~start_byte:(Scan.start_byte state.scan source)
+                ~end_byte:(Scan.start_byte state.scan target)
+              :: !recovered;
+            run_from state ~depth ~start:target checkpoint
+          end
+          else begin
+            note_dropped state ~from:source ~upto:target;
+            state.closed_item <- source;
+            run_from state ~depth ~start:target checkpoint
+          end
+      | None -> (
+          let target = target_of state ~failure in
+          let from = Scan.start_byte state.scan state.closed_item in
+          let upto = Scan.start_byte state.scan target in
+          if upto <= from || depth >= max_byte_restarts then finish state ~depth
+          else begin
+            counters.recoveries <- counters.recoveries + 1;
+            counters.byte_restarts <- counters.byte_restarts + 1;
+            note_dropped state ~from:state.closed_item ~upto:target;
+            pass ~depth:(depth + 1)
+              (Scan.blank (Scan.text state.scan) ~from ~upto)
+          end)
+  and run_from state ~depth ~start checkpoint =
+    match drive state ~index:start ~eof_sent:false checkpoint with
+    | Accepted items -> items
+    | Raised (_, exn) ->
+        note_raise exn;
+        finish state ~depth
+    | Failed failure -> step state ~depth ~failure
+  (* Nothing left to try: keep what the prefix alone parses, and if even that
+     is impossible, nothing. *)
+  and finish state ~depth =
+    ignore depth;
+    let text =
+      List.fold_left
+        (fun text (span : Jide_lang.Span.t) ->
+          Scan.blank text ~from:span.Jide_lang.Span.start_byte
+            ~upto:span.Jide_lang.Span.end_byte)
+        (Scan.text state.scan) !recovered
+    in
+    if String.equal text (Scan.text state.scan) then []
+    else
+      match
+        Parseio.parse_program ~name (Utils.IO.input_string text)
+      with
+      | items -> items
+      | exception _ -> []
+  in
+  let items = pass ~depth:0 text in
+  {
+    items;
+    dropped = List.rev !dropped;
+    recovered = List.rev !recovered;
+    diagnostics = List.rev !diagnostics;
+    counters;
+  }

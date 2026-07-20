@@ -18,16 +18,25 @@ let run channels server =
   in
   loop ()
 
-let () =
+(** The protocol loop, which is the mode when the command line names no
+    other. *)
+let serve () =
   let server = Jide_controller.Server.create ~log in
   let channels = Jide_lsp.Framing.create ~input:stdin ~output:stdout in
+  try run channels server with
+  | Sys_error message ->
+      log ("input or output closed: " ^ message);
+      Jide_controller.Server.eof_exit_code server
+  | exn ->
+      log ("fatal: " ^ Printexc.to_string exn);
+      1
+
+let () =
+  (* `check` is read before the server is created, so the batch mode writes
+     nothing but its own lines to stdout and never touches the protocol. *)
   let code =
-    try run channels server with
-    | Sys_error message ->
-        log ("input or output closed: " ^ message);
-        Jide_controller.Server.eof_exit_code server
-    | exn ->
-        log ("fatal: " ^ Printexc.to_string exn);
-        1
+    match Array.to_list Sys.argv with
+    | _ :: "check" :: arguments -> Jide_check.Cli.main arguments
+    | _ -> serve ()
   in
   exit code
