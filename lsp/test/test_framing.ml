@@ -1,9 +1,9 @@
-(* Round-trip and malformed-frame tests for [Jide_lsp.Framing]. *)
+(* Round-trip and hostile-frame tests for [Jide_lsp.Framing]. *)
 
 let failures = ref 0
 
-let check name cond =
-  if not cond then (
+let check name condition =
+  if not condition then (
     incr failures;
     Printf.printf "FAIL %s\n%!" name)
 
@@ -14,6 +14,13 @@ let show_result = function
 let show_opt = function
   | None -> "end-of-input"
   | Some result -> show_result result
+
+let contains haystack needle =
+  let n = String.length haystack and m = String.length needle in
+  let rec loop i =
+    i + m <= n && (String.sub haystack i m = needle || loop (i + 1))
+  in
+  m = 0 || loop 0
 
 (* Write [chunks] to a pipe, one chunk at a time, then close the writer. *)
 let with_writer chunks f =
@@ -29,7 +36,7 @@ let with_writer chunks f =
     close_out oc
   in
   let thread = Thread.create writer () in
-  let result = f Jide_lsp.Framing.{ input = ic; output = stdout } in
+  let result = f (Jide_lsp.Framing.create ~input:ic ~output:stdout) in
   Thread.join thread;
   close_in_noerr ic;
   result
@@ -51,7 +58,7 @@ let test_notification () =
   match read_all [ frame body ] with
   | [ Ok (Jsonrpc.Packet.Notification n) ] ->
       check "notification method" (String.equal n.method_ "initialized")
-  | other -> check ("notification: " ^ show_result (List.hd other)) false
+  | other -> check ("notification: " ^ show_opt (Some (List.hd other))) false
 
 let test_request_numeric_id () =
   let body =
@@ -61,7 +68,7 @@ let test_request_numeric_id () =
   | [ Ok (Jsonrpc.Packet.Request req) ] ->
       check "request id" (req.id = `Int 7);
       check "request method" (String.equal req.method_ "textDocument/hover")
-  | other -> check ("request: " ^ show_result (List.hd other)) false
+  | other -> check ("request: " ^ show_opt (Some (List.hd other))) false
 
 let test_response_ok () =
   let body = {|{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}|} in
@@ -70,7 +77,7 @@ let test_response_ok () =
       match response.result with
       | Ok _ -> check "response ok" true
       | Error _ -> check "response ok is an error" false)
-  | other -> check ("response: " ^ show_result (List.hd other)) false
+  | other -> check ("response: " ^ show_opt (Some (List.hd other))) false
 
 let test_response_error () =
   let body =
@@ -84,7 +91,7 @@ let test_response_error () =
           check "response error code"
             (error.Jsonrpc.Response.Error.code
            = Jsonrpc.Response.Error.Code.MethodNotFound))
-  | other -> check ("response error: " ^ show_result (List.hd other)) false
+  | other -> check ("response error: " ^ show_opt (Some (List.hd other))) false
 
 let test_split_frame () =
   let body = {|{"jsonrpc":"2.0","method":"exit"}|} in
@@ -98,7 +105,7 @@ let test_split_frame () =
   with
   | [ Ok (Jsonrpc.Packet.Notification n) ] ->
       check "split frame" (String.equal n.method_ "exit")
-  | other -> check ("split frame: " ^ show_result (List.hd other)) false
+  | other -> check ("split frame: " ^ show_opt (Some (List.hd other))) false
 
 let test_header_casing () =
   let body = {|{"jsonrpc":"2.0","method":"exit"}|} in
@@ -107,18 +114,17 @@ let test_header_casing () =
   in
   match read_all [ raw ] with
   | [ Ok (Jsonrpc.Packet.Notification _) ] -> check "header casing" true
-  | other -> check ("header casing: " ^ show_result (List.hd other)) false
+  | other -> check ("header casing: " ^ show_opt (Some (List.hd other))) false
 
 let test_separator_split () =
   let body = {|{"jsonrpc":"2.0","method":"exit"}|} in
   let raw = frame body in
-  let crlf = 4 in
   let parts =
-    [ String.sub raw 0 crlf; String.sub raw crlf (String.length raw - crlf) ]
+    [ String.sub raw 0 4; String.sub raw 4 (String.length raw - 4) ]
   in
   match read_all parts with
   | [ Ok (Jsonrpc.Packet.Notification _) ] -> check "separator split" true
-  | other -> check ("separator split: " ^ show_result (List.hd other)) false
+  | other -> check ("separator split: " ^ show_opt (Some (List.hd other))) false
 
 let test_truncated_body () =
   let body = {|{"jsonrpc":"2.0","method":"exit"}|} in
@@ -126,13 +132,13 @@ let test_truncated_body () =
   let cut = String.length raw - 5 in
   match read_all [ String.sub raw 0 cut ] with
   | [ Error _ ] -> check "truncated body is an error" true
-  | other -> check ("truncated body: " ^ show_result (List.hd other)) false
+  | other -> check ("truncated body: " ^ show_opt (Some (List.hd other))) false
 
 let test_bad_json () =
-  let raw = frame "not json" in
-  match read_all [ raw ] with
-  | [ Error _ ] -> check "bad json is an error" true
-  | other -> check ("bad json: " ^ show_result (List.hd other)) false
+  match read_all [ frame "not json" ] with
+  | [ Error message ] ->
+      check "bad json says so" (contains message "invalid json")
+  | other -> check ("bad json: " ^ show_opt (Some (List.hd other))) false
 
 let test_two_frames_one_chunk () =
   let a = frame {|{"jsonrpc":"2.0","method":"initialized"}|} in
@@ -156,16 +162,17 @@ let test_write_round_trip () =
   in
   let r, w = Unix.pipe () in
   let oc = Unix.out_channel_of_descr w in
-  Jide_lsp.Framing.write { input = stdin; output = oc } request;
+  Jide_lsp.Framing.write
+    (Jide_lsp.Framing.create ~input:stdin ~output:oc)
+    request;
   close_out oc;
   let ic = Unix.in_channel_of_descr r in
-  let strip_cr s =
-    if String.length s > 0 && s.[String.length s - 1] = '\r' then
-      String.sub s 0 (String.length s - 1)
-    else s
+  let strip_cr line =
+    if String.length line > 0 && Char.equal line.[String.length line - 1] '\r'
+    then String.sub line 0 (String.length line - 1)
+    else line
   in
   let header = strip_cr (input_line ic) in
-  let content_type = strip_cr (input_line ic) in
   let blank = strip_cr (input_line ic) in
   let prefix = "Content-Length: " in
   let body_length =
@@ -183,7 +190,6 @@ let test_write_round_trip () =
   in
   close_in_noerr ic;
   check "written header" (body_length > 0);
-  check "written content type" (String.length content_type > 0);
   check "written blank line" (String.equal blank "");
   let parsed = Yojson.Safe.from_string body in
   check "written body"
@@ -191,6 +197,142 @@ let test_write_round_trip () =
     | `Assoc fields ->
         List.mem_assoc "id" fields && List.mem_assoc "method" fields
     | _ -> false)
+
+(* A negative length followed by a second Content-Length must not be
+   honoured: the first error poisons the stream. *)
+let test_minus_one_then_second_header () =
+  let body = {|{"jsonrpc":"2.0","method":"exit"}|} in
+  let raw =
+    Printf.sprintf "Content-Length: -1\r\nContent-Length: %d\r\n\r\n%s"
+      (String.length body) body
+  in
+  match read_all [ raw ] with
+  | [ Error message ] ->
+      check "minus one names the negative length" (contains message "negative")
+  | other ->
+      check
+        ("minus one: " ^ String.concat " " (List.map show_result other))
+        false
+
+let test_negative_length () =
+  match read_all [ "Content-Length: -2\r\n\r\n{}" ] with
+  | [ Error message ] ->
+      check "negative length is an error" (contains message "negative")
+  | other ->
+      check
+        ("negative length: " ^ String.concat " " (List.map show_result other))
+        false
+
+let test_huge_length () =
+  match read_all [ "Content-Length: 1073741824\r\n\r\n" ] with
+  | [ Error message ] ->
+      check "huge length is refused before reading"
+        (contains message "frame limit")
+  | other ->
+      check
+        ("huge length: " ^ String.concat " " (List.map show_result other))
+        false
+
+let test_no_content_length () =
+  match read_all [ "Content-Type: application/json\r\n\r\n{}" ] with
+  | [ Error message ] ->
+      check "missing length is an error" (contains message "no Content-Length")
+  | other ->
+      check
+        ("missing length: " ^ String.concat " " (List.map show_result other))
+        false
+
+let test_two_content_lengths () =
+  let body = {|{"jsonrpc":"2.0","method":"exit"}|} in
+  let raw =
+    Printf.sprintf "Content-Length: %d\r\nContent-Length: %d\r\n\r\n%s"
+      (String.length body) (String.length body) body
+  in
+  match read_all [ raw ] with
+  | [ Error message ] ->
+      check "two lengths are refused" (contains message "more than one")
+  | other ->
+      check
+        ("two lengths: " ^ String.concat " " (List.map show_result other))
+        false
+
+let test_header_without_colon () =
+  match read_all [ "not a header\r\n\r\n{}" ] with
+  | [ Error message ] -> check "header without colon" (contains message "colon")
+  | other ->
+      check
+        ("header without colon: "
+        ^ String.concat " " (List.map show_result other))
+        false
+
+let nested_body depth =
+  String.concat "" (List.init depth (fun _ -> "["))
+  ^ String.concat "" (List.init depth (fun _ -> "]"))
+
+let test_deeply_nested_body () =
+  let body = nested_body 1_000_000 in
+  check "the hostile body is about 2 MB" (String.length body = 2_000_000);
+  match read_all [ frame body ] with
+  | [ Error message ] ->
+      check "deep nesting is refused" (contains message "nesting depth")
+  | other ->
+      check
+        ("deep nesting: " ^ String.concat " " (List.map show_result other))
+        false
+
+let test_depth_boundary () =
+  let rec deep n = if n = 0 then `Null else `List [ deep (n - 1) ] in
+  let body depth =
+    Yojson.Safe.to_string
+      (`Assoc
+        [
+          ("jsonrpc", `String "2.0");
+          ("id", `Int 1);
+          ("method", `String "x");
+          ("params", deep depth);
+        ])
+  in
+  (match read_all [ frame (body (Jide_lsp.Framing.max_json_depth - 10)) ] with
+  | [ Ok _ ] -> check "a body under the limit is accepted" true
+  | other ->
+      check
+        ("under the limit: " ^ String.concat " " (List.map show_result other))
+        false);
+  match read_all [ frame (body (Jide_lsp.Framing.max_json_depth + 10)) ] with
+  | [ Error message ] ->
+      check "a body over the limit is refused"
+        (contains message "nesting depth")
+  | other ->
+      check
+        ("over the limit: " ^ String.concat " " (List.map show_result other))
+        false
+
+let test_braces_in_strings () =
+  let body =
+    Yojson.Safe.to_string
+      (`Assoc
+        [
+          ("jsonrpc", `String "2.0");
+          ("method", `String "exit");
+          ("params", `Assoc [ ("text", `String (nested_body 1000)) ]);
+        ])
+  in
+  match read_all [ frame body ] with
+  | [ Ok _ ] -> check "braces inside a string do not count" true
+  | other ->
+      check
+        ("braces in strings: " ^ String.concat " " (List.map show_result other))
+        false
+
+let test_non_json_body () =
+  match read_all [ frame "hello" ] with
+  | [ Error message ] ->
+      check "a non-JSON body is invalid json, not nesting"
+        (contains message "invalid json")
+  | other ->
+      check
+        ("non-JSON body: " ^ String.concat " " (List.map show_result other))
+        false
 
 let () =
   test_notification ();
@@ -205,6 +347,16 @@ let () =
   test_two_frames_one_chunk ();
   test_end_of_input ();
   test_write_round_trip ();
+  test_minus_one_then_second_header ();
+  test_negative_length ();
+  test_huge_length ();
+  test_no_content_length ();
+  test_two_content_lengths ();
+  test_header_without_colon ();
+  test_deeply_nested_body ();
+  test_depth_boundary ();
+  test_braces_in_strings ();
+  test_non_json_body ();
   if !failures = 0 then print_endline "all framing tests passed"
   else (
     Printf.printf "%d framing test(s) failed\n" !failures;

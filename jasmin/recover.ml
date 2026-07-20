@@ -247,3 +247,35 @@ let dropped_of scan ~from ~upto =
           ~end_byte:(Scan.start_byte scan upto);
     }
 
+type attempt =
+  | Restart of {
+      source : int;  (** The checkpoint's token index. *)
+      target : int;  (** Where to resume reading. *)
+      checkpoint : Syntax.pprogram I.checkpoint;
+      statement : bool;  (** True for a statement checkpoint. *)
+    }
+
+let next_attempt state ~failure =
+  let statement () =
+    match statement_before state failure with
+    | None -> None
+    | Some (source, checkpoint) -> (
+        let depth = (Scan.token state.scan source).depth in
+        match Scan.next_statement state.scan ~from:failure ~depth with
+        | Some target
+          when target > source && not (was_tried state (source, target)) ->
+            Some (Restart { source; target; checkpoint; statement = true })
+        | _ -> None)
+  in
+  let item () =
+    match boundary_at state state.closed_item with
+    | Some (source, checkpoint) when source = state.closed_item -> (
+        match Scan.next_item state.scan ~from:failure with
+        | Some target
+          when target > source && not (was_tried state (source, target)) ->
+            Some (Restart { source; target; checkpoint; statement = false })
+        | _ -> None)
+    | _ -> None
+  in
+  match statement () with Some attempt -> Some attempt | None -> item ()
+
