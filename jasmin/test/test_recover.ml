@@ -174,3 +174,82 @@ fn third(reg u32 a) -> reg u32 {
 }
 |}
 
+let test_valid () =
+  let parsed = parse valid in
+  check "valid: no diagnostics" (Jide_jasmin.Parse.diagnostics parsed = []);
+  check "valid: nothing dropped" (Jide_jasmin.Parse.dropped parsed = []);
+  check "valid: two items" (List.length (Jide_jasmin.Parse.items parsed) = 2);
+  check "valid: the items keep their names"
+    (item_names parsed = [ "first"; "second" ]);
+  check "valid: no restart" (recoveries parsed = 0)
+
+(* The compiler's own error is the first diagnostic, on its location and its
+   message, for every fault. *)
+let test_first_error_is_the_compilers () =
+  let cases =
+    [
+      ("broken header", with_broken_header);
+      ("missing rbrace", missing_rbrace);
+      ("missing semicolon", missing_semicolon);
+      ("missing fn", missing_fn);
+    ]
+  in
+  List.iter
+    (fun (label, text) ->
+      match (compiler_diagnostic text, first_diagnostic (parse text)) with
+      | Some expected, Some actual ->
+          check (label ^ ": same span") (same_span expected actual);
+          check (label ^ ": same message") (expected.message = actual.message);
+          check (label ^ ": same code")
+            (expected.code = actual.code && expected.code = Some "parse")
+      | Some _, None -> check (label ^ ": a diagnostic survives recovery") false
+      | None, _ -> check (label ^ ": the fixture does not parse") false)
+    cases
+
+let test_later_items_survive () =
+  let parsed = parse first_item_broken in
+  check "later items: both later items are in the tree"
+    (List.length (Jide_jasmin.Parse.items parsed) = 2);
+  check "later items: their names"
+    (item_names parsed = [ "second"; "third" ]);
+  check "later items: the broken one is stubbed"
+    (dropped_names parsed = [ "first" ]);
+  check "later items: the stub is an item stub"
+    (List.exists
+       (function
+         | Jide_jasmin.Recover.Dropped { kind; _ } -> kind = "function")
+       (Jide_jasmin.Parse.dropped parsed));
+  check "later items: the checkpoint restart did the work"
+    (item_restarts parsed >= 1 && byte_restarts parsed = 0)
+
+let test_missing_rbrace () =
+  let parsed = parse missing_rbrace in
+  check "missing rbrace: the item after the broken one is in the tree"
+    (item_names parsed = [ "second" ]);
+  check "missing rbrace: the broken one is stubbed"
+    (dropped_names parsed = [ "first" ])
+
+let test_missing_semicolon () =
+  let parsed = parse missing_semicolon in
+  check "missing semicolon: both items are in the tree"
+    (item_names parsed = [ "first"; "second" ]);
+  check "missing semicolon: nothing is dropped"
+    (Jide_jasmin.Parse.dropped parsed = []);
+  check "missing semicolon: a statement checkpoint did the work"
+    (statement_restarts parsed >= 1);
+  check "missing semicolon: the repaired body is reported"
+    (List.length (Jide_jasmin.Parse.recovered parsed) >= 1)
+
+let test_missing_fn () =
+  let parsed = parse missing_fn in
+  check "missing fn: the items around the broken one are in the tree"
+    (item_names parsed = [ "first"; "third" ]);
+  check "missing fn: the broken item is stubbed with its name"
+    (dropped_names parsed = [ "second" ]);
+  check "missing fn: the item-level byte restart did the work"
+    (byte_restarts parsed >= 1)
+
+(* The guard against grammar drift: the tokens the driver restarts at are the
+   grammar's own FIRST sets, read from Menhir's inspection API. *)
+module Interpreter = Jasmin.Parser.MenhirInterpreter
+
