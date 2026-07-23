@@ -174,6 +174,33 @@ fn third(reg u32 a) -> reg u32 {
 }
 |}
 
+(* The two remaining mutations the recovery spike injected: an unmatched
+   right parenthesis inserted inside a body, and a call cut where its
+   arguments begin. *)
+let inserted_rparen =
+  {|fn first(reg u32 a) -> reg u32 {
+  reg u32 b;
+  b = a);
+  return b;
+}
+
+fn second(reg u32 a) -> reg u32 {
+  return a;
+}
+|}
+
+let truncated_call =
+  {|fn first(reg u32 a) -> reg u32 {
+  reg u32 b;
+  b = foo(a
+  return b;
+}
+
+fn second(reg u32 a) -> reg u32 {
+  return a;
+}
+|}
+
 let test_valid () =
   let parsed = parse valid in
   check "valid: no diagnostics" (Jide_jasmin.Parse.diagnostics parsed = []);
@@ -184,14 +211,17 @@ let test_valid () =
   check "valid: no restart" (recoveries parsed = 0)
 
 (* The compiler's own error is the first diagnostic, on its location and its
-   message, for every fault. *)
+   message, for every fault, and it is the only diagnostic the driver adds to
+   it: recovery rewrites bytes or skips them, it does not invent errors. *)
 let test_first_error_is_the_compilers () =
   let cases =
     [
+      ("delete rbrace", missing_rbrace);
+      ("delete semicolon", missing_semicolon);
+      ("insert rparen", inserted_rparen);
+      ("truncate call", truncated_call);
+      ("delete fn", missing_fn);
       ("broken header", with_broken_header);
-      ("missing rbrace", missing_rbrace);
-      ("missing semicolon", missing_semicolon);
-      ("missing fn", missing_fn);
     ]
   in
   List.iter
@@ -201,7 +231,9 @@ let test_first_error_is_the_compilers () =
           check (label ^ ": same span") (same_span expected actual);
           check (label ^ ": same message") (expected.message = actual.message);
           check (label ^ ": same code")
-            (expected.code = actual.code && expected.code = Some "parse")
+            (expected.code = actual.code && expected.code = Some "parse");
+          check (label ^ ": one diagnostic")
+            (List.length (Jide_jasmin.Parse.diagnostics (parse text)) = 1)
       | Some _, None -> check (label ^ ": a diagnostic survives recovery") false
       | None, _ -> check (label ^ ": the fixture does not parse") false)
     cases
@@ -248,6 +280,75 @@ let test_missing_fn () =
     (dropped_names parsed = [ "second" ]);
   check "missing fn: the item-level byte restart did the work"
     (byte_restarts parsed >= 1)
+
+(* A fault inside a body keeps the function it is in: the statement is
+   dropped, the rest of the body and the item after it are not. *)
+let test_statement_faults () =
+  List.iter
+    (fun (label, text) ->
+      let parsed = parse text in
+      check (label ^ ": both functions are in the tree")
+        (item_names parsed = [ "first"; "second" ]);
+      check (label ^ ": nothing is dropped")
+        (Jide_jasmin.Parse.dropped parsed = []);
+      check (label ^ ": a statement checkpoint did the work")
+        (statement_restarts parsed >= 1 && item_restarts parsed = 0))
+    [ ("insert rparen", inserted_rparen); ("truncate call", truncated_call) ]
+
+(* The restart sets name token kinds: a name token starts a statement
+   whatever the name is. Structural equality would accept only the empty
+   name written into the set, which is exactly what a name-level comparison
+   against the grammar cannot see. *)
+let test_token_matching () =
+  check "tokens: a name starts a statement"
+    (Jide_jasmin.Scan.statement_start (Jasmin.Parser.NID "anything"));
+  check "tokens: the empty name does too"
+    (Jide_jasmin.Scan.statement_start (Jasmin.Parser.NID ""));
+  List.iter
+    (fun token ->
+      check "tokens: the statement set accepts its members"
+        (Jide_jasmin.Scan.statement_start token))
+    Jide_jasmin.Scan.statement_tokens;
+  List.iter
+    (fun token ->
+      check "tokens: the item set accepts its members"
+        (Jide_jasmin.Scan.item_start token))
+    Jide_jasmin.Scan.item_tokens;
+  check "tokens: a token outside the statement set is not a start"
+    (not (Jide_jasmin.Scan.statement_start Jasmin.Parser.RETURN));
+  check "tokens: a token outside the item set is not a start"
+    (not (Jide_jasmin.Scan.item_start Jasmin.Parser.RETURN));
+  check "tokens: the statement set has no duplicates"
+    (List.length
+       (List.sort_uniq compare Jide_jasmin.Scan.statement_tokens)
+    = List.length Jide_jasmin.Scan.statement_tokens);
+  check "tokens: the item set has no duplicates"
+    (List.length (List.sort_uniq compare Jide_jasmin.Scan.item_tokens)
+    = List.length Jide_jasmin.Scan.item_tokens)
+
+(* The stub keeps the bytes of the item it stands for, so an outline can
+   place it and the typing loop can tell which diagnostics fall inside
+   recovered text. *)
+let test_stub_span () =
+  match Jide_jasmin.Parse.dropped (parse first_item_broken) with
+  | [ Jide_jasmin.Recover.Dropped { name; span; _ } ] ->
+      check "stub: the name" (name = Some "first");
+      check "stub: it begins at the broken item"
+        (span.Jide_lang.Span.start_byte = 0);
+      check "stub: it ends where the next item begins"
+        (span.Jide_lang.Span.end_byte > 0
+        && contains
+             (String.sub first_item_broken span.Jide_lang.Span.end_byte
+                (String.length first_item_broken - span.end_byte))
+             "fn second");
+      check "stub: the recovered region is the stub's span"
+        (List.exists
+           (fun (recovered : Jide_lang.Span.t) -> recovered = span)
+           (Jide_jasmin.Parse.recovered (parse first_item_broken)))
+  | other ->
+      check
+        ("stub: one stub, got " ^ string_of_int (List.length other))
+        false
 
 (* The guard against grammar drift: the tokens the driver restarts at are the
    grammar's own FIRST sets, read from Menhir's inspection API. *)

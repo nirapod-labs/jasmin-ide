@@ -48,7 +48,16 @@ let item_tokens =
     Parser.SHARPLBRACKET;
   ]
 
-let item_start token = List.mem token item_tokens
+(** Two tokens are the same token when their constructors match. A token that
+    carries a value, which here is always a name, matches any value of its
+    constructor: the sets below name token kinds, and a restart point must be
+    found whatever the identifier at it happens to be spelled. Structural
+    equality alone would make the name in {!statement_tokens} the only name
+    that starts a statement. *)
+let same_token (a : Parser.token) (b : Parser.token) =
+  match (a, b) with Parser.NID _, Parser.NID _ -> true | _ -> a = b
+
+let item_start token = List.exists (same_token token) item_tokens
 
 (** Tokens that can begin a statement inside a function body, as the
     grammar's FIRST set for [pinstr] has them. The guard test pins this set
@@ -73,7 +82,7 @@ let statement_tokens =
     Parser.WHILE;
   ]
 
-let statement_start token = List.mem token statement_tokens
+let statement_start token = List.exists (same_token token) statement_tokens
 
 type token = {
   token : Parser.token;

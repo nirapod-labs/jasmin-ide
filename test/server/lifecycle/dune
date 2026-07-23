@@ -3,6 +3,25 @@
 ; framed pipe drives it where only bytes will do (the exit codes and the
 ; frame reader's refusals). Both executables are dependencies, not
 ; libraries, because every test runs the real binary.
+;
+; Every input of these tests is either a `.t` file, which dune adds to the
+; stanza itself, or one of the four entries below: the two helpers the tests
+; run from the sandbox and the two executables they drive. A file a test
+; reads that is not listed here would not invalidate its recorded result, so
+; a fixture added later belongs in this list too.
+;
+; The binaries stay declared even though dune would build them anyway: the
+; dependency is what makes a rebuilt server or client re-run the cram tests
+; instead of leaving a recorded pass from the previous binary in place.
+;
+; `make test` runs these tests on every run: `dune runtest --force` does not
+; re-execute a cram test whose record is current (measured, see docs/ci.md
+; "The test step"), so `scripts/runtest.sh` first takes the records back with
+; `dune clean` and then runs the tests. It fails the step when a `.t` file
+; here has no record after a green run. The stanza must never be given
+; `(files ...)`, `(applies_to ...)` or an `(enabled_if false)`: each of those
+; leaves a `.t` file in the tree with no record, which is exactly what the
+; runner refuses.
 
 (cram
  (deps
