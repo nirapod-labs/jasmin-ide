@@ -253,3 +253,123 @@ let test_missing_fn () =
    grammar's own FIRST sets, read from Menhir's inspection API. *)
 module Interpreter = Jasmin.Parser.MenhirInterpreter
 
+let first_terminal_names (nonterminal : _ Interpreter.nonterminal) =
+  Interpreter.foreach_terminal_but_error
+    (fun symbol acc ->
+      match symbol with
+      | Interpreter.X (Interpreter.T terminal) ->
+          if Interpreter.first nonterminal terminal then
+            Token_names.terminal_name terminal :: acc
+          else acc
+      | Interpreter.X (Interpreter.N _) -> acc)
+    []
+  |> List.sort_uniq String.compare
+
+let driver_names tokens =
+  List.sort_uniq String.compare (List.map Token_names.token_name tokens)
+
+let test_guard_top () =
+  let top = first_terminal_names Interpreter.N_top in
+  let type_token = first_terminal_names Interpreter.N_ptype in
+  (* A top-level item that begins with a type is a global declaration, and a
+     type name cannot be told from a stray identifier, so those tokens are
+     not restart points. Every other token that can start an item is. *)
+  let keywords = List.filter (fun name -> not (List.mem name type_token)) top in
+  check "guard: the driver's item set is the grammar's item keywords"
+    (driver_names Jide_jasmin.Scan.item_tokens = keywords);
+  check "guard: no restart point is a type"
+    (List.for_all
+       (fun name -> not (List.mem name type_token))
+       (driver_names Jide_jasmin.Scan.item_tokens));
+  check "guard: every token that starts an item is accounted for"
+    (List.for_all
+       (fun name -> List.mem name top)
+       (driver_names Jide_jasmin.Scan.item_tokens))
+
+let test_guard_statement () =
+  let pinstr = first_terminal_names Interpreter.N_pinstr in
+  check "guard: the driver's statement set is the grammar's"
+    (driver_names Jide_jasmin.Scan.statement_tokens = pinstr)
+
+let test_size_policy () =
+  let text = String.make ((8 * 1024 * 1024) + 1) ' ' in
+  let parsed = parse text in
+  check "size: one diagnostic" (List.length (Jide_jasmin.Parse.diagnostics parsed) = 1);
+  check "size: nothing parsed" (Jide_jasmin.Parse.items parsed = []);
+  check "size: the message says so"
+    (match Jide_jasmin.Parse.diagnostics parsed with
+    | [ diagnostic ] -> contains diagnostic.Jide_lang.Diagnostic.message "larger"
+    | _ -> false)
+
+let test_byte_order_mark () =
+  let marked = "\xef\xbb\xbf" ^ valid in
+  let parsed = parse marked in
+  check "bom: no diagnostics" (Jide_jasmin.Parse.diagnostics parsed = []);
+  check "bom: both items" (List.length (Jide_jasmin.Parse.items parsed) = 2);
+  (* Blanking keeps the length, so every offset after the mark is the
+     marked file's own offset: the same item ends three bytes later than it
+     does without the mark, and nothing else moves. *)
+  check "bom: the offsets are the marked file's own"
+    (ends parsed
+    = List.map (fun at -> at + 3) (ends (parse valid)))
+
+let test_empty_and_comment () =
+  let empty = parse "" in
+  check "empty: clean" (Jide_jasmin.Parse.diagnostics empty = []);
+  check "empty: no items" (Jide_jasmin.Parse.items empty = []);
+  let comment = parse "// nothing here\n\n/* nor here */\n" in
+  check "comment: clean" (Jide_jasmin.Parse.diagnostics comment = []);
+  check "comment: no items" (Jide_jasmin.Parse.items comment = [])
+
+let test_recovery_bound () =
+  let item index =
+    Printf.sprintf
+      "fn f%d(reg u32 a) -> reg u32 {\n  reg u32 b;\n  b = ;\n  return a;\n}\n\n"
+      index
+  in
+  let buffer = Buffer.create 4096 in
+  for index = 0 to 99 do
+    Buffer.add_string buffer (item index)
+  done;
+  let text = Buffer.contents buffer in
+  let parsed = parse text in
+  check "bound: never more than fifty restarts" (recoveries parsed <= 50);
+  check "bound: it stops at exactly fifty" (recoveries parsed = 50)
+
+let test_no_exception_escapes () =
+  let hostile =
+    [
+      "fn \x00 f( {\n";
+      String.concat "" [ "fn f() { "; String.make 2000 '{'; " }" ];
+      "namespace N { namespace M { fn f( ";
+      "\xff\xfe\xfd";
+      {|require "unterminated|};
+    ]
+  in
+  List.iter
+    (fun text ->
+      match parse text with
+      | parsed ->
+          check "hostile: a parse always answers"
+            (List.length (Jide_jasmin.Parse.diagnostics parsed) >= 1)
+      | exception _ -> check "hostile: nothing escapes" false)
+    hostile
+
+let () =
+  test_valid ();
+  test_first_error_is_the_compilers ();
+  test_later_items_survive ();
+  test_missing_rbrace ();
+  test_missing_semicolon ();
+  test_missing_fn ();
+  test_guard_top ();
+  test_guard_statement ();
+  test_size_policy ();
+  test_byte_order_mark ();
+  test_empty_and_comment ();
+  test_recovery_bound ();
+  test_no_exception_escapes ();
+  if !failures = 0 then print_endline "all recovery tests passed"
+  else (
+    Printf.printf "%d recovery test(s) failed\n" !failures;
+    exit 1)
