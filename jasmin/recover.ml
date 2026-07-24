@@ -26,7 +26,6 @@
     parser is wrapped: no exception leaves this module. *)
 
 open Jasmin
-
 module I = Parser.MenhirInterpreter
 
 (** A broken item, kept so the outline can show it and so typing knows not
@@ -46,7 +45,12 @@ type counters = {
 }
 
 let no_counters () =
-  { recoveries = 0; item_restarts = 0; statement_restarts = 0; byte_restarts = 0 }
+  {
+    recoveries = 0;
+    item_restarts = 0;
+    statement_restarts = 0;
+    byte_restarts = 0;
+  }
 
 type t = {
   items : Syntax.pprogram;
@@ -55,7 +59,8 @@ type t = {
       (** The bytes the driver rewrote or skipped. A typing diagnostic
           inside one of them is a consequence of the broken syntax, not of
           the program, so the typing loop drops it. *)
-  diagnostics : Jide_lang.Diagnostic.t list;  (** Beyond the compiler's first. *)
+  diagnostics : Jide_lang.Diagnostic.t list;
+      (** Beyond the compiler's first. *)
   counters : counters;
 }
 
@@ -96,13 +101,12 @@ let accepts checkpoint (entry : Scan.token) =
   try I.acceptable checkpoint entry.token entry.start_pos with _ -> false
 
 let record state ~index checkpoint =
-  if index < Scan.count state.scan then begin
+  if index < Scan.count state.scan then (
     let entry = Scan.token state.scan index in
     if Scan.item_start entry.token && accepts checkpoint entry then
       state.boundaries := (index, checkpoint) :: !(state.boundaries);
     if Scan.statement_boundary state.scan index then
-      state.statements := (index, checkpoint) :: !(state.statements)
-  end
+      state.statements := (index, checkpoint) :: !(state.statements))
 
 (* The driver's inner loop: offer tokens, run reductions, stop when the
    parser accepts or refuses. *)
@@ -113,24 +117,24 @@ type step =
 
 let rec drive state ~index ~eof_sent checkpoint =
   match checkpoint with
-  | I.InputNeeded environment ->
+  | I.InputNeeded environment -> (
       let checkpoint = I.input_needed environment in
       state.offered <- false;
       record state ~index checkpoint;
-      (if index < Scan.count state.scan then
-         match I.offer checkpoint (Scan.triple state.scan index) with
-         | next ->
-             state.offered <- true;
-             drive state ~index:(index + 1) ~eof_sent next
-         | exception exn -> Raised (index, exn)
-       else if eof_sent then Failed (min (index - 1) (Scan.count state.scan))
-       else
-         match I.offer checkpoint (Scan.eof_triple state.scan) with
-         | next ->
-             state.offered <- true;
-             drive state ~index:(index + 1) ~eof_sent:true next
-         | exception exn -> Raised (index, exn))
-  | I.AboutToReduce (_, production) ->
+      if index < Scan.count state.scan then
+        match I.offer checkpoint (Scan.triple state.scan index) with
+        | next ->
+            state.offered <- true;
+            drive state ~index:(index + 1) ~eof_sent next
+        | exception exn -> Raised (index, exn)
+      else if eof_sent then Failed (min (index - 1) (Scan.count state.scan))
+      else
+        match I.offer checkpoint (Scan.eof_triple state.scan) with
+        | next ->
+            state.offered <- true;
+            drive state ~index:(index + 1) ~eof_sent:true next
+        | exception exn -> Raised (index, exn))
+  | I.AboutToReduce (_, production) -> (
       (* A completed item: the next item begins at the token the parser is
          looking at, when it is looking at one, and at the next token to
          read when the reduction was a default one. Only an item at the top
@@ -138,10 +142,11 @@ let rec drive state ~index ~eof_sent checkpoint =
          with an unclosed brace. *)
       (match I.lhs production with
       | I.X (I.N nonterminal) ->
-          if I.compare_nonterminals nonterminal I.N_top = 0 then begin
+          if I.compare_nonterminals nonterminal I.N_top = 0 then
             let at = if state.offered then index - 1 else index in
-            if at >= Scan.count state.scan
-               || (Scan.token state.scan at).depth = 0
+            if
+              at >= Scan.count state.scan
+              || (Scan.token state.scan at).depth = 0
             then state.closed_item <- at
           end
       | I.X (I.T _) -> ());

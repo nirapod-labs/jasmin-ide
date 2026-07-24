@@ -463,6 +463,9 @@ let () =
   test_missing_rbrace ();
   test_missing_semicolon ();
   test_missing_fn ();
+  test_statement_faults ();
+  test_token_matching ();
+  test_stub_span ();
   test_guard_top ();
   test_guard_statement ();
   test_size_policy ();
