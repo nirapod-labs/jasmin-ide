@@ -107,9 +107,7 @@ let token t index = t.tokens.(index)
 let text t = t.text
 let name t = t.name
 let eof_position t = t.eof
-
-let span t ~start_byte ~end_byte =
-  Jide_lang.Span.make ~start_byte ~end_byte
+let span t ~start_byte ~end_byte = Jide_lang.Span.make ~start_byte ~end_byte
 
 (** The three bytes of a byte order mark. Jasmin has no use for one and the
     lexer would reject it, so it is blanked before anything is read. The
@@ -128,8 +126,7 @@ let blank_bom text =
   let length = bom_length text in
   if length = 0 then text
   else
-    String.make length ' '
-    ^ String.sub text length (String.length text - length)
+    String.make length ' ' ^ String.sub text length (String.length text - length)
 
 (** [blank text ~from ~upto] replaces the bytes of that range with spaces,
     keeping newlines and the length. *)
@@ -137,13 +134,12 @@ let blank text ~from ~upto =
   let length = String.length text in
   let from = max 0 from and upto = min length upto in
   if upto <= from then text
-  else begin
+  else
     let bytes = Bytes.of_string text in
     for index = from to upto - 1 do
       if Bytes.get bytes index <> '\n' then Bytes.set bytes index ' '
     done;
     Bytes.to_string bytes
-  end
 
 (* A lexing error, carrying the bytes the lexer stopped at. *)
 exception Stopped of Jide_lang.Span.t
@@ -199,7 +195,8 @@ let lex_all ~name text =
         if repairs <= 0 then ([], text)
         else
           let text' = blank_line text span.Jide_lang.Span.start_byte in
-          if String.equal text' text then ([], text) else attempt text' (repairs - 1)
+          if String.equal text' text then ([], text)
+          else attempt text' (repairs - 1)
   in
   attempt text max_lexical_repairs
 
@@ -267,17 +264,15 @@ let next_item t ~from =
   let length = count t in
   let from = max 0 from in
   if from >= length then None
-  else begin
+  else
     let best_depth = ref max_int and best = ref None in
     for index = from to length - 1 do
       let entry = t.tokens.(index) in
-      if item_start entry.token && entry.depth < !best_depth then begin
+      if item_start entry.token && entry.depth < !best_depth then (
         best_depth := entry.depth;
-        best := Some index
-      end
+        best := Some index)
     done;
     !best
-  end
 
 (** [statement_boundary t index] is true when the token at [index] begins a
     statement: it is one of the statement's own first tokens and the token
@@ -323,5 +318,4 @@ let next_statement t ~from ~depth =
 (** The byte an item starts at, for a prefix that ends the last closed item
     exactly where the next one begins. *)
 let start_byte t index =
-  if index >= count t then String.length t.text
-  else t.tokens.(index).start_byte
+  if index >= count t then String.length t.text else t.tokens.(index).start_byte

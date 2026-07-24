@@ -6,7 +6,6 @@
     is the only representation the two have in common: a terminal carrying
     a value cannot be turned back into a token. *)
 
-
 let token_name : Jasmin.Parser.token -> string = function
   | WHILE -> "WHILE"
   | UNDERSCORE -> "UNDERSCORE"
@@ -85,7 +84,8 @@ let token_name : Jasmin.Parser.token -> string = function
   | AMP -> "AMP"
   | ALIGNED -> "ALIGNED"
 
-let terminal_name : type a. a Jasmin.Parser.MenhirInterpreter.terminal -> string =
+let terminal_name : type a. a Jasmin.Parser.MenhirInterpreter.terminal -> string
+    =
  fun terminal ->
   match terminal with
   | Jasmin.Parser.MenhirInterpreter.T_error -> "error"

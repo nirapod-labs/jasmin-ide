@@ -7,7 +7,56 @@ type result = {
 }
 
 let empty = { diagnostics = []; warnings = []; facts = Facts.empty }
+
+(** The most diagnostics one check returns, syntax and typing together. *)
 let max_diagnostics = 200
+
+(** The first [count] entries of a list. *)
+let rec take count = function
+  | _ when count <= 0 -> []
+  | [] -> []
+  | entry :: rest -> entry :: take (count - 1) rest
+
+(** The kind of name an item declares, as the compiler's own messages spell
+    it. An item that did not reach the environment is remembered by its kind,
+    because the message a later reference to it produces depends on that
+    kind: a function is an unknown function, a parameter or a global is an
+    unknown variable, and a type alias is a type the compiler cannot find. *)
+type declaration = Function of string | Variable of string | Alias of string
+
+(** The message the compiler prints for a reference to [declaration] it
+    cannot resolve. A name that was dropped by recovery or whose item failed
+    to type is not in the environment, so every later reference to it would
+    produce this message; it is a consequence of the first failure, not a
+    second one, and the typing loop drops it. *)
+let unresolved_message = function
+  | Function name -> Printf.sprintf "unknown function: `%s'" name
+  | Variable name -> Printf.sprintf "unknown variable: `%s'" name
+  | Alias name -> Printf.sprintf "Type '%s' not found" name
+
+(** The declaration an item makes, when the compiler names the item by one. *)
+let declaration_of_item (item : Syntax.pitem Location.located) =
+  match Location.unloc item with
+  | Syntax.PFundef definition ->
+      Some (Function (Location.unloc definition.pdf_name))
+  | Syntax.PParam parameter ->
+      Some (Variable (Location.unloc parameter.ppa_name))
+  | Syntax.PGlobal global -> Some (Variable (Location.unloc global.pgd_name))
+  | Syntax.PTypeAlias (name, _, _) -> Some (Alias (Location.unloc name))
+  | Syntax.Pexec _ | Syntax.Prequire _ | Syntax.PNamespace _ -> None
+
+(** The declaration a stub stands for. A namespace has no single name, so a
+    dropped one contributes nothing here: the names inside it are not known
+    until the namespace parses. *)
+let declaration_of_dropped = function
+  | Recover.Dropped { kind = "function"; name = Some name; _ } ->
+      Some (Function name)
+  | Recover.Dropped { kind = "parameter"; name = Some name; _ } ->
+      Some (Variable name)
+  | Recover.Dropped { kind = "global"; name = Some name; _ } ->
+      Some (Variable name)
+  | Recover.Dropped { kind = "type"; name = Some name; _ } -> Some (Alias name)
+  | Recover.Dropped _ -> None
 
 module Make (A : Arch_full.Arch) = struct
   type environment = A.extended_op Pretyping.Env.env
@@ -47,12 +96,37 @@ module Make (A : Arch_full.Arch) = struct
     | prefix, rest when rest == before -> prefix
     | _ -> after
 
-  (** [type_items ~file ~items ~idirs] types the items one by one and
-      returns the diagnostics, plus the environment the loop leaves behind
-      when it started at all. A failed item contributes one diagnostic and
-      the next item is typed in the environment from before it. *)
-  let type_items ~(file : string) ~(items : Syntax.pprogram)
-      ~(idirs : (string * string) list) : result * environment option =
+  (** Entering and leaving a file are calls into the library like any other:
+      the environment they build is threaded through the items, so a raise
+      in either is turned into a diagnostic here rather than escaping. *)
+  let enter_file (environment : environment) (file : string) =
+    match Pretyping.Env.enter_file environment None None file with
+    | entered -> Ok entered
+    | exception exn -> Error exn
+
+  let exit_file (environment : environment) =
+    match Pretyping.Env.exit_file environment with
+    | environment -> Ok environment
+    | exception exn -> Error exn
+
+  (** [type_items ~file ~items ~idirs] types the items of one file one by one
+      and returns the diagnostics, plus the environment the loop leaves
+      behind when it started at all.
+
+      Before each item the environment is kept, and a failed item leaves the
+      environment as it was, so the items after it still type. The names of
+      the items recovery dropped, and of the items whose typing failed, are
+      remembered: a later reference to one of them is the same failure seen
+      again and is not reported a second time. A diagnostic whose span lies
+      in a region recovery rewrote or skipped is dropped for the same
+      reason.
+
+      At most {!max_diagnostics} diagnostics are kept. Every call into the
+      library is wrapped: no exception leaves this module. *)
+  let type_items ~(dropped : Recover.dropped list)
+      ~(recovered : Jide_lang.Span.t list) ~(file : string)
+      ~(items : Syntax.pprogram) ~(idirs : (string * string) list) :
+      result * environment option =
     let initial =
       match List.fold_left Pretyping.Env.add_from Pretyping.Env.empty idirs with
       | environment -> Ok environment

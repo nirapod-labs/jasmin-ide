@@ -148,9 +148,8 @@ let rec drive state ~index ~eof_sent checkpoint =
               at >= Scan.count state.scan
               || (Scan.token state.scan at).depth = 0
             then state.closed_item <- at
-          end
       | I.X (I.T _) -> ());
-      (match I.resume checkpoint with
+      match I.resume checkpoint with
       | next -> drive state ~index ~eof_sent next
       | exception exn -> Raised (index, exn))
   | I.Shifting _ -> (
@@ -187,7 +186,9 @@ let boundary_at state index =
   List.find_opt (fun (at, _) -> at = index) !(state.boundaries)
 
 let statement_before state index =
-  List.find_opt (fun (at, _) -> at < index && at > state.closed_item) !(state.statements)
+  List.find_opt
+    (fun (at, _) -> at < index && at > state.closed_item)
+    !(state.statements)
 
 let was_tried state (source, target) =
   List.exists (fun pair -> pair = (source, target)) !(state.tried)
@@ -234,7 +235,9 @@ let dropped_of scan ~from ~upto =
            began with, which is what deleting [fn] does. Its first token is
            then the name, and a name followed by a parenthesis names a
            function. *)
-        match if from < upto then Some (Scan.token scan from).token else None with
+        match
+          if from < upto then Some (Scan.token scan from).token else None
+        with
         | Some (Parser.NID name) ->
             let called =
               from + 1 < upto
@@ -248,7 +251,8 @@ let dropped_of scan ~from ~upto =
       kind;
       name;
       span =
-        Scan.span scan ~start_byte:(Scan.start_byte scan from)
+        Scan.span scan
+          ~start_byte:(Scan.start_byte scan from)
           ~end_byte:(Scan.start_byte scan upto);
     }
 
@@ -291,10 +295,9 @@ let recover ~name ~text : t =
   let diagnostics = ref [] in
   let raised = ref 0 in
   let note_raise exn =
-    if !raised < 3 then begin
+    if !raised < 3 then (
       incr raised;
-      diagnostics := Error.to_diagnostic (Error.of_exn exn) :: !diagnostics
-    end
+      diagnostics := Error.to_diagnostic (Error.of_exn exn) :: !diagnostics)
   in
   (* Where an item restart would go, or the end of the buffer when the
      broken item is the last one. *)
@@ -306,7 +309,8 @@ let recover ~name ~text : t =
   let note_dropped state ~from ~upto =
     dropped := dropped_of state.scan ~from ~upto :: !dropped;
     recovered :=
-      Scan.span state.scan ~start_byte:(Scan.start_byte state.scan from)
+      Scan.span state.scan
+        ~start_byte:(Scan.start_byte state.scan from)
         ~end_byte:(Scan.start_byte state.scan upto)
       :: !recovered
   in
@@ -337,30 +341,28 @@ let recover ~name ~text : t =
           else counters.item_restarts <- counters.item_restarts + 1;
           state.tried := (source, target) :: !(state.tried);
           prune state source;
-          if statement then begin
+          if statement then (
             recovered :=
-              Scan.span state.scan ~start_byte:(Scan.start_byte state.scan source)
+              Scan.span state.scan
+                ~start_byte:(Scan.start_byte state.scan source)
                 ~end_byte:(Scan.start_byte state.scan target)
               :: !recovered;
-            run_from state ~depth ~start:target checkpoint
-          end
-          else begin
+            run_from state ~depth ~start:target checkpoint)
+          else (
             note_dropped state ~from:source ~upto:target;
             state.closed_item <- source;
-            run_from state ~depth ~start:target checkpoint
-          end
-      | None -> (
+            run_from state ~depth ~start:target checkpoint)
+      | None ->
           let target = target_of state ~failure in
           let from = Scan.start_byte state.scan state.closed_item in
           let upto = Scan.start_byte state.scan target in
           if upto <= from || depth >= max_byte_restarts then finish state ~depth
-          else begin
+          else (
             counters.recoveries <- counters.recoveries + 1;
             counters.byte_restarts <- counters.byte_restarts + 1;
             note_dropped state ~from:state.closed_item ~upto:target;
             pass ~depth:(depth + 1)
-              (Scan.blank (Scan.text state.scan) ~from ~upto)
-          end)
+              (Scan.blank (Scan.text state.scan) ~from ~upto))
   and run_from state ~depth ~start checkpoint =
     match drive state ~index:start ~eof_sent:false checkpoint with
     | Accepted items -> items
@@ -381,9 +383,7 @@ let recover ~name ~text : t =
     in
     if String.equal text (Scan.text state.scan) then []
     else
-      match
-        Parseio.parse_program ~name (Utils.IO.input_string text)
-      with
+      match Parseio.parse_program ~name (Utils.IO.input_string text) with
       | items -> items
       | exception _ -> []
   in

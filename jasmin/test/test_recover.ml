@@ -30,7 +30,8 @@ let compiler_diagnostic text =
       (Jasmin.Utils.IO.input_string text)
   with
   | _ -> None
-  | exception exn -> Some (Jide_jasmin.Error.to_diagnostic (Jide_jasmin.Error.of_exn exn))
+  | exception exn ->
+      Some (Jide_jasmin.Error.to_diagnostic (Jide_jasmin.Error.of_exn exn))
 
 let first_diagnostic parsed =
   match Jide_jasmin.Parse.diagnostics parsed with
@@ -59,8 +60,7 @@ let item_names parsed =
 
 let dropped_names parsed =
   List.filter_map
-    (function
-      | Jide_jasmin.Recover.Dropped { name; _ } -> name)
+    (function Jide_jasmin.Recover.Dropped { name; _ } -> name)
     (Jide_jasmin.Parse.dropped parsed)
 
 let ends parsed =
@@ -72,6 +72,7 @@ let ends parsed =
 let counters parsed = Jide_jasmin.Parse.counters parsed
 let recoveries parsed = (counters parsed).Jide_jasmin.Recover.recoveries
 let item_restarts parsed = (counters parsed).Jide_jasmin.Recover.item_restarts
+
 let statement_restarts parsed =
   (counters parsed).Jide_jasmin.Recover.statement_restarts
 
@@ -232,7 +233,8 @@ let test_first_error_is_the_compilers () =
           check (label ^ ": same message") (expected.message = actual.message);
           check (label ^ ": same code")
             (expected.code = actual.code && expected.code = Some "parse");
-          check (label ^ ": one diagnostic")
+          check
+            (label ^ ": one diagnostic")
             (List.length (Jide_jasmin.Parse.diagnostics (parse text)) = 1)
       | Some _, None -> check (label ^ ": a diagnostic survives recovery") false
       | None, _ -> check (label ^ ": the fixture does not parse") false)
@@ -242,14 +244,12 @@ let test_later_items_survive () =
   let parsed = parse first_item_broken in
   check "later items: both later items are in the tree"
     (List.length (Jide_jasmin.Parse.items parsed) = 2);
-  check "later items: their names"
-    (item_names parsed = [ "second"; "third" ]);
+  check "later items: their names" (item_names parsed = [ "second"; "third" ]);
   check "later items: the broken one is stubbed"
     (dropped_names parsed = [ "first" ]);
   check "later items: the stub is an item stub"
     (List.exists
-       (function
-         | Jide_jasmin.Recover.Dropped { kind; _ } -> kind = "function")
+       (function Jide_jasmin.Recover.Dropped { kind; _ } -> kind = "function")
        (Jide_jasmin.Parse.dropped parsed));
   check "later items: the checkpoint restart did the work"
     (item_restarts parsed >= 1 && byte_restarts parsed = 0)
@@ -287,11 +287,14 @@ let test_statement_faults () =
   List.iter
     (fun (label, text) ->
       let parsed = parse text in
-      check (label ^ ": both functions are in the tree")
+      check
+        (label ^ ": both functions are in the tree")
         (item_names parsed = [ "first"; "second" ]);
-      check (label ^ ": nothing is dropped")
+      check
+        (label ^ ": nothing is dropped")
         (Jide_jasmin.Parse.dropped parsed = []);
-      check (label ^ ": a statement checkpoint did the work")
+      check
+        (label ^ ": a statement checkpoint did the work")
         (statement_restarts parsed >= 1 && item_restarts parsed = 0))
     [ ("insert rparen", inserted_rparen); ("truncate call", truncated_call) ]
 
@@ -319,8 +322,7 @@ let test_token_matching () =
   check "tokens: a token outside the item set is not a start"
     (not (Jide_jasmin.Scan.item_start Jasmin.Parser.RETURN));
   check "tokens: the statement set has no duplicates"
-    (List.length
-       (List.sort_uniq compare Jide_jasmin.Scan.statement_tokens)
+    (List.length (List.sort_uniq compare Jide_jasmin.Scan.statement_tokens)
     = List.length Jide_jasmin.Scan.statement_tokens);
   check "tokens: the item set has no duplicates"
     (List.length (List.sort_uniq compare Jide_jasmin.Scan.item_tokens)
@@ -346,9 +348,7 @@ let test_stub_span () =
            (fun (recovered : Jide_lang.Span.t) -> recovered = span)
            (Jide_jasmin.Parse.recovered (parse first_item_broken)))
   | other ->
-      check
-        ("stub: one stub, got " ^ string_of_int (List.length other))
-        false
+      check ("stub: one stub, got " ^ string_of_int (List.length other)) false
 
 (* The guard against grammar drift: the tokens the driver restarts at are the
    grammar's own FIRST sets, read from Menhir's inspection API. *)
@@ -395,11 +395,13 @@ let test_guard_statement () =
 let test_size_policy () =
   let text = String.make ((8 * 1024 * 1024) + 1) ' ' in
   let parsed = parse text in
-  check "size: one diagnostic" (List.length (Jide_jasmin.Parse.diagnostics parsed) = 1);
+  check "size: one diagnostic"
+    (List.length (Jide_jasmin.Parse.diagnostics parsed) = 1);
   check "size: nothing parsed" (Jide_jasmin.Parse.items parsed = []);
   check "size: the message says so"
     (match Jide_jasmin.Parse.diagnostics parsed with
-    | [ diagnostic ] -> contains diagnostic.Jide_lang.Diagnostic.message "larger"
+    | [ diagnostic ] ->
+        contains diagnostic.Jide_lang.Diagnostic.message "larger"
     | _ -> false)
 
 let test_byte_order_mark () =
@@ -411,8 +413,7 @@ let test_byte_order_mark () =
      marked file's own offset: the same item ends three bytes later than it
      does without the mark, and nothing else moves. *)
   check "bom: the offsets are the marked file's own"
-    (ends parsed
-    = List.map (fun at -> at + 3) (ends (parse valid)))
+    (ends parsed = List.map (fun at -> at + 3) (ends (parse valid)))
 
 let test_empty_and_comment () =
   let empty = parse "" in
@@ -425,7 +426,11 @@ let test_empty_and_comment () =
 let test_recovery_bound () =
   let item index =
     Printf.sprintf
-      "fn f%d(reg u32 a) -> reg u32 {\n  reg u32 b;\n  b = ;\n  return a;\n}\n\n"
+      "fn f%d(reg u32 a) -> reg u32 {\n\
+      \  reg u32 b;\n\
+      \  b = ;\n\
+      \  return a;\n\
+       }\n\n"
       index
   in
   let buffer = Buffer.create 4096 in
