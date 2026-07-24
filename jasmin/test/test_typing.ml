@@ -61,3 +61,43 @@ fn second(reg u32 a) -> reg u32 {
 |}
 
 (* The same, with a type error of its own in the item that survives. *)
+let broken_first_typed_second =
+  {|fn first(reg u32 a -> reg u32 {
+  return a;
+}
+
+fn second(reg u32 a) -> reg u32 {
+  reg bool b;
+  b = a;
+  return a;
+}
+|}
+
+(* An item that fails to type, and a later item that calls it. *)
+let failed_then_called =
+  {|fn first(reg u32 a) -> reg u32 {
+  reg bool b;
+  b = a;
+  return a;
+}
+
+fn second(reg u32 a) -> reg u32 {
+  reg u32 x;
+  x = first(a);
+  return x;
+}
+|}
+
+(* An item recovery drops, and a later item that calls it. *)
+let dropped_then_called =
+  {|fn first(reg u32 a -> reg u32 {
+  return a;
+}
+
+fn second(reg u32 a) -> reg u32 {
+  reg u32 x;
+  x = first(a);
+  return x;
+}
+|}
+
