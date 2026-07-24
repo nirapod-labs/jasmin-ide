@@ -136,8 +136,10 @@ module Make (A : Arch_full.Arch) = struct
     | Error exn ->
         ({ empty with diagnostics = [ Error.diagnostic_of_exn exn ] }, None)
     | Ok initial -> (
-        match Pretyping.Env.enter_file initial None None file with
-        | None ->
+        match enter_file initial file with
+        | Error exn ->
+            ({ empty with diagnostics = [ Error.diagnostic_of_exn exn ] }, None)
+        | Ok None ->
             ( {
                 empty with
                 diagnostics =
@@ -149,11 +151,36 @@ module Make (A : Arch_full.Arch) = struct
                   ];
               },
               None )
-        | Some (environment, _resolved) ->
+        | Ok (Some (environment, _resolved)) ->
             let environment = ref environment in
             let diagnostics = ref [] in
             let facts = ref Facts.empty in
+            let kept = ref 0 in
             let stopped = ref false in
+            let suppressed = ref [] in
+            let suppress declaration =
+              suppressed := unresolved_message declaration :: !suppressed
+            in
+            List.iter
+              (fun dropped ->
+                Option.iter suppress (declaration_of_dropped dropped))
+              dropped;
+            let keep (error : Error.t) =
+              let recovered_here =
+                List.exists
+                  (fun (span : Jide_lang.Span.t) ->
+                    Jide_lang.Span.overlaps span error.Error.span)
+                  recovered
+              in
+              if
+                Error.belongs_to ~file error
+                && (not (List.mem error.Error.message !suppressed))
+                && not recovered_here
+              then (
+                diagnostics := Error.to_diagnostic error :: !diagnostics;
+                incr kept;
+                if !kept >= max_diagnostics then stopped := true)
+            in
             List.iter
               (fun item ->
                 if not !stopped then
