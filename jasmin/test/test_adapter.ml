@@ -164,7 +164,8 @@ let test_continue_after_failed_item () =
   let parsed = Jide_jasmin.Parse.parse ~name:file first_item_fails in
   check "continue: the fixture parses" (not (Jide_jasmin.Parse.failed parsed));
   let result, environment =
-    Loop.type_items ~file ~items:parsed.items ~idirs:[]
+    Loop.type_items ~dropped:[] ~recovered:[] ~file ~items:parsed.items
+      ~idirs:[]
   in
   check "continue: only the failed item produces a diagnostic"
     (List.length result.Jide_jasmin.Check.diagnostics = 1);
@@ -347,11 +348,12 @@ let test_version () =
     (String.length Jide_jasmin.Adapter.jasmin_version > 0)
 
 let test_recovery_not_yet () =
-  (* The fast path only: a file with a syntax error yields one parse
-     diagnostic and no typing diagnostics, which the recovery driver will
-     later replace with a partial tree. *)
+  (* A file whose only item is broken: recovery drops it, so there is
+     nothing left for the typing loop to type and the compiler's parse
+     diagnostic is the whole result. The loop over a tree that does keep
+     items is tested in the typing tests. *)
   let result = check_text "fast path" with_syntax_error in
-  check "fast path: typing errors suppressed"
+  check "fast path: only the parse error is reported"
     (List.for_all
        (fun (diagnostic : Jide_lang.Diagnostic.t) ->
          diagnostic.code = Some "parse")

@@ -204,20 +204,22 @@ module Make (A : Arch_full.Arch) = struct
                               Error.to_diagnostic error :: !diagnostics);
                       environment := next
                   | Error exn ->
-                      let error = Error.of_exn exn in
-                      (* A span indexes the text of the file its location names.
-                         Typing follows a require into another file, so a failure
-                         there carries that file's offsets and is not this
-                         document's to report. *)
-                      if Error.belongs_to ~file error then
-                        diagnostics := Error.to_diagnostic error :: !diagnostics;
-                      environment := snapshot;
-                      if List.length !diagnostics >= max_diagnostics then
-                        stopped := true)
+                      keep (Error.of_exn exn);
+                      (* The item's own name is now absent from the
+                         environment; a later reference to it would be
+                         reported as unresolved. *)
+                      Option.iter suppress (declaration_of_item item);
+                      environment := snapshot)
               items;
-            let environment = Pretyping.Env.exit_file !environment in
+            let environment =
+              match exit_file !environment with
+              | Ok environment -> Some environment
+              | Error exn ->
+                  diagnostics := Error.diagnostic_of_exn exn :: !diagnostics;
+                  None
+            in
             ( { empty with diagnostics = List.rev !diagnostics; facts = !facts },
-              Some environment ))
+              environment ))
 
   let check ~(file : string) ~(text : string) ~(idirs : (string * string) list)
       : result =
@@ -228,9 +230,16 @@ module Make (A : Arch_full.Arch) = struct
       Warnings.with_capture (fun () ->
           Options.apply ();
           let parsed = Parse.parse ~name:file text in
-          if Parse.failed parsed then
-            { empty with diagnostics = parsed.diagnostics }
-          else fst (type_items ~file ~items:parsed.items ~idirs))
+          let typed, _environment =
+            type_items ~dropped:(Parse.dropped parsed)
+              ~recovered:(Parse.recovered parsed) ~file
+              ~items:(Parse.items parsed) ~idirs
+          in
+          {
+            typed with
+            diagnostics =
+              take max_diagnostics (Parse.diagnostics parsed @ typed.diagnostics);
+          })
     in
     { outcome with warnings = Warnings.parse ~file printed }
 end
