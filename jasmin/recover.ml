@@ -357,63 +357,6 @@ let prune state source =
   state.statements :=
     List.filter (fun (at, _) -> at <= source) !(state.statements)
 
-(** The name a broken item had, read from the tokens of the broken region so
-    the stub can carry it. *)
-let dropped_of scan ~from ~upto =
-  let upto = min upto (Scan.count scan) in
-  let kind_of = function
-    | Parser.FN -> Some "function"
-    | Parser.PARAM -> Some "parameter"
-    | Parser.TYPE -> Some "type"
-    | Parser.NAMESPACE -> Some "namespace"
-    | Parser.GLOBAL -> Some "global"
-    | Parser.EXEC -> Some "exec"
-    | Parser.REQUIRE | Parser.FROM -> Some "require"
-    | _ -> None
-  in
-  let rec keyword index =
-    if index >= upto then None
-    else
-      match kind_of (Scan.token scan index).token with
-      | Some kind -> Some (kind, index)
-      | None -> keyword (index + 1)
-  in
-  let rec name_after index =
-    if index >= upto then None
-    else
-      match (Scan.token scan index).token with
-      | Parser.NID name -> Some name
-      | _ -> name_after (index + 1)
-  in
-  let kind, name =
-    match keyword from with
-    | Some (kind, at) -> (kind, name_after (at + 1))
-    | None -> (
-        (* No keyword left in the region: the broken item lost the one it
-           began with, which is what deleting [fn] does. Its first token is
-           then the name, and a name followed by a parenthesis names a
-           function. *)
-        match
-          if from < upto then Some (Scan.token scan from).token else None
-        with
-        | Some (Parser.NID name) ->
-            let called =
-              from + 1 < upto
-              && (Scan.token scan (from + 1)).token = Parser.LPAREN
-            in
-            ((if called then "function" else "item"), Some name)
-        | _ -> ("item", None))
-  in
-  Dropped
-    {
-      kind;
-      name;
-      span =
-        Scan.span scan
-          ~start_byte:(Scan.start_byte scan from)
-          ~end_byte:(Scan.start_byte scan upto);
-    }
-
 type attempt =
   | Restart of {
       source : int;  (** The checkpoint's token index. *)
@@ -435,14 +378,27 @@ let next_attempt state ~failure =
         | _ -> None)
   in
   let item () =
-    match boundary_at state state.closed_item with
-    | Some (source, checkpoint) when source = state.closed_item -> (
-        match Scan.next_item state.scan ~from:failure with
-        | Some target
-          when target > source && not (was_tried state (source, target)) ->
-            Some (Restart { source; target; checkpoint; statement = false })
-        | _ -> None)
-    | _ -> None
+    match Scan.next_item state.scan ~from:failure with
+    | None -> None
+    | Some target -> (
+        (* The newest checkpoint that is not older than the last closed item
+           and can actually be handed [target]. Without the second test an
+           interior checkpoint of a namespace would be resumed at a token it
+           cannot take, which is how the same region used to be stubbed
+           twice. *)
+        let rec pick = function
+          | [] -> None
+          | (source, checkpoint) :: rest ->
+              if
+                source <= failure
+                && source >= state.closed_item
+                && target > source
+                && (not (was_tried state (source, target)))
+                && accepts checkpoint (Scan.token state.scan target)
+              then Some (Restart { source; target; checkpoint; statement = false })
+              else pick rest
+        in
+        pick !(state.boundaries))
   in
   match statement () with Some attempt -> Some attempt | None -> item ()
 
