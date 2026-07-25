@@ -182,3 +182,60 @@ let test_recovered_region_suppresses () =
         false
 
 (* At most 200 diagnostics, however many items fail. *)
+let test_diagnostic_bound () =
+  let buffer = Buffer.create 65536 in
+  for index = 0 to 249 do
+    Buffer.add_string buffer
+      (Printf.sprintf
+         "fn f%d(reg u32 a) -> reg u32 {\n\
+         \  reg bool b;\n\
+         \  b = a;\n\
+         \  return a;\n\
+          }\n\n"
+         index)
+  done;
+  let result = check_text (Buffer.contents buffer) in
+  check "bound: exactly two hundred diagnostics"
+    (List.length result.diagnostics = 200);
+  check "bound: every one is a typing diagnostic"
+    (List.for_all
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         diagnostic.code = Some "typing")
+       result.diagnostics)
+
+(* No exception leaves the adapter, whatever the input. *)
+let test_nothing_escapes () =
+  let hostile =
+    [
+      {|from NOPE require "x.jinc"
+
+fn f(reg u32 a) -> reg u32 {
+  return a;
+}
+|};
+      "namespace N { namespace M { fn f( ";
+      String.concat "" [ "fn f() { "; String.make 2000 '{'; " }" ];
+      "\xff\xfe\xfd";
+      "fn f(reg u32 a) -> reg u32 {\n  reg u32 x\n  x = a;\n  return x;\n}\n";
+    ]
+  in
+  List.iter
+    (fun text ->
+      match check_text text with
+      | result ->
+          check "hostile: a check always answers"
+            (List.length result.Jide_jasmin.Adapter.diagnostics >= 1)
+      | exception _ -> check "hostile: nothing escapes" false)
+    hostile
+
+let () =
+  test_typing_over_recovered ();
+  test_failed_item_does_not_cascade ();
+  test_dropped_item_does_not_cascade ();
+  test_recovered_region_suppresses ();
+  test_diagnostic_bound ();
+  test_nothing_escapes ();
+  if !failures = 0 then print_endline "all typing tests passed"
+  else (
+    Printf.printf "%d typing test(s) failed\n" !failures;
+    exit 1)
