@@ -101,3 +101,84 @@ fn second(reg u32 a) -> reg u32 {
 }
 |}
 
+let with_type_error =
+  {|fn f(reg u32 a) -> reg u32 {
+  reg bool b;
+  b = a;
+  return a;
+}
+|}
+
+(* The typing loop runs over the recovered tree, not only over a file that
+   parsed cleanly: the item after the broken one is typed, and an error in it
+   is reported beside the compiler's parse error. *)
+let test_typing_over_recovered () =
+  let result = check_text broken_first_typed_second in
+  check "recovered: the parse error is kept"
+    (List.mem (Some "parse") (codes result));
+  check "recovered: one parse diagnostic and one typing diagnostic"
+    (List.length result.diagnostics = 2);
+  check "recovered: the second one is a typing diagnostic"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         diagnostic.code = Some "typing")
+       result.diagnostics);
+  check "recovered: the valid second item still types"
+    (let valid = check_text broken_first_valid_second in
+     List.for_all
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         diagnostic.code = Some "parse")
+       valid.diagnostics)
+
+(* A failed item leaves the environment unchanged, so the items after it type;
+   the references to its name are the same failure and are not repeated. *)
+let test_failed_item_does_not_cascade () =
+  let result = check_text failed_then_called in
+  check "failed: the item's own error is reported"
+    (List.length result.diagnostics >= 1);
+  check "failed: its name is not reported as an unknown function"
+    (not (mentions result "unknown function"));
+  check "failed: one diagnostic, not two" (List.length result.diagnostics = 1)
+
+(* A dropped item is not in the environment at all; a call to it would be an
+   unknown function if the stub's name were not known to the loop. *)
+let test_dropped_item_does_not_cascade () =
+  let result = check_text dropped_then_called in
+  check "dropped: the compiler's parse error is the only one"
+    (List.length result.diagnostics = 1);
+  check "dropped: no unknown function is reported"
+    (not (mentions result "unknown function"));
+  check "dropped: the diagnostic is the parse one"
+    (List.for_all
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         diagnostic.code = Some "parse")
+       result.diagnostics)
+
+(* A diagnostic whose span lies in a region recovery rewrote or skipped is a
+   consequence of the broken text, not of the program: the loop drops it.
+   The rule is tested directly, because the tree handed to the loop can come
+   from anywhere. *)
+let test_recovered_region_suppresses () =
+  let parsed = Jide_jasmin.Parse.parse ~name:file with_type_error in
+  check "region: the fixture parses" (not (Jide_jasmin.Parse.failed parsed));
+  let plain, _ =
+    Loop.type_items ~dropped:[] ~recovered:[] ~file ~items:parsed.items
+      ~idirs:[]
+  in
+  check "region: the error is reported without a recovered region"
+    (List.length plain.Jide_jasmin.Check.diagnostics = 1);
+  match plain.diagnostics with
+  | [ diagnostic ] ->
+      let suppressed, _ =
+        Loop.type_items ~dropped:[]
+          ~recovered:[ diagnostic.Jide_lang.Diagnostic.span ]
+          ~file ~items:parsed.items ~idirs:[]
+      in
+      check "region: the error inside the recovered region is dropped"
+        (suppressed.Jide_jasmin.Check.diagnostics = [])
+  | other ->
+      check
+        ("region: one diagnostic, got " ^ string_of_int (List.length other))
+        false
+
+(* At most 200 diagnostics, however many items fail. *)
