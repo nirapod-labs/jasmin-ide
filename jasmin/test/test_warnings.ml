@@ -232,3 +232,18 @@ let test_from_a_check () =
         (span_of placed = range start (start + String.length "unused"))
   | other -> check ("check: one warning, got " ^ count other) false
 
+let () =
+  test_empty ();
+  test_two_line_span ();
+  test_dummy_location ();
+  test_message_with_warning ();
+  test_stacked_location ();
+  test_duplicate_suppressed ();
+  test_other_file ();
+  test_single_line ();
+  test_clamped ();
+  test_from_a_check ();
+  if !failures = 0 then print_endline "all warning tests passed"
+  else (
+    Printf.printf "%d warning test(s) failed\n" !failures;
+    exit 1)

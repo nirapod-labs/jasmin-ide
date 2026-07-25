@@ -203,3 +203,74 @@ let parse ?(file = "") (text : string) : t list =
               | None -> loop acc None rest))
   in
   loop [] None lines
+
+(* ------------------------------------------------------------------ *)
+(* Diagnostics *)
+
+type placed = { file : string; diagnostic : Jide_lang.Diagnostic.t }
+(** A warning placed in the file it was printed for. The span indexes the
+    checked text when [file] is that text's file and is empty otherwise, so
+    the caller keeps the entries for the document it asked about and drops
+    the rest. *)
+
+(** The file a warning belongs to: the one it names, or the checked file
+    when the printer named none. *)
+let owner ~(file : string) (warning : t) : string =
+  if String.equal warning.file "" then file else warning.file
+
+(** The span a warning points at in the checked text.
+
+    The printer writes a line number that starts at 1 and byte columns
+    counted from the start of that line: [Location.make] keeps
+    [pos_cnum - pos_bol]. The span therefore starts at the first byte of the
+    line plus the start column, and ends at that byte plus the end column,
+    each clamped to the line so a column past its end cannot leave it, and a
+    line past the end of the text lands on the last one.
+
+    Line 0 is a dummy location, which the printer wrote without a place, and
+    a warning for another file is not in this text at all: both have the
+    empty span. *)
+let span ~(file : string) ~(text : string) (warning : t) : Jide_lang.Span.t =
+  if warning.line <= 0 || not (String.equal (owner ~file warning) file) then
+    Jide_lang.Span.make ~start_byte:0 ~end_byte:0
+  else
+    let index = Jide_lang.Line_index.create text in
+    let line = warning.line - 1 in
+    let start = Jide_lang.Line_index.line_start index line in
+    let limit = Jide_lang.Line_index.line_end index line - start in
+    let clamp column = start + min (max column 0) limit in
+    Jide_lang.Span.make
+      ~start_byte:(clamp warning.start_column)
+      ~end_byte:(clamp warning.end_column)
+
+(** A warning as a diagnostic: severity [Warning], code ["warning"], source
+    ["jasmin"], the span from {!span} and the message as parsed, whose
+    [.<uid>] suffix is already gone. *)
+let to_diagnostic ~(file : string) ~(text : string) (warning : t) :
+    Jide_lang.Diagnostic.t =
+  Jide_lang.Diagnostic.make ~code:"warning" ~source:"jasmin"
+    ~severity:Jide_lang.Diagnostic.Warning (span ~file ~text warning)
+    warning.message
+
+(** [to_diagnostics ~file ~text warnings] converts every warning, in the
+    order the compiler printed them.
+
+    A warning repeated with the same span and message in the same file is
+    kept once, which a repeated item can produce. The file is part of that
+    identity so that a warning for another file, which has the empty span,
+    cannot suppress one of the checked file's. *)
+let to_diagnostics ~(file : string) ~(text : string) (warnings : t list) :
+    placed list =
+  let seen = Hashtbl.create (max 16 (List.length warnings)) in
+  List.filter_map
+    (fun (warning : t) ->
+      let owner = owner ~file warning in
+      let diagnostic = to_diagnostic ~file ~text warning in
+      let key =
+        (owner, diagnostic.Jide_lang.Diagnostic.span, diagnostic.message)
+      in
+      if Hashtbl.mem seen key then None
+      else (
+        Hashtbl.replace seen key ();
+        Some { file = owner; diagnostic }))
+    warnings
