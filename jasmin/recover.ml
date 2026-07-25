@@ -10,20 +10,37 @@
     The error the compiler raised is not lost: the caller keeps it as the
     first diagnostic, and the driver only decides which items survive.
 
-    Three restarts are tried, in order:
+    Four restarts are tried, in order:
 
+    - a virtual [}] when the file ends, or a keyword that can never be an
+      identifier appears, inside a block: the block is closed without a byte
+      of the file being rewritten and the text read so far stays in the
+      tree, which is the only repair that loses nothing;
     - the last statement checkpoint, when the failure is inside a body, so a
       broken statement is dropped and its function still reaches the tree;
-    - the last item checkpoint, so a broken item is dropped and the items
-      after it are parsed from a state that already holds the ones before;
+    - the latest item checkpoint at or after the last closed item, so a
+      broken item is dropped and the items after it are parsed from a state
+      that already holds the ones before, including the items of a namespace
+      whose neighbour is broken;
     - the item-level byte restart measured by the recovery spike: the text
       up to the last closed item is kept, the broken item's bytes are
       blanked, and the rest is parsed again from the start. Blanking keeps
       the buffer length, so no offset moves.
 
+    When the recovery bound is reached, the prefix that is already complete
+    is kept: the bytes of the item that is still broken, and of everything
+    after it, are blanked and the prefix is parsed on its own, so a file with
+    more faults than the bound still returns every item before the first
+    unrepaired one.
+
     A dropped item leaves a [Dropped] stub carrying its name, so an outline
-    can still list it. Every restart is bounded and every call into the
-    parser is wrapped: no exception leaves this module. *)
+    can still list it. The stub is not a [Syntax.pitem]: that type belongs to
+    the compiler and adding a constructor to it would stop typing from
+    consuming the tree unchanged. {!Parse.items_with_stubs} merges the stubs
+    into the item stream in source order, which is what an outline walks.
+
+    Every restart is bounded and every call into the parser is wrapped: no
+    exception leaves this module. *)
 
 open Jasmin
 module I = Parser.MenhirInterpreter
@@ -41,6 +58,7 @@ type counters = {
   mutable recoveries : int;  (** Restarts of any kind. *)
   mutable item_restarts : int;
   mutable statement_restarts : int;
+  mutable brace_restarts : int;  (** Closings with a brace that was missing. *)
   mutable byte_restarts : int;
 }
 
@@ -49,6 +67,7 @@ let no_counters () =
     recoveries = 0;
     item_restarts = 0;
     statement_restarts = 0;
+    brace_restarts = 0;
     byte_restarts = 0;
   }
 
@@ -56,9 +75,10 @@ type t = {
   items : Syntax.pprogram;
   dropped : dropped list;
   recovered : Jide_lang.Span.t list;
-      (** The bytes the driver rewrote or skipped. A typing diagnostic
-          inside one of them is a consequence of the broken syntax, not of
-          the program, so the typing loop drops it. *)
+      (** The bytes the driver rewrote or skipped, the scan's own blankings
+          included. A typing diagnostic inside one of them is a consequence
+          of the broken syntax, not of the program, so the typing loop drops
+          it. *)
   diagnostics : Jide_lang.Diagnostic.t list;
       (** Beyond the compiler's first. *)
   counters : counters;
@@ -87,6 +107,10 @@ type state = {
   mutable closed_item : int;
       (** The token index the last completed item ends at, which is where
           the item that is now broken begins. *)
+  mutable input : (int * Syntax.pprogram I.env) option;
+      (** The last state that asked for a token and the index it asked for.
+          A failure at that index is a failure to shift that token, and the
+          state is where a virtual token can be offered instead. *)
   mutable offered : bool;
       (** Whether a token has been read since the last checkpoint, which is
           what tells whether the parser reduced an item with a lookahead. *)
@@ -119,6 +143,7 @@ let rec drive state ~index ~eof_sent checkpoint =
   match checkpoint with
   | I.InputNeeded environment -> (
       let checkpoint = I.input_needed environment in
+      state.input <- Some (index, environment);
       state.offered <- false;
       record state ~index checkpoint;
       if index < Scan.count state.scan then
@@ -138,8 +163,8 @@ let rec drive state ~index ~eof_sent checkpoint =
       (* A completed item: the next item begins at the token the parser is
          looking at, when it is looking at one, and at the next token to
          read when the reduction was a default one. Only an item at the top
-         level counts: an item inside a namespace would leave the prefix
-         with an unclosed brace. *)
+         level counts for the prefix: an item inside a namespace would leave
+         the prefix with an unclosed brace. *)
       (match I.lhs production with
       | I.X (I.N nonterminal) ->
           if I.compare_nonterminals nonterminal I.N_top = 0 then
@@ -160,17 +185,14 @@ let rec drive state ~index ~eof_sent checkpoint =
   | I.Accepted items -> Accepted items
   | I.Rejected -> Failed (max 0 (index - 1))
 
-let start_checkpoint scan =
-  Parser.Incremental.module_
-    {
-      Lexing.pos_fname = Scan.name scan;
-      pos_lnum = 1;
-      pos_bol = 0;
-      pos_cnum = 0;
-    }
+let start_checkpoint ~name ~position =
+  Parser.Incremental.module_ { position with Lexing.pos_fname = name }
+
+let initial_position =
+  { Lexing.pos_fname = ""; pos_lnum = 1; pos_bol = 0; pos_cnum = 0 }
 
 let new_state counters scan =
-  let initial = start_checkpoint scan in
+  let initial = start_checkpoint ~name:(Scan.name scan) ~position:initial_position in
   {
     scan;
     initial;
@@ -178,12 +200,148 @@ let new_state counters scan =
     statements = ref [];
     tried = ref [];
     closed_item = 0;
+    input = None;
     offered = false;
     counters;
   }
 
-let boundary_at state index =
-  List.find_opt (fun (at, _) -> at = index) !(state.boundaries)
+(** A copy of [state] with its own checkpoint lists and its own counters, so
+    an attempt that fails leaves nothing of an imaginary parse behind. *)
+let fork state =
+  {
+    scan = state.scan;
+    initial = state.initial;
+    boundaries = ref !(state.boundaries);
+    statements = ref !(state.statements);
+    tried = ref !(state.tried);
+    closed_item = state.closed_item;
+    input = state.input;
+    offered = state.offered;
+    counters = no_counters ();
+  }
+
+let commit state attempt =
+  state.boundaries := !(attempt.boundaries);
+  state.statements := !(attempt.statements);
+  state.tried := !(attempt.tried);
+  state.closed_item <- attempt.closed_item
+
+(** Where the parser can be handed a token. *)
+let rec wait_for_input checkpoint =
+  match checkpoint with
+  | I.InputNeeded environment -> Some (I.input_needed environment)
+  | I.AboutToReduce _ | I.Shifting _ -> (
+      match I.resume checkpoint with
+      | next -> wait_for_input next
+      | exception _ -> None)
+  | I.HandlingError _ | I.Accepted _ | I.Rejected -> None
+
+(** [close_blocks checkpoint ~position ~count] offers [count] closing braces
+    at [position]. [None] means the parser did not take them, which is how a
+    failure that is not a missing brace is told apart from one that is. *)
+let close_blocks checkpoint ~position ~count =
+  let rec loop checkpoint remaining =
+    if remaining <= 0 then Some checkpoint
+    else
+      match wait_for_input checkpoint with
+      | None -> None
+      | Some checkpoint -> (
+          match I.offer checkpoint (Parser.RBRACE, position, position) with
+          | next -> loop next (remaining - 1)
+          | exception _ -> None)
+  in
+  loop checkpoint count
+
+(** The name a broken item had, read from the tokens of the broken region so
+    the stub can carry it. *)
+let dropped_of scan ~from ~upto =
+  let upto = min upto (Scan.count scan) in
+  let kind_of = function
+    | Parser.FN -> Some "function"
+    | Parser.PARAM -> Some "parameter"
+    | Parser.TYPE -> Some "type"
+    | Parser.NAMESPACE -> Some "namespace"
+    | Parser.EXEC -> Some "exec"
+    | Parser.REQUIRE | Parser.FROM -> Some "require"
+    | _ -> None
+  in
+  let rec keyword index =
+    if index >= upto then None
+    else
+      match kind_of (Scan.token scan index).token with
+      | Some kind -> Some (kind, index)
+      | None -> keyword (index + 1)
+  in
+  (* The first name at or after [from], and the last one before [upto]. A
+     parameter and a global are named after their type, so their name is the
+     one next to the [=], not the first one in the header. *)
+  let rec first_name index =
+    if index >= upto then None
+    else
+      match (Scan.token scan index).token with
+      | Parser.NID name -> Some name
+      | _ -> first_name (index + 1)
+  in
+  let last_name ~from ~upto =
+    let found = ref None in
+    for index = from to upto - 1 do
+      match (Scan.token scan index).token with
+      | Parser.NID name -> found := Some name
+      | _ -> ()
+    done;
+    !found
+  in
+  let rec first_eq index =
+    if index >= upto then None
+    else if (Scan.token scan index).token = Parser.EQ then Some index
+    else first_eq (index + 1)
+  in
+  let declared kind at =
+    match kind with
+    | "parameter" | "global" -> (
+        match first_eq (at + 1) with
+        | Some eq -> last_name ~from:(at + 1) ~upto:eq
+        | None -> first_name (at + 1))
+    | _ -> first_name (at + 1)
+  in
+  let kind, name =
+    match keyword from with
+    | Some (kind, at) -> (kind, declared kind at)
+    | None -> (
+        (* No keyword left in the region: the broken item lost the one it
+           began with, which is what deleting [fn] does. Its first token is
+           then the name, and a name followed by a parenthesis names a
+           function; a name before an [=] names a global. *)
+        match first_eq from with
+        | Some eq -> (
+            match last_name ~from ~upto:eq with
+            | Some name -> ("global", Some name)
+            | None -> ("item", None))
+        | None -> (
+            match
+              if from < upto then Some (Scan.token scan from).token else None
+            with
+            | Some (Parser.NID name) ->
+                let called =
+                  from + 1 < upto
+                  && (Scan.token scan (from + 1)).token = Parser.LPAREN
+                in
+                ((if called then "function" else "item"), Some name)
+            | _ -> ("item", None)))
+  in
+  Dropped
+    {
+      kind;
+      name;
+      span =
+        Scan.span scan
+          ~start_byte:(Scan.start_byte scan from)
+          ~end_byte:(Scan.start_byte scan upto);
+    }
+
+let contains (outer : Jide_lang.Span.t) (inner : Jide_lang.Span.t) =
+  outer.Jide_lang.Span.start_byte <= inner.Jide_lang.Span.start_byte
+  && outer.Jide_lang.Span.end_byte >= inner.Jide_lang.Span.end_byte
 
 let statement_before state index =
   List.find_opt
