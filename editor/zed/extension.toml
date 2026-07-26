@@ -1,0 +1,15 @@
+id = "jasmin-ide"
+name = "Jasmin IDE"
+version = "0.1.0"
+schema_version = 1
+description = "Jasmin language support for Zed: recognition of .jazz and .jinc files, with comment and bracket behaviour from the Jasmin tree-sitter grammar, plus the Jasmin language server for diagnostics, go to definition, find references, hover, completion, signature help and rename."
+
+[grammars.jasmin]
+repository = "https://github.com/jasmin-lang/tree-sitter-jasmin"
+# `commit` is an alias of `rev`; naming the same commit in both keys makes Zed
+# reject this file as a duplicate field, so the commit is written once.
+rev = "4e678d93d80f4e698a540981008bb44c105ffeff"
+
+[language_servers.jasmin-lsp]
+name = "Jasmin LSP"
+languages = ["Jasmin"]

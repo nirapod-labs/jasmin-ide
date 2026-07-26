@@ -1,0 +1,19 @@
+[package]
+name = "jasmin_ide_zed"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Zed extension for the Jasmin language"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# 0.7.0 is the newest extension API that stable Zed accepts; 0.8.0 is only
+# available to preview builds.
+zed_extension_api = "0.7.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
