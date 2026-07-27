@@ -420,13 +420,25 @@ let recover ~name ~text : t =
     | Some target -> target
     | None -> Scan.count state.scan
   in
+  (* One stub and one recovered region for the bytes of a dropped item. A
+     later stub that covers an earlier one replaces it, so a region is never
+     reported twice. *)
   let note_dropped state ~from ~upto =
-    dropped := dropped_of state.scan ~from ~upto :: !dropped;
-    recovered :=
+    let span =
       Scan.span state.scan
         ~start_byte:(Scan.start_byte state.scan from)
         ~end_byte:(Scan.start_byte state.scan upto)
-      :: !recovered
+    in
+    if span.Jide_lang.Span.start_byte < span.Jide_lang.Span.end_byte then (
+      let stub = dropped_of state.scan ~from ~upto in
+      dropped :=
+        stub
+        :: List.filter
+             (function
+               | Dropped { span = earlier; _ } -> not (contains span earlier))
+             !dropped;
+      recovered :=
+        span :: List.filter (fun older -> not (contains span older)) !recovered)
   in
   (* One pass over one buffer: checkpoint restarts until the parser accepts,
      a rewrite when no checkpoint is left, the prefix alone when even that is
@@ -436,7 +448,9 @@ let recover ~name ~text : t =
     | Error diagnostic ->
         diagnostics := diagnostic :: !diagnostics;
         []
-    | Ok scan -> run (new_state counters scan) ~depth
+    | Ok scan ->
+        recovered := List.rev_append (Scan.blanked scan) !recovered;
+        run (new_state counters scan) ~depth
   and run state ~depth : Syntax.pprogram =
     match drive state ~index:0 ~eof_sent:false state.initial with
     | Accepted items -> items
@@ -447,36 +461,83 @@ let recover ~name ~text : t =
   and step state ~depth ~failure : Syntax.pprogram =
     if counters.recoveries >= max_recoveries then finish state ~depth
     else
-      match next_attempt state ~failure with
-      | Some (Restart { source; target; checkpoint; statement }) ->
-          counters.recoveries <- counters.recoveries + 1;
-          if statement then
-            counters.statement_restarts <- counters.statement_restarts + 1
-          else counters.item_restarts <- counters.item_restarts + 1;
-          state.tried := (source, target) :: !(state.tried);
-          prune state source;
-          if statement then (
-            recovered :=
-              Scan.span state.scan
-                ~start_byte:(Scan.start_byte state.scan source)
-                ~end_byte:(Scan.start_byte state.scan target)
-              :: !recovered;
-            run_from state ~depth ~start:target checkpoint)
-          else (
-            note_dropped state ~from:source ~upto:target;
-            state.closed_item <- source;
-            run_from state ~depth ~start:target checkpoint)
-      | None ->
-          let target = target_of state ~failure in
-          let from = Scan.start_byte state.scan state.closed_item in
-          let upto = Scan.start_byte state.scan target in
-          if upto <= from || depth >= max_byte_restarts then finish state ~depth
-          else (
-            counters.recoveries <- counters.recoveries + 1;
-            counters.byte_restarts <- counters.byte_restarts + 1;
-            note_dropped state ~from:state.closed_item ~upto:target;
-            pass ~depth:(depth + 1)
-              (Scan.blank (Scan.text state.scan) ~from ~upto))
+      match close_blocks_here state ~failure with
+      | Some items -> items
+      | None -> (
+          match next_attempt state ~failure with
+          | Some (Restart { source; target; checkpoint; statement }) ->
+              counters.recoveries <- counters.recoveries + 1;
+              if statement then
+                counters.statement_restarts <- counters.statement_restarts + 1
+              else counters.item_restarts <- counters.item_restarts + 1;
+              state.tried := (source, target) :: !(state.tried);
+              prune state source;
+              if statement then (
+                recovered :=
+                  Scan.span state.scan
+                    ~start_byte:(Scan.start_byte state.scan source)
+                    ~end_byte:(Scan.start_byte state.scan target)
+                  :: !recovered;
+                run_from state ~depth ~start:target checkpoint)
+              else (
+                note_dropped state ~from:source ~upto:target;
+                state.closed_item <- source;
+                (* Restarting from the start state at a later token must also
+                   move the parser's idea of where it is: an item that begins
+                   with an empty production would otherwise be given the
+                   position of the start of the buffer, and an outline would
+                   place it at byte zero. *)
+                let checkpoint =
+                  if source = 0 then
+                    start_checkpoint ~name:(Scan.name state.scan)
+                      ~position:(Scan.token state.scan target).start_pos
+                  else checkpoint
+                in
+                run_from state ~depth ~start:target checkpoint)
+          | None ->
+              let target = target_of state ~failure in
+              let from = Scan.start_byte state.scan state.closed_item in
+              let upto = Scan.start_byte state.scan target in
+              if upto <= from || depth >= max_byte_restarts then
+                finish state ~depth
+              else (
+                counters.recoveries <- counters.recoveries + 1;
+                counters.byte_restarts <- counters.byte_restarts + 1;
+                note_dropped state ~from:state.closed_item ~upto:target;
+                pass ~depth:(depth + 1)
+                  (Scan.blank (Scan.text state.scan) ~from ~upto)))
+  (* A block that was never closed is closed without a byte being rewritten.
+     The attempt runs on a copy: a virtual brace that the rest of the file
+     cannot follow must leave the ordinary restarts as they were. *)
+  and close_blocks_here state ~failure : Syntax.pprogram option =
+    match state.input with
+    | None -> None
+    | Some (at, environment) ->
+        let missing =
+          if at <> failure then 0
+          else if failure >= Scan.count state.scan then Scan.open_depth state.scan
+          else
+            let entry = Scan.token state.scan failure in
+            if Scan.hard_keyword entry.token then entry.depth else 0
+        in
+        if missing <= 0 then None
+        else
+          let position =
+            if failure >= Scan.count state.scan then Scan.eof_position state.scan
+            else (Scan.token state.scan failure).start_pos
+          in
+          let attempt = fork state in
+          let checkpoint = I.input_needed environment in
+          match close_blocks checkpoint ~position ~count:missing with
+          | None -> None
+          | Some checkpoint -> (
+              match drive attempt ~index:failure ~eof_sent:false checkpoint with
+              | Accepted items ->
+                  commit state attempt;
+                  counters.recoveries <- counters.recoveries + 1;
+                  counters.brace_restarts <- counters.brace_restarts + 1;
+                  Some items
+              | Failed _ | Raised _ -> None)
   and run_from state ~depth ~start checkpoint =
     match drive state ~index:start ~eof_sent:false checkpoint with
     | Accepted items -> items
