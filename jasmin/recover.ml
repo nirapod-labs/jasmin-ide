@@ -545,28 +545,35 @@ let recover ~name ~text : t =
         note_raise exn;
         finish state ~depth
     | Failed failure -> step state ~depth ~failure
-  (* Nothing left to try: keep what the prefix alone parses, and if even that
-     is impossible, nothing. *)
+  (* Nothing left to try: keep the items that are already whole. The item
+     that is still broken and everything after it are blanked, so a file with
+     more faults than the bound returns the prefix instead of nothing. *)
   and finish state ~depth =
     ignore depth;
-    let text =
+    let scan = state.scan in
+    let base =
       List.fold_left
         (fun text (span : Jide_lang.Span.t) ->
           Scan.blank text ~from:span.Jide_lang.Span.start_byte
             ~upto:span.Jide_lang.Span.end_byte)
-        (Scan.text state.scan) !recovered
+        (Scan.text scan) !recovered
     in
-    if String.equal text (Scan.text state.scan) then []
-    else
+    let cut_index = Scan.item_root scan state.closed_item in
+    let cut = Scan.start_byte scan cut_index in
+    let text = Scan.blank base ~from:cut ~upto:(String.length base) in
+    if String.equal text (Scan.text scan) then []
+    else (
+      if cut < String.length base then
+        note_dropped state ~from:cut_index ~upto:(Scan.count scan);
       match Parseio.parse_program ~name (Utils.IO.input_string text) with
       | items -> items
-      | exception _ -> []
+      | exception _ -> [])
   in
   let items = pass ~depth:0 text in
   {
     items;
     dropped = List.rev !dropped;
-    recovered = List.rev !recovered;
+    recovered = List.sort_uniq compare !recovered;
     diagnostics = List.rev !diagnostics;
     counters;
   }

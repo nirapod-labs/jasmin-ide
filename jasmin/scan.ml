@@ -6,12 +6,22 @@
     pass records where an item and a statement can begin, because those are
     the two places a broken parse can resume from.
 
-    The lexer is the compiler's own, so a file it cannot tokenise (an
-    unterminated string, a stray byte) stops the stream where the lexer
-    stopped. The scan then blanks that line and lexes again, a bounded
-    number of times, so the items after the bad line are still seen. Every
-    blanking preserves the buffer length, so every offset stays the offset
-    the editor and the diagnostics use.
+    The lexer is the compiler's own, so a file it cannot tokenise stops the
+    stream where the lexer stopped. The tokens read before that point are
+    still a valid prefix of the file, so they are kept: a file whose only
+    fault is an unterminated comment at the end returns every item before
+    the comment. The rest of the buffer is then blanked, a bounded number of
+    times, so the items after a bad line are seen too. Every blanking
+    preserves the buffer length, so every offset stays the offset the editor
+    and the diagnostics use, and every blanked region is reported, because a
+    diagnostic inside one of them is about bytes the compiler never read.
+
+    One blanking rule is not a line: an unterminated string. The lexer
+    rejects it at the opening quote, and a string runs to the next quote or
+    to the end of the file, so blanking the quote's line would hand the
+    string's body to the scanner as code and a function written inside the
+    string would be fabricated into the tree. The quote's region is blanked
+    instead, which is what a string the user never closed means.
 
     The driver's two restart sets are written here as predicates over
     tokens. A test checks them against the grammar's own FIRST sets, taken
@@ -21,10 +31,19 @@
 open Jasmin
 
 (** The largest buffer the driver will look at. Above this the parse is
-    refused with one diagnostic rather than risking the editor's thread. *)
-let max_bytes = 8 * 1024 * 1024
+    refused with one diagnostic rather than risking the editor's thread: the
+    work a scan does is linear in the tokens it builds, and a buffer at this
+    ceiling is well under a tenth of a second even when every byte is a
+    token. Every Jasmin file in the corpus and in the reference libraries is
+    two orders of magnitude below it. *)
+let max_bytes = 2 * 1024 * 1024
 
-(** How many lines of a buffer one scan will blank to get past a lexing
+(** The most tokens one scan will build. A dense buffer reaches this well
+    before the byte ceiling, and this, not the byte count, is what bounds
+    the work done on the editor's thread. *)
+let max_tokens = 262_144
+
+(** How many regions of a buffer one scan will blank to get past a lexing
     error before it gives up on the rest of the file. *)
 let max_lexical_repairs = 8
 
@@ -33,7 +52,7 @@ let max_lexical_repairs = 8
     keyword like [bool] or a type name, so no token marks it; the driver
     only restarts at items that begin with a keyword of their own. The
     guard test pins this set to the grammar's FIRST set for [top] minus its
-    FIRST set for [pglobal]. *)
+    FIRST set for [ptype]. *)
 let item_tokens =
   [
     Parser.FN;
@@ -48,6 +67,24 @@ let item_tokens =
     Parser.SHARPLBRACKET;
   ]
 
+(** The keywords that occur in exactly one production and can never be an
+    identifier. Seeing one where a statement belongs means the block that
+    contains the statement was never closed, which is the one repair the
+    design makes without dropping anything: a virtual [}] closes the block
+    and the text read so far stays in the tree. [export], [inline] and [#[]
+    are not here: each is also an annotation label or a storage class, so
+    one of them can legitimately appear inside a body. *)
+let hard_keywords =
+  [
+    Parser.FN;
+    Parser.TYPE;
+    Parser.PARAM;
+    Parser.EXEC;
+    Parser.NAMESPACE;
+    Parser.REQUIRE;
+    Parser.FROM;
+  ]
+
 (** Two tokens are the same token when their constructors match. A token that
     carries a value, which here is always a name, matches any value of its
     constructor: the sets below name token kinds, and a restart point must be
@@ -58,6 +95,7 @@ let same_token (a : Parser.token) (b : Parser.token) =
   match (a, b) with Parser.NID _, Parser.NID _ -> true | _ -> a = b
 
 let item_start token = List.exists (same_token token) item_tokens
+let hard_keyword token = List.exists (same_token token) hard_keywords
 
 (** Tokens that can begin a statement inside a function body, as the
     grammar's FIRST set for [pinstr] has them. The guard test pins this set

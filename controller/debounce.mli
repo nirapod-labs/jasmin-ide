@@ -32,3 +32,9 @@ val due : t -> now:float -> string list
 (** [due t ~now] is the documents whose deadline has passed, in deadline
     order, the earlier one first and ties broken by URI so the order is the
     same on every run. They stop waiting: analysing one clears it. *)
+
+val next_deadline : t -> now:float -> float option
+(** [next_deadline t ~now] is how long the caller may wait before it has to
+    look again, in seconds: the time left until the earliest deadline, or
+    [None] when no document waits. A deadline that has already passed is
+    [Some 0.]. *)
