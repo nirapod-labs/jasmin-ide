@@ -63,6 +63,25 @@ let dropped_names parsed =
     (function Jide_jasmin.Recover.Dropped { name; _ } -> name)
     (Jide_jasmin.Parse.dropped parsed)
 
+(** Every name the tree declares, namespaces walked into, so a test can say a
+    name is nowhere in the tree rather than only at its top level. *)
+let rec names_of_item (item : Jasmin.Syntax.pitem Jasmin.Location.located) =
+  match Jasmin.Location.unloc item with
+  | Jasmin.Syntax.PFundef definition ->
+      [ Jasmin.Location.unloc definition.Jasmin.Syntax.pdf_name ]
+  | Jasmin.Syntax.PParam parameter ->
+      [ Jasmin.Location.unloc parameter.Jasmin.Syntax.ppa_name ]
+  | Jasmin.Syntax.PTypeAlias (name, _, _) ->
+      [ Jasmin.Location.unloc name ]
+  | Jasmin.Syntax.PNamespace (name, inner) ->
+      Jasmin.Location.unloc name :: List.concat_map names_of_item inner
+  | Jasmin.Syntax.PGlobal global ->
+      [ Jasmin.Location.unloc global.Jasmin.Syntax.pgd_name ]
+  | Jasmin.Syntax.Pexec _ | Jasmin.Syntax.Prequire _ -> []
+
+let all_names parsed =
+  List.concat_map names_of_item (Jide_jasmin.Parse.items parsed)
+
 let ends parsed =
   List.map
     (fun (item : Jasmin.Syntax.pitem Jasmin.Location.located) ->
@@ -76,7 +95,34 @@ let item_restarts parsed = (counters parsed).Jide_jasmin.Recover.item_restarts
 let statement_restarts parsed =
   (counters parsed).Jide_jasmin.Recover.statement_restarts
 
+let brace_restarts parsed = (counters parsed).Jide_jasmin.Recover.brace_restarts
 let byte_restarts parsed = (counters parsed).Jide_jasmin.Recover.byte_restarts
+
+(** The offset [needle] begins at, or -1. *)
+let index_of haystack needle =
+  let n = String.length haystack and m = String.length needle in
+  let rec loop index =
+    if m = 0 then 0
+    else if index + m > n then -1
+    else if String.sub haystack index m = needle then index
+    else loop (index + 1)
+  in
+  loop 0
+
+(** True when the diagnostic list has one whose code is [code]. *)
+let reports parsed code =
+  List.exists
+    (fun (diagnostic : Jide_lang.Diagnostic.t) -> diagnostic.code = Some code)
+    (Jide_jasmin.Parse.diagnostics parsed)
+
+(** True when the first diagnostic the recovering parse reports is the one
+    the compiler reports on the same bytes. *)
+let keeps_the_compilers_error text parsed =
+  match (compiler_diagnostic text, first_diagnostic parsed) with
+  | Some expected, Some actual ->
+      same_span expected actual && expected.message = actual.message
+  | _ -> false
+
 
 let valid =
   {|fn first(reg u32 a) -> reg u32 {
@@ -256,10 +302,15 @@ let test_later_items_survive () =
 
 let test_missing_rbrace () =
   let parsed = parse missing_rbrace in
-  check "missing rbrace: the item after the broken one is in the tree"
-    (item_names parsed = [ "second" ]);
-  check "missing rbrace: the broken one is stubbed"
-    (dropped_names parsed = [ "first" ])
+  (* The block that was never closed is closed by a virtual brace, which is
+     the one repair that loses nothing: both functions stay in the tree and
+     no byte of the file is rewritten. *)
+  check "missing rbrace: both items are in the tree"
+    (item_names parsed = [ "first"; "second" ]);
+  check "missing rbrace: nothing is dropped"
+    (Jide_jasmin.Parse.dropped parsed = []);
+  check "missing rbrace: a virtual brace did the work"
+    (brace_restarts parsed >= 1 && byte_restarts parsed = 0)
 
 let test_missing_semicolon () =
   let parsed = parse missing_semicolon in
@@ -392,8 +443,12 @@ let test_guard_statement () =
   check "guard: the driver's statement set is the grammar's"
     (driver_names Jide_jasmin.Scan.statement_tokens = pinstr)
 
+(* A buffer over the policy's byte ceiling is refused with one diagnostic of
+   its own kind: a refusal by policy is not a syntax error, and no consumer
+   should offer a syntax fix for it. The ceiling is read from the module so
+   the test and the policy cannot drift apart. *)
 let test_size_policy () =
-  let text = String.make ((8 * 1024 * 1024) + 1) ' ' in
+  let text = String.make (Jide_jasmin.Scan.max_bytes + 1) ' ' in
   let parsed = parse text in
   check "size: one diagnostic"
     (List.length (Jide_jasmin.Parse.diagnostics parsed) = 1);

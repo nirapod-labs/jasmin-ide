@@ -311,19 +311,28 @@ let too_large () =
        max_bytes max_tokens)
 
 (** [make ~name text] is the scan of [text], or the diagnostic that says the
-    buffer is too large to look at. The byte order mark is blanked first. *)
+    buffer is too large to look at. The byte order mark is blanked first, and
+    the blanking is reported like every other one. *)
 let make ~name text : (t, Jide_lang.Diagnostic.t) result =
   if String.length text > max_bytes then Error (too_large ())
   else
+    let bom = bom_length text in
     let text = blank_bom text in
-    let tokens, text = lex_all ~name text in
-    Ok
-      {
-        name;
-        text;
-        tokens = with_depth (Array.of_list tokens);
-        eof = eof_of ~name text;
-      }
+    match lex_all ~name text with
+    | exception Too_large -> Error (too_large ())
+    | tokens, text, blanked ->
+        let blanked =
+          if bom = 0 then blanked
+          else Jide_lang.Span.make ~start_byte:0 ~end_byte:bom :: blanked
+        in
+        Ok
+          {
+            name;
+            text;
+            tokens = with_depth (Array.of_list tokens);
+            eof = eof_of ~name text;
+            blanked;
+          }
 
 (** The triple the incremental parser wants for [index]. *)
 let triple t index =
@@ -336,7 +345,8 @@ let eof_triple t = (Parser.EOF, t.eof, t.eof)
     the first token at or after [from] that can begin an item, among those
     with the smallest brace depth the rest of the buffer offers. The depth
     matters because a missing [}] leaves every later token one level deeper
-    than it reads; the smallest depth is the item level even then. *)
+    than it reads, and a missing [}] in the item being skipped leaves it one
+    level shallower; the smallest depth is the item level either way. *)
 let next_item t ~from =
   let length = count t in
   let from = max 0 from in
@@ -350,6 +360,32 @@ let next_item t ~from =
         best := Some index)
     done;
     !best
+
+(** [item_root t index] is the token the top-level item containing [index]
+    begins at: [index] itself when it is already at item level, and the
+    keyword of the enclosing item when it is not. Blanking from there keeps
+    the braces that item opened balanced, which is what a prefix built to
+    survive has to do. *)
+let item_root t index =
+  let length = count t in
+  let index = max 0 (min index length) in
+  if index >= length then index
+  else
+    let rec below from depth =
+      let rec loop at =
+        if at < 0 then None
+        else if t.tokens.(at).depth < depth && item_start t.tokens.(at).token
+        then Some at
+        else loop (at - 1)
+      in
+      loop (from - 1)
+    in
+    let rec walk at =
+      let depth = t.tokens.(at).depth in
+      if depth = 0 then at
+      else match below at depth with Some outer -> walk outer | None -> at
+    in
+    walk index
 
 (** [statement_boundary t index] is true when the token at [index] begins a
     statement: it is one of the statement's own first tokens and the token
