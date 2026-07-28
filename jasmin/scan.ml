@@ -361,6 +361,22 @@ let next_item t ~from =
     done;
     !best
 
+(** [next_item_at_depth t ~from ~depth] is the first token at or after
+    [from] that can begin an item at exactly [depth], for a restart that
+    resumes inside the same block as the checkpoint it starts from: an item
+    inside a namespace is a restart point only while the parser is still
+    inside that namespace. *)
+let next_item_at_depth t ~from ~depth =
+  let length = count t in
+  let rec loop index =
+    if index >= length then None
+    else
+      let entry = t.tokens.(index) in
+      if item_start entry.token && entry.depth = depth then Some index
+      else loop (index + 1)
+  in
+  loop (max 0 from)
+
 (** [item_root t index] is the token the top-level item containing [index]
     begins at: [index] itself when it is already at item level, and the
     keyword of the enclosing item when it is not. Blanking from there keeps

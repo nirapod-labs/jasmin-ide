@@ -378,27 +378,44 @@ let next_attempt state ~failure =
         | _ -> None)
   in
   let item () =
-    match Scan.next_item state.scan ~from:failure with
-    | None -> None
-    | Some target -> (
-        (* The newest checkpoint that is not older than the last closed item
-           and can actually be handed [target]. Without the second test an
-           interior checkpoint of a namespace would be resumed at a token it
-           cannot take, which is how the same region used to be stubbed
-           twice. *)
-        let rec pick = function
-          | [] -> None
-          | (source, checkpoint) :: rest ->
-              if
-                source <= failure
-                && source >= state.closed_item
-                && target > source
-                && (not (was_tried state (source, target)))
-                && accepts checkpoint (Scan.token state.scan target)
-              then Some (Restart { source; target; checkpoint; statement = false })
-              else pick rest
-        in
-        pick !(state.boundaries))
+    let depth_of index = (Scan.token state.scan index).depth in
+    let choose (source, checkpoint) target =
+      if
+        source <= failure
+        && source >= state.closed_item
+        && target > source
+        && depth_of target >= depth_of source
+        && (not (was_tried state (source, target)))
+        && accepts checkpoint (Scan.token state.scan target)
+      then Some (Restart { source; target; checkpoint; statement = false })
+      else None
+    in
+    (* Newest checkpoint first. From each, the nearest item at its own depth
+       keeps the block the checkpoint is in (the items of a namespace whose
+       neighbour is broken), and the smallest depth left in the buffer is the
+       fallback for a block that was never closed. *)
+    let rec pick = function
+      | [] -> None
+      | ((source, _) as boundary) :: rest -> (
+          let inside =
+            match
+              Scan.next_item_at_depth state.scan ~from:failure
+                ~depth:(depth_of source)
+            with
+            | Some target -> choose boundary target
+            | None -> None
+          in
+          match inside with
+          | Some _ as attempt -> attempt
+          | None -> (
+              match Scan.next_item state.scan ~from:failure with
+              | Some target -> (
+                  match choose boundary target with
+                  | Some _ as attempt -> attempt
+                  | None -> pick rest)
+              | None -> None))
+    in
+    pick !(state.boundaries)
   in
   match statement () with Some attempt -> Some attempt | None -> item ()
 

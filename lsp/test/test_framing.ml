@@ -334,6 +334,49 @@ let test_non_json_body () =
         ("non-JSON body: " ^ String.concat " " (List.map show_result other))
         false
 
+let test_waits_for_nothing () =
+  let r, w = Unix.pipe () in
+  let ic = Unix.in_channel_of_descr r in
+  let oc = Unix.out_channel_of_descr w in
+  let channels = Jide_lsp.Framing.create ~input:ic ~output:stdout in
+  check "an idle stream is no reason to read"
+    (not (Jide_lsp.Framing.wait channels ~timeout:0.01));
+  output_string oc (frame {|{"jsonrpc":"2.0","method":"exit"}|});
+  flush oc;
+  check "a frame that arrived ends the wait"
+    (Jide_lsp.Framing.wait channels ~timeout:1.0);
+  (match Jide_lsp.Framing.read channels with
+  | Some (Ok (Jsonrpc.Packet.Notification n)) ->
+      check "the frame after a wait" (String.equal n.method_ "exit")
+  | other -> check ("the frame after a wait: " ^ show_opt other) false);
+  check "a read frame leaves nothing to wait for"
+    (not (Jide_lsp.Framing.wait channels ~timeout:0.01));
+  output_string oc
+    (frame {|{"jsonrpc":"2.0","method":"initialized"}|}
+    ^ frame {|{"jsonrpc":"2.0","method":"exit"}|});
+  flush oc;
+  (* Both frames arrive in one write: the second is buffered, so waiting must
+     not fall back on the descriptor the buffer has already emptied. *)
+  check "a buffered second frame is a reason to read"
+    (Jide_lsp.Framing.wait channels ~timeout:0.01);
+  (match Jide_lsp.Framing.read channels with
+  | Some (Ok (Jsonrpc.Packet.Notification n)) ->
+      check "the first of two frames" (String.equal n.method_ "initialized")
+  | other -> check ("the first of two frames: " ^ show_opt other) false);
+  check "the second frame is still a reason to read"
+    (Jide_lsp.Framing.wait channels ~timeout:0.01);
+  (match Jide_lsp.Framing.read channels with
+  | Some (Ok (Jsonrpc.Packet.Notification n)) ->
+      check "the second of two frames" (String.equal n.method_ "exit")
+  | other -> check ("the second of two frames: " ^ show_opt other) false);
+  close_out oc;
+  (* The descriptor of a closed writer is readable, and the read that follows
+     learns the input has ended: that is a reason to wait, and the read is
+     what reports [None]. *)
+  ignore (Jide_lsp.Framing.wait channels ~timeout:0.01);
+  check "end of input ends the read" (Jide_lsp.Framing.read channels = None);
+  close_in_noerr ic
+
 let () =
   test_notification ();
   test_request_numeric_id ();
@@ -357,6 +400,7 @@ let () =
   test_depth_boundary ();
   test_braces_in_strings ();
   test_non_json_body ();
+  test_waits_for_nothing ();
   if !failures = 0 then print_endline "all framing tests passed"
   else (
     Printf.printf "%d framing test(s) failed\n" !failures;

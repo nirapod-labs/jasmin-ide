@@ -813,6 +813,15 @@ let () =
   test_byte_order_mark ();
   test_empty_and_comment ();
   test_recovery_bound ();
+  test_unterminated_comment_keeps_the_prefix ();
+  test_virtual_brace_keeps_the_function ();
+  test_namespace_keeps_the_whole_item ();
+  test_stub_names_the_item ();
+  test_stubs_do_not_overlap ();
+  test_no_function_from_a_string ();
+  test_blanked_bytes_are_reported ();
+  test_restarted_items_keep_their_place ();
+  test_stubs_are_in_the_item_stream ();
   test_no_exception_escapes ();
   if !failures = 0 then print_endline "all recovery tests passed"
   else (
