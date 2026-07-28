@@ -453,17 +453,56 @@ let test_size_policy () =
   check "size: one diagnostic"
     (List.length (Jide_jasmin.Parse.diagnostics parsed) = 1);
   check "size: nothing parsed" (Jide_jasmin.Parse.items parsed = []);
+  check "size: no recovery ran" (recoveries parsed = 0);
+  check "size: the code is the policy's own" (reports parsed "size");
+  check "size: it is not a syntax error" (not (reports parsed "parse"));
+  check "size: the span points at no byte"
+    (match Jide_jasmin.Parse.diagnostics parsed with
+    | [ diagnostic ] ->
+        diagnostic.Jide_lang.Diagnostic.span.Jide_lang.Span.start_byte = 0
+        && diagnostic.Jide_lang.Diagnostic.span.Jide_lang.Span.end_byte = 0
+    | _ -> false);
   check "size: the message says so"
     (match Jide_jasmin.Parse.diagnostics parsed with
     | [ diagnostic ] ->
         contains diagnostic.Jide_lang.Diagnostic.message "larger"
     | _ -> false)
 
+(* A buffer that is under the byte ceiling but is one token per byte is
+   refused too: the number of tokens, not the number of bytes, is what the
+   work is linear in, and building two million tokens on the thread that
+   answers requests costs about a second. *)
+let test_token_cap () =
+  let text = String.make (2 * 1024 * 1024) '}' in
+  let parsed = parse text in
+  check "tokens: the dense buffer is refused" (reports parsed "size");
+  check "tokens: nothing parsed" (Jide_jasmin.Parse.items parsed = []);
+  check "tokens: no recovery ran" (recoveries parsed = 0);
+  (* A dense buffer under the cap is still handled: this is the shape that
+     used to cost a second, at a hundredth of the size. *)
+  let small = parse (String.make 10_000 '}') in
+  check "tokens: a small dense buffer is analysed"
+    (Jide_jasmin.Parse.items small = []);
+  check "tokens: it is stubbed once"
+    (List.length (Jide_jasmin.Parse.dropped small) = 1)
+
+(* The compiler rejects a byte order mark at byte zero. Blanking it before
+   the fast path would report the file clean while the compiler reports an
+   error, so the mark is blanked by the recovery instead: the compiler's own
+   error is kept and the items after the mark are still returned. *)
 let test_byte_order_mark () =
   let marked = "\xef\xbb\xbf" ^ valid in
   let parsed = parse marked in
-  check "bom: no diagnostics" (Jide_jasmin.Parse.diagnostics parsed = []);
+  check "bom: the compiler's error is kept"
+    (keeps_the_compilers_error marked parsed);
+  check "bom: and it is the only one"
+    (List.length (Jide_jasmin.Parse.diagnostics parsed) = 1);
   check "bom: both items" (List.length (Jide_jasmin.Parse.items parsed) = 2);
+  check "bom: the mark is reported as rewritten"
+    (List.exists
+       (fun (span : Jide_lang.Span.t) ->
+         span.Jide_lang.Span.start_byte = 0 && span.Jide_lang.Span.end_byte = 3)
+       (Jide_jasmin.Parse.recovered parsed));
   (* Blanking keeps the length, so every offset after the mark is the
      marked file's own offset: the same item ends three bytes later than it
      does without the mark, and nothing else moves. *)
@@ -478,21 +517,24 @@ let test_empty_and_comment () =
   check "comment: clean" (Jide_jasmin.Parse.diagnostics comment = []);
   check "comment: no items" (Jide_jasmin.Parse.items comment = [])
 
-let test_recovery_bound () =
-  let item index =
-    Printf.sprintf
-      "fn f%d(reg u32 a) -> reg u32 {\n\
-      \  reg u32 b;\n\
-      \  b = ;\n\
-      \  return a;\n\
-       }\n\n"
-      index
-  in
+(* A buffer of [count] functions, each with one repairable fault, and the
+   same buffer with the faults removed. *)
+let broken_functions count =
   let buffer = Buffer.create 4096 in
-  for index = 0 to 99 do
-    Buffer.add_string buffer (item index)
+  for index = 0 to count - 1 do
+    Buffer.add_string buffer
+      (Printf.sprintf
+         "#[inline]\nfn f%d(reg u32 a) -> reg u32 {\n\
+         \  reg u32 b;\n\
+         \  b = ;\n\
+         \  return a;\n\
+          }\n\n"
+         index)
   done;
-  let text = Buffer.contents buffer in
+  Buffer.contents buffer
+
+let test_recovery_bound () =
+  let text = broken_functions 100 in
   let parsed = parse text in
   check "bound: never more than fifty restarts" (recoveries parsed <= 50);
   check "bound: it stops at exactly fifty" (recoveries parsed = 50)
