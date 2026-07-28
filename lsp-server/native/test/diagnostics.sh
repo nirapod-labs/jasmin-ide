@@ -2,20 +2,20 @@
 # End-to-end checks of the publish path, over the built server and pipes.
 #
 # A document that was opened or changed is analysed once no change has arrived
-# for the debounce delay, and the server has no timer of its own: the loop
-# analyses the documents whose delay has passed before it serves the next
-# packet. Every session below therefore waits longer than the delay and then
-# sends one more packet, which is the packet that ends the wait. The default
-# delay is 250 ms, so a second is several times the wait.
+# for the debounce delay: the loop waits for input but no longer than that
+# delay, so the wake-up at the end of the wait is what analyses the document.
+# The default delay is 250 ms, so a second is several times the wait.
 #
-# Four sessions, one server each:
+# Five sessions, one server each:
 #
 #   open   a didOpen of a file that does not parse publishes one diagnostic,
 #          for the document's version, before the reply to the next request;
 #   fix    a didChange that repairs the file publishes an empty list, for the
 #          new version;
 #   burst  two changes inside the wait publish once, for the last version;
-#   close  a didClose publishes an empty list.
+#   close  a didClose publishes an empty list;
+#   silent the session stops after the change, so no packet follows to end the
+#          wait: the debounce alone has to publish the diagnostic.
 #
 # usage: diagnostics.sh <path-to-server-binary>
 set -u
@@ -118,15 +118,26 @@ session_close() {
 	frame "$exit_frame"
 }
 
-# run <session> <name>: one server, one session, split into frames. The
-# session writes into a pipe of its own, so its sleeps pace what the server
-# reads and a pause in the session is a pause in the server's input: a session
-# written to a file first would arrive all at once and no debounce would ever
-# see the wait it is meant to survive. A server that never returns would hang
-# the build, so a background loop kills it after half a minute and the missing
-# exit status reports the hang as a failure.
+# The session that asks for nothing after the change: the pipe closes and the
+# server ends on end of input, which is exit status 1 because no shutdown was
+# asked for. Nothing but the debounce can have published the diagnostic.
+session_silent() {
+	frame "$initialize_frame"
+	frame "$initialized_frame"
+	frame "$(open_frame "$broken_uri" "$broken" 1)"
+	sleep 1
+}
+
+# run <name> <session> [<expected-exit-status>]: one server, one session, split
+# into frames. The session writes into a pipe of its own, so its sleeps pace
+# what the server reads and a pause in the session is a pause in the server's
+# input: a session written to a file first would arrive all at once and no
+# debounce would ever see the wait it is meant to survive. A server that never
+# returns would hang the build, so a background loop kills it after half a
+# minute and the missing exit status reports the hang as a failure.
 run() {
 	name=$1
+	want=${3:-0}
 	inlet=$work/$name.in
 	mkfifo "$inlet" || {
 		fail "$name: cannot make a pipe for the session"
@@ -149,8 +160,8 @@ run() {
 	status=$?
 	kill "$writer" 2>/dev/null
 	wait "$writer" 2>/dev/null
-	if [ "$status" -ne 0 ]; then
-		fail "$name: the server exited with status $status"
+	if [ "$status" -ne "$want" ]; then
+		fail "$name: the server exited with status $status, not $want"
 		sed 's/^/  stderr: /' "$work/$name.err" >&2
 	fi
 	if split_frames "$work/$name.out" "$work/$name" >"$work/$name.count"; then
@@ -282,6 +293,17 @@ expect "close: the open holds the diagnostic" "$(publish_body close 1)" \
 expect "close: the clear is empty" "$(publish_body close 2)" '"diagnostics":[]'
 expect "close: the clear names the last version" "$(publish_body close 2)" \
 	'"version":1'
+
+run silent session_silent 1
+expect_count "silent: the initialize reply and the publication" \
+	"$(frames_of silent)" 2
+expect_count "silent: one publication, with no packet after the change" \
+	"$(publishes silent)" 1
+publication=$(publish_body silent 1)
+expect "silent: the file is named" "$publication" "\"uri\":\"$broken_uri\""
+expect "silent: the document's version" "$publication" '"version":1'
+expect "silent: one diagnostic" "$publication" '"diagnostics":[{'
+expect "silent: the message" "$publication" '"message":"unexpected token"'
 
 if [ "$failures" -eq 0 ]; then
 	printf 'end-to-end diagnostics test passed\n'

@@ -76,6 +76,26 @@ let test_other_documents_are_kept () =
     (Jide_controller.Debounce.stale t ~uri:other
     && not (Jide_controller.Debounce.stale t ~uri:open_))
 
+let test_next_deadline () =
+  let t = Jide_controller.Debounce.create () in
+  check "nothing waiting: no deadline"
+    (Jide_controller.Debounce.next_deadline t ~now:1.0 = None);
+  Jide_controller.Debounce.mark t ~uri:open_ ~deadline:10.0;
+  Jide_controller.Debounce.mark t ~uri:other ~deadline:12.0;
+  check "the earliest deadline is how long the caller may wait"
+    (Jide_controller.Debounce.next_deadline t ~now:9.0 = Some 1.0);
+  check "a deadline that has passed is no wait at all"
+    (Jide_controller.Debounce.next_deadline t ~now:11.0 = Some 0.0);
+  Jide_controller.Debounce.mark t ~uri:open_ ~deadline:20.0;
+  check "restarting the wait moves the next deadline"
+    (Jide_controller.Debounce.next_deadline t ~now:9.0 = Some 3.0);
+  Jide_controller.Debounce.clear t ~uri:other;
+  check "the document that still waits is the deadline"
+    (Jide_controller.Debounce.next_deadline t ~now:19.0 = Some 1.0);
+  Jide_controller.Debounce.clear t ~uri:open_;
+  check "nothing left: no deadline"
+    (Jide_controller.Debounce.next_deadline t ~now:19.0 = None)
+
 let () =
   test_new ();
   test_mark_and_due ();
@@ -84,6 +104,7 @@ let () =
   test_restart ();
   test_clear ();
   test_other_documents_are_kept ();
+  test_next_deadline ();
   if !failures = 0 then print_endline "all debounce tests passed"
   else (
     Printf.printf "%d debounce test(s) failed\n" !failures;

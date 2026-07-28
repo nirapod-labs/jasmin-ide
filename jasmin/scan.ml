@@ -128,7 +128,7 @@ type token = {
   end_byte : int;
   start_pos : Lexing.position;
   end_pos : Lexing.position;
-  depth : int;
+  mutable depth : int;
       (** Braces opened and not closed before this token. A [}] carries the
           depth of the block it closes, so it is at least one. *)
 }
@@ -138,6 +138,11 @@ type t = {
   text : string;  (** The buffer after the blankings, same length as given. *)
   tokens : token array;
   eof : Lexing.position;
+  blanked : Jide_lang.Span.t list;
+      (** The regions this scan rewrote, in byte order. Blanking keeps the
+          length, so these are spans of the file the editor has open. A
+          diagnostic inside one of them is about bytes the compiler never
+          read. *)
 }
 
 let count t = Array.length t.tokens
@@ -145,12 +150,15 @@ let token t index = t.tokens.(index)
 let text t = t.text
 let name t = t.name
 let eof_position t = t.eof
+let blanked t = t.blanked
 let span t ~start_byte ~end_byte = Jide_lang.Span.make ~start_byte ~end_byte
 
 (** The three bytes of a byte order mark. Jasmin has no use for one and the
-    lexer would reject it, so it is blanked before anything is read. The
-    blanking keeps the length, so an offset in the result is the offset in
-    the file the user has open. *)
+    lexer would reject it, so it is blanked before the recovery reads the
+    buffer. The blanking keeps the length, so an offset in the result is the
+    offset in the file the user has open. It is not done before the
+    compiler's own parse: [jasminc] rejects a mark at byte zero, and the
+    recovering parse reports that error rather than hiding it. *)
 let bom_length text =
   if
     String.length text >= 3
@@ -179,21 +187,25 @@ let blank text ~from ~upto =
     done;
     Bytes.to_string bytes
 
-(* A lexing error, carrying the bytes the lexer stopped at. *)
-exception Stopped of Jide_lang.Span.t
+(* The buffer holds more tokens than one scan will build. *)
+exception Too_large
 
 (* One lexing pass over the whole buffer. The lexer is the compiler's, so
-   the tokens are exactly the ones the parser would be given. *)
+   the tokens are exactly the ones the parser would be given. A lexical
+   error does not throw the pass away: the tokens read before it are
+   returned with the span the lexer stopped at, because they are a valid
+   prefix of the file and the items they hold are worth keeping. *)
 let lex_once ~name text =
   let lexbuf = Lexing.from_string text in
   Lexing.set_filename lexbuf name;
-  let rec loop acc =
+  let rec loop count acc =
+    if count > max_tokens then raise Too_large;
     match Lexer.main lexbuf with
-    | Parser.EOF -> List.rev acc
+    | Parser.EOF -> (List.rev acc, None)
     | token ->
         let start_pos = Lexing.lexeme_start_p lexbuf in
         let end_pos = Lexing.lexeme_end_p lexbuf in
-        loop
+        loop (count + 1)
           ({
              token;
              start_byte = start_pos.Lexing.pos_cnum;
@@ -204,54 +216,65 @@ let lex_once ~name text =
            }
           :: acc)
     | exception Syntax.ParseError (location, _) ->
-        raise (Stopped (Error_span.of_location location))
-    | exception exn -> raise (Stopped (Error.of_exn exn).span)
+        (List.rev acc, Some (Error_span.of_location location))
+    | exception exn -> (List.rev acc, Some (Error.of_exn exn).span)
   in
-  loop []
+  loop 0 []
 
-(** [blank_line text byte] blanks the rest of the line [byte] is on. A
-    lexing error is reported at the first byte the lexer could not accept,
-    and the line is the smallest region that both removes the offending
-    bytes and leaves the line numbering of the rest of the file alone. *)
-let blank_line text byte =
+(** [rest_of_line text byte] is the offset of the newline that ends the line
+    [byte] is on, or the length of the buffer. *)
+let rest_of_line text byte =
   let length = String.length text in
-  let byte = max 0 (min byte (length - 1)) in
   let rec stop index =
     if index >= length || text.[index] = '\n' then index else stop (index + 1)
   in
-  blank text ~from:byte ~upto:(stop byte)
+  stop (max 0 (min byte (length - 1)))
 
-(** Lex the buffer, blanking the line of a lexical error and trying again,
-    so the items after a line the lexer rejects are still seen. Returns the
-    tokens and the buffer they were read from; offsets are the same in
-    either buffer because every blanking keeps the length. *)
+(** Lex the buffer, blanking the region of a lexical error and trying again,
+    so the items after the offending region are still seen. Returns the
+    tokens, the buffer they were read from and the regions this scan
+    blanked. Offsets are the same in either buffer because every blanking
+    keeps the length.
+
+    An error at the end of the buffer, which is where the lexer reports an
+    unterminated comment, has no region left to blank: the tokens read
+    before it are returned as they are. An error at a quote is an
+    unterminated string, and a string runs to the next quote or to the end
+    of the file, so its region is blanked rather than its line. *)
 let lex_all ~name text =
-  let rec attempt text repairs =
+  let rec attempt text blanked repairs =
     match lex_once ~name text with
-    | tokens -> (tokens, text)
-    | exception Stopped span ->
-        if repairs <= 0 then ([], text)
+    | tokens, None -> (tokens, text, List.rev blanked)
+    | tokens, Some span ->
+        let start = span.Jide_lang.Span.start_byte in
+        let length = String.length text in
+        if repairs <= 0 || start >= length then (tokens, text, List.rev blanked)
         else
-          let text' = blank_line text span.Jide_lang.Span.start_byte in
-          if String.equal text' text then ([], text)
-          else attempt text' (repairs - 1)
+          let upto = if text.[start] = '"' then length else rest_of_line text start in
+          let text' = blank text ~from:start ~upto in
+          if String.equal text' text then (tokens, text, List.rev blanked)
+          else
+            attempt text'
+              (Jide_lang.Span.make ~start_byte:start ~end_byte:upto :: blanked)
+              (repairs - 1)
   in
-  attempt text max_lexical_repairs
+  attempt text [] max_lexical_repairs
 
 (* The brace depth of every token. A [}] carries the depth of the block it
    closes, so the tokens that end a block and the tokens that begin the next
    item can be told apart. An unbalanced [}] stops at zero. *)
 let with_depth tokens =
   let depth = ref 0 in
-  Array.map
+  Array.iter
     (fun entry ->
       let here = !depth in
       (match entry.token with
       | Parser.LBRACE -> incr depth
       | Parser.RBRACE -> if !depth > 0 then decr depth
       | _ -> ());
-      { entry with depth = here })
-    tokens
+      entry.depth <- here)
+    tokens;
+  tokens
 
 let eof_of ~name text =
   {
@@ -262,14 +285,30 @@ let eof_of ~name text =
     pos_cnum = String.length text;
   }
 
-(** The one diagnostic a buffer over [max_bytes] gets. *)
+(** The blocks the buffer leaves open, which is how many virtual [}] tokens
+    a file that ends inside a body needs. *)
+let open_depth t =
+  Array.fold_left
+    (fun depth entry ->
+      match entry.token with
+      | Parser.LBRACE -> depth + 1
+      | Parser.RBRACE -> max 0 (depth - 1)
+      | _ -> depth)
+    0 t.tokens
+
+(** The one diagnostic a buffer over [max_bytes] or over [max_tokens] gets.
+    Its code is its own, because a refusal by policy is not a syntax error
+    and no consumer should offer a syntax fix for it, and its span is empty:
+    there is no byte of a file that was never read that a range could point
+    at. *)
 let too_large () =
-  Jide_lang.Diagnostic.make ~code:"parse" ~source:"jasmin"
+  Jide_lang.Diagnostic.make ~code:"size" ~source:"jasmin"
     ~severity:Jide_lang.Diagnostic.Error
     (Jide_lang.Span.make ~start_byte:0 ~end_byte:0)
     (Printf.sprintf
-       "the file is larger than %d bytes, which is too large to analyse"
-       max_bytes)
+       "the file is larger than %d bytes or holds more than %d tokens, which \
+        is too large to analyse"
+       max_bytes max_tokens)
 
 (** [make ~name text] is the scan of [text], or the diagnostic that says the
     buffer is too large to look at. The byte order mark is blanked first. *)
