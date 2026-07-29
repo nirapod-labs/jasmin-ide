@@ -259,3 +259,90 @@ impl ReleaseSource {
     }
 }
 
+/// The command Zed runs for the server.
+///
+/// The environment is the shell environment of the worktree, so that the
+/// server finds `jasminc`, opam and the rest of the user's toolchain. The
+/// extension API 0.7.0 has no separate hook for it; the command carries it.
+/// Variables from `lsp.jasmin-lsp.binary.env` replace the inherited ones of
+/// the same name.
+fn server_command(
+    command: String,
+    args: Vec<String>,
+    worktree: &Worktree,
+    environment: Option<&HashMap<String, String>>,
+) -> Command {
+    let mut env = worktree.shell_env();
+    if let Some(environment) = environment {
+        for (name, value) in environment {
+            env.retain(|(inherited, _)| inherited != name);
+            env.push((name.clone(), value.clone()));
+        }
+    }
+    Command { command, args, env }
+}
+
+/// The platform tag used in release asset names, or an error naming the
+/// platforms that have a released server.
+fn platform_tag() -> zed::Result<&'static str> {
+    match zed::current_platform() {
+        (Os::Linux, Architecture::X8664) => Ok("linux-x86_64"),
+        (Os::Linux, Architecture::Aarch64) => Ok("linux-aarch64"),
+        (Os::Mac, Architecture::Aarch64) => Ok("macos-aarch64"),
+        platform => Err(format!(
+            "Jasmin IDE has no released language server for {}. Released platforms: {}.",
+            describe_platform(platform),
+            SUPPORTED_PLATFORMS.join(", ")
+        )),
+    }
+}
+
+/// Spells a platform out for someone reading an error message.
+fn describe_platform(platform: (Os, Architecture)) -> String {
+    let os = match platform.0 {
+        Os::Mac => "macOS",
+        Os::Linux => "Linux",
+        Os::Windows => "Windows",
+    };
+    let architecture = match platform.1 {
+        Architecture::Aarch64 => "arm64",
+        Architecture::X86 => "x86",
+        Architecture::X8664 => "x86-64",
+    };
+    format!("{os} on {architecture}")
+}
+
+/// The SHA-256 the release records for `platform`, when this build knows it.
+fn expected_digest(platform: &str) -> Option<&'static str> {
+    RELEASE_DIGESTS
+        .iter()
+        .find(|(tag, _)| *tag == platform)
+        .map(|(_, digest)| *digest)
+}
+
+/// The name of the server asset in a release and of its copy in the extension's
+/// working directory: `jasmin-lsp-<version>-<platform>`.
+fn asset_name(version: &str, platform: &str) -> String {
+    format!("{SERVER_BINARY}-{version}-{platform}")
+}
+
+/// Passes through the initialization options the server understands, and drops
+/// the rest of the user's table.
+fn forward_initialization_options(options: &Map<String, Value>) -> Map<String, Value> {
+    let mut forwarded = Map::new();
+    for key in FORWARDED_OPTION_KEYS {
+        if let Some(value) = options.get(key) {
+            forwarded.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(delay) = options
+        .get("diagnostics")
+        .and_then(|diagnostics| diagnostics.get("delay"))
+    {
+        let mut diagnostics = Map::new();
+        diagnostics.insert("delay".to_string(), delay.clone());
+        forwarded.insert("diagnostics".to_string(), Value::Object(diagnostics));
+    }
+    forwarded
+}
+
