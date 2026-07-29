@@ -30,11 +30,17 @@ val read : t -> read_result
 (** Read one packet, waiting for as long as the peer takes to finish it. *)
 
 val wait : t -> timeout:float -> bool
-(** [wait t ~timeout] is [true] when a read has something to start on: bytes
-    are already buffered, or the input has some within [timeout] seconds. A
-    negative [timeout] waits indefinitely, and a time-out is [false], so a
-    caller with work of its own can do it and wait again. A stream that was
-    poisoned has nothing to wait for, so it is [false]. *)
+(** [wait t ~timeout] is [true] when a read has something to do: bytes are
+    already buffered, the input has some within [timeout] seconds, or the
+    stream was poisoned, in which case the next read is end of input at once
+    and the wait must not park the caller on the descriptor. A negative
+    [timeout] waits indefinitely, and a time-out is [false], so a caller with
+    work of its own can do it and wait again.
+
+    The three answers rest on one rule: [wait] is [true] exactly when the
+    read that follows is not going to block. A caller that waits before
+    every read therefore always reaches the read that reports a poisoned
+    stream, instead of waiting for a byte that stream will never deliver. *)
 
 val write : t -> packet -> unit
 (** Write one packet and flush. Raises [Sys_error] only when the output

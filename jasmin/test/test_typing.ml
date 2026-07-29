@@ -154,6 +154,37 @@ let test_dropped_item_does_not_cascade () =
          diagnostic.code = Some "parse")
        result.diagnostics)
 
+(* A statement the parser choked on was blanked by recovery, and the
+   declaration on that line is gone from the tree. The use three bytes after
+   the rewritten bytes is the rewrite's consequence, not a second error: the
+   suppression must cover the whole item, not only the spans that happen to
+   overlap the region. *)
+let recovered_statement_boundary =
+  {|fn a(reg u32 x) -> reg u32 {
+  reg u32 y;
+  y = x
+  reg bool c;
+  c = x;
+  return y;
+}
+|}
+
+(* The same kind of damage in one item, and a genuine type error in the next
+   one: that one is the program's, and the rule must not hide it. *)
+let genuine_after_a_recovered_item =
+  {|fn a(reg u32 x) -> reg u32 {
+  reg u32 y;
+  y = x
+  return x;
+}
+
+fn b(reg u32 x) -> reg u32 {
+  reg bool c;
+  c = x;
+  return x;
+}
+|}
+
 (* A diagnostic whose span lies in a region recovery rewrote or skipped is a
    consequence of the broken text, not of the program: the loop drops it.
    The rule is tested directly, because the tree handed to the loop can come
@@ -180,6 +211,25 @@ let test_recovered_region_suppresses () =
       check
         ("region: one diagnostic, got " ^ string_of_int (List.length other))
         false
+
+(* Every typing diagnostic of an item that contains recovered syntax is a
+   consequence of the broken text and is dropped with it, wherever in the
+   item its span falls. An error in a different, whole item is still the
+   program's and is reported. *)
+let test_recovered_item_is_quiet () =
+  let result = check_text recovered_statement_boundary in
+  check "recovered item: the parse error is the only diagnostic"
+    (List.length result.diagnostics = 1
+    && List.mem (Some "parse") (codes result));
+  check "recovered item: no typing diagnostic from the rewritten item"
+    (not (mentions result "unknown variable"));
+  let control = check_text genuine_after_a_recovered_item in
+  check "recovered item: a genuine error in the next item is reported"
+    (List.length control.diagnostics = 2
+    && List.exists
+         (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+           diagnostic.code = Some "typing")
+         control.diagnostics)
 
 (* At most 200 diagnostics, however many items fail. *)
 let test_diagnostic_bound () =
@@ -233,6 +283,7 @@ let () =
   test_failed_item_does_not_cascade ();
   test_dropped_item_does_not_cascade ();
   test_recovered_region_suppresses ();
+  test_recovered_item_is_quiet ();
   test_diagnostic_bound ();
   test_nothing_escapes ();
   if !failures = 0 then print_endline "all typing tests passed"

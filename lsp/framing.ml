@@ -223,8 +223,11 @@ let read channels =
         channels.poisoned <- true;
         Some (Error ("read error: " ^ Unix.error_message error))
 
+(* A poisoned stream is ready: the read that follows answers end of input
+   from the poison alone, so a caller that waits before every read must not
+   be parked on a descriptor that can never produce another byte. *)
 let wait channels ~timeout =
-  if channels.poisoned then false
+  if channels.poisoned then true
   else if buffered channels > 0 then true
   else
     match Unix.select [ channels.input ] [] [] timeout with

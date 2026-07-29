@@ -24,18 +24,73 @@ let rec take count = function
     unknown variable, and a type alias is a type the compiler cannot find. *)
 type declaration = Function of string | Variable of string | Alias of string
 
-(** The message the compiler prints for a reference to [declaration] it
-    cannot resolve. A name that was dropped by recovery or whose item failed
-    to type is not in the environment, so every later reference to it would
-    produce this message; it is a consequence of the first failure, not a
-    second one, and the typing loop drops it. *)
-let unresolved_message = function
-  | Function name -> Printf.sprintf "unknown function: `%s'" name
-  | Variable name -> Printf.sprintf "unknown variable: `%s'" name
-  | Alias name -> Printf.sprintf "Type '%s' not found" name
+let name_of_declaration = function
+  | Function name | Variable name | Alias name -> name
 
-(** The declaration an item makes, when the compiler names the item by one. *)
-let declaration_of_item (item : Syntax.pitem Location.located) =
+(** [between ~prefix ~suffix message] is the part of [message] between the
+    two, when it has both. *)
+let between ~prefix ~suffix message =
+  let prefix_length = String.length prefix
+  and suffix_length = String.length suffix
+  and length = String.length message in
+  if
+    length >= prefix_length + suffix_length
+    && String.sub message 0 prefix_length = prefix
+    && String.sub message (length - suffix_length) suffix_length = suffix
+  then
+    Some
+      (String.sub message prefix_length
+         (length - prefix_length - suffix_length))
+  else None
+
+(** The declaration an unresolved-name message is about, when it is one of
+    the three messages the compiler prints for a name it cannot resolve and
+    nothing else. The declaration, not the rendered text, is the key a
+    suppression is matched with: a message that merely reads like one of
+    these is not a name the compiler could not find. *)
+let declaration_of_message (message : string) =
+  match between ~prefix:"unknown function: `" ~suffix:"'" message with
+  | Some name -> Some (Function name)
+  | None -> (
+      match between ~prefix:"unknown variable: `" ~suffix:"'" message with
+      | Some name -> Some (Variable name)
+      | None -> (
+          match between ~prefix:"Type '" ~suffix:"' not found" message with
+          | Some name -> Some (Alias name)
+          | None -> None))
+
+(** A name this file can no longer resolve: a declaration an item failed to
+    make, or every name under a namespace whose contents recovery dropped. *)
+type suppression = Name of declaration | Namespace of string
+
+(** Whether [suppression] covers [declaration]. A namespace covers every name
+    the compiler would print qualified with it, which is how a reference to
+    an item of a dropped namespace reads. *)
+let covers (suppression : suppression) (declaration : declaration) =
+  match suppression with
+  | Name expected -> expected = declaration
+  | Namespace prefix ->
+      let name = name_of_declaration declaration in
+      let length = String.length prefix in
+      String.length name > length + 2
+      && String.sub name 0 length = prefix
+      && String.sub name length 2 = "::"
+
+(** Whether a diagnostic with this message is the same failure seen again. *)
+let suppressed (suppressions : suppression list) message =
+  match declaration_of_message message with
+  | None -> false
+  | Some declaration -> List.exists (fun s -> covers s declaration) suppressions
+
+(** Every declaration an item makes, with the namespace path in front of the
+    names a namespace contains. A namespace is not a declaration of its own:
+    a reference to one of its items is printed as [`N::name'], so the names
+    inside it are what a failure to type it takes away. *)
+let rec declarations_of_item ~(prefix : string)
+    (item : Syntax.pitem Location.located) : declaration list =
+  let qualify name =
+    if String.equal prefix "" then name else prefix ^ "::" ^ name
+  in
   match Location.unloc item with
   | Syntax.PFundef definition ->
       Some (Function (Location.unloc definition.pdf_name))
@@ -57,6 +112,13 @@ let declaration_of_dropped = function
       Some (Variable name)
   | Recover.Dropped { kind = "type"; name = Some name; _ } -> Some (Alias name)
   | Recover.Dropped _ -> None
+
+(* The bytes of one item, so the loop can ask whether recovery rewrote any
+   of them. *)
+let span_of_item (item : Syntax.pitem Location.located) : Jide_lang.Span.t =
+  let location = item.Location.pl_loc in
+  Jide_lang.Span.make ~start_byte:(max 0 location.Location.loc_bchar)
+    ~end_byte:(max 0 location.Location.loc_echar)
 
 module Make (A : Arch_full.Arch) = struct
   type environment = A.extended_op Pretyping.Env.env
@@ -165,17 +227,11 @@ module Make (A : Arch_full.Arch) = struct
               (fun dropped ->
                 Option.iter suppress (declaration_of_dropped dropped))
               dropped;
-            let keep (error : Error.t) =
-              let recovered_here =
-                List.exists
-                  (fun (span : Jide_lang.Span.t) ->
-                    Jide_lang.Span.overlaps span error.Error.span)
-                  recovered
-              in
+            let keep ~(in_recovered_item : bool) (error : Error.t) =
               if
                 Error.belongs_to ~file error
                 && (not (List.mem error.Error.message !suppressed))
-                && not recovered_here
+                && not in_recovered_item
               then (
                 diagnostics := Error.to_diagnostic error :: !diagnostics;
                 incr kept;
@@ -185,6 +241,19 @@ module Make (A : Arch_full.Arch) = struct
               (fun item ->
                 if not !stopped then
                   let snapshot = !environment in
+                  (* A diagnostic in an item recovery rewrote the syntax of
+                     is a consequence of the broken text: the design drops
+                     every typing diagnostic in a function that contains a
+                     recovered region, not only the ones whose own span
+                     happens to overlap it. The item's span decides, so a
+                     use just after the rewritten bytes is covered too. *)
+                  let item_span = span_of_item item in
+                  let in_recovered_item =
+                    List.exists
+                      (fun (span : Jide_lang.Span.t) ->
+                        Jide_lang.Span.overlaps span item_span)
+                      recovered
+                  in
                   match type_item snapshot item with
                   | Ok next ->
                       let decls =
@@ -204,7 +273,7 @@ module Make (A : Arch_full.Arch) = struct
                               Error.to_diagnostic error :: !diagnostics);
                       environment := next
                   | Error exn ->
-                      keep (Error.of_exn exn);
+                      keep ~in_recovered_item (Error.of_exn exn);
                       (* The item's own name is now absent from the
                          environment; a later reference to it would be
                          reported as unresolved. *)

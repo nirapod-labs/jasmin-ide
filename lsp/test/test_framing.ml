@@ -377,6 +377,33 @@ let test_waits_for_nothing () =
   check "end of input ends the read" (Jide_lsp.Framing.read channels = None);
   close_in_noerr ic
 
+(* A stream a bad header poisoned has nothing left to read, and that is
+   exactly what a wait has to report: ready, so the caller's next read is
+   end of input. The bug this pins down made the wait look at the descriptor
+   instead, so a server waiting without a timeout waited for a byte that
+   never came. The writer stays open and no byte follows the header, so
+   neither buffered bytes nor the descriptor can answer the wait: only the
+   poison can. The timeout is small rather than the -1 the server passes,
+   so a regression fails here instead of hanging the suite. *)
+let test_poisoned_stream_is_ready () =
+  let r, w = Unix.pipe () in
+  let ic = Unix.in_channel_of_descr r in
+  let oc = Unix.out_channel_of_descr w in
+  let channels = Jide_lsp.Framing.create ~input:ic ~output:stdout in
+  output_string oc "Content-Length: -1\r\n";
+  flush oc;
+  (match Jide_lsp.Framing.read channels with
+  | Some (Error message) ->
+      check "a header that cannot be framed is an error"
+        (contains message "negative")
+  | other -> check ("the bad header: " ^ show_opt other) false);
+  check "a poisoned stream is ready to read"
+    (Jide_lsp.Framing.wait channels ~timeout:0.05);
+  check "the read after a poisoned stream is end of input"
+    (Jide_lsp.Framing.read channels = None);
+  close_out oc;
+  close_in_noerr ic
+
 let () =
   test_notification ();
   test_request_numeric_id ();
@@ -401,6 +428,7 @@ let () =
   test_braces_in_strings ();
   test_non_json_body ();
   test_waits_for_nothing ();
+  test_poisoned_stream_is_ready ();
   if !failures = 0 then print_endline "all framing tests passed"
   else (
     Printf.printf "%d framing test(s) failed\n" !failures;

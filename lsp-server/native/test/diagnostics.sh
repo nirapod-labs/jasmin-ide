@@ -6,7 +6,7 @@
 # delay, so the wake-up at the end of the wait is what analyses the document.
 # The default delay is 250 ms, so a second is several times the wait.
 #
-# Five sessions, one server each:
+# Six sessions, one server each:
 #
 #   open   a didOpen of a file that does not parse publishes one diagnostic,
 #          for the document's version, before the reply to the next request;
@@ -15,7 +15,10 @@
 #   burst  two changes inside the wait publish once, for the last version;
 #   close  a didClose publishes an empty list;
 #   silent the session stops after the change, so no packet follows to end the
-#          wait: the debounce alone has to publish the diagnostic.
+#          wait: the debounce alone has to publish the diagnostic;
+#   version a document opened at a version other than one, then repaired at
+#          the next, is published under each of those versions, so the number
+#          is the client's and not a constant of the server's.
 #
 # usage: diagnostics.sh <path-to-server-binary>
 set -u
@@ -113,6 +116,20 @@ session_close() {
 	frame "$(open_frame "$broken_uri" "$broken" 1)"
 	sleep 1
 	frame "$(close_frame "$broken_uri")"
+	sleep 1
+	frame "$shutdown_frame"
+	frame "$exit_frame"
+}
+
+# The versions are the client's: an editor that counts from seven sees seven
+# and eight, not one and two, so what is published cannot be a number the
+# server keeps for itself.
+session_version() {
+	frame "$initialize_frame"
+	frame "$initialized_frame"
+	frame "$(open_frame "$broken_uri" "$broken" 7)"
+	sleep 1
+	frame "$(change_frame "$broken_uri" "$fixed" 8)"
 	sleep 1
 	frame "$shutdown_frame"
 	frame "$exit_frame"
@@ -293,6 +310,19 @@ expect "close: the open holds the diagnostic" "$(publish_body close 1)" \
 expect "close: the clear is empty" "$(publish_body close 2)" '"diagnostics":[]'
 expect "close: the clear names the last version" "$(publish_body close 2)" \
 	'"version":1'
+
+run version session_version
+expect_count "version: four frames" "$(frames_of version)" 4
+expect_count "version: one publication for the open and one for the change" \
+	"$(publishes version)" 2
+expect "version: the open is published under the client's version" \
+	"$(publish_body version 1)" '"version":7'
+expect "version: the open holds the diagnostic" "$(publish_body version 1)" \
+	'"diagnostics":[{'
+expect "version: the repair is published under the next version" \
+	"$(publish_body version 2)" '"version":8'
+expect "version: the repaired text publishes no diagnostic" \
+	"$(publish_body version 2)" '"diagnostics":[]'
 
 run silent session_silent 1
 expect_count "silent: the initialize reply and the publication" \

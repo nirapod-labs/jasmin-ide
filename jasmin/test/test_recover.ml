@@ -625,6 +625,44 @@ let test_namespace_keeps_the_whole_item () =
     | [ Jide_jasmin.Recover.Dropped { kind; _ } ] -> kind = "function"
     | _ -> false)
 
+(* An item after a namespace. A restart from a checkpoint inside the
+   namespace at a top-level keyword reads the rest of the file as if it were
+   still inside the namespace, whose closing brace the restart skipped, so
+   the parser never sees the end of the block and the whole file is lost. *)
+let test_namespace_and_the_items_after_it () =
+  let text =
+    namespace_with_a_broken_item
+    ^ "\nfn after(reg u32 a) -> reg u32 {\n  return a;\n}\n"
+  in
+  let parsed = parse text in
+  check "namespace tail: the namespace keeps its whole item"
+    (match Jide_jasmin.Parse.items parsed with
+    | first :: _ -> (
+        match Jasmin.Location.unloc first with
+        | Jasmin.Syntax.PNamespace (name, inner) ->
+            Jasmin.Location.unloc name = "N"
+            && List.concat_map names_of_item inner = [ "ok" ]
+        | _ -> false)
+    | [] -> false);
+  check "namespace tail: the item after the namespace survives"
+    (item_names parsed = [ "N"; "after" ]);
+  check "namespace tail: the broken item is stubbed once"
+    (List.length (Jide_jasmin.Parse.dropped parsed) = 1);
+  (* A namespace that is dropped altogether must not take the items after it
+     with it either. *)
+  let dropped =
+    parse
+      "namespace N {\n  fn broken(reg u32 a -> reg u32 { return a; }\n}\n\
+       fn after(reg u32 a) -> reg u32 {\n  return a;\n}\n"
+  in
+  check "namespace tail: a dropped namespace leaves the rest in the tree"
+    (item_names dropped = [ "after" ]);
+  check "namespace tail: the dropped namespace is stubbed under its own name"
+    (match Jide_jasmin.Parse.dropped dropped with
+    | [ Jide_jasmin.Recover.Dropped { kind; name; _ } ] ->
+        kind = "namespace" && name = Some "N"
+    | _ -> false)
+
 (* A stub names the thing it stands for. A parameter and a global are named
    after their type, so the first name after the keyword is the wrong one. *)
 let test_stub_names_the_item () =
@@ -816,6 +854,7 @@ let () =
   test_unterminated_comment_keeps_the_prefix ();
   test_virtual_brace_keeps_the_function ();
   test_namespace_keeps_the_whole_item ();
+  test_namespace_and_the_items_after_it ();
   test_stub_names_the_item ();
   test_stubs_do_not_overlap ();
   test_no_function_from_a_string ();
