@@ -258,15 +258,30 @@ module Make (A : Arch_full.Arch) = struct
       the items recovery dropped, and of the items whose typing failed, are
       remembered: a later reference to one of them is the same failure seen
       again and is not reported a second time. A diagnostic whose span lies
-      in a region recovery rewrote or skipped is dropped for the same
-      reason.
+      in an item recovery rewrote is dropped for the same reason.
 
-      At most {!max_diagnostics} diagnostics are kept. Every call into the
-      library is wrapped: no exception leaves this module. *)
-  let type_items ~(dropped : Recover.dropped list)
-      ~(recovered : Jide_lang.Span.t list) ~(file : string)
-      ~(items : Syntax.pprogram) ~(idirs : (string * string) list) :
-      result * environment option =
+      The environment kept and restored here is the one the loop can observe:
+      its maps and its declarations. [Pretyping.Env.env] also carries
+      [e_declared], a mutable cell the library adds a function's locals to as
+      it types them, and the type is abstract, so a failure cannot undo that
+      cell. The library resets it when it enters the next function
+      ([Env.Vars.clear_locals]), which is the only place the loop would read
+      it, so the leak is not observable. Recorded rather than papered over.
+
+      A [require] is read through {!resolve} and typed here, so a file the
+      user has open is used as it is and a missing file or a cycle is a
+      diagnostic on the require item rather than an exception from inside
+      the compiler. An error in a required file is not placed on this
+      document, whose bytes it does not describe: the require item says the
+      file has one instead.
+
+      At most {!budget} diagnostics are kept. Every call into the library
+      this function makes is wrapped, and {!check}, the only entry point the
+      engine uses, ends in a catch-all: no exception leaves the adapter. *)
+  let rec type_items ~(resolve : lookup) ~(budget : int)
+      ~(dropped : Recover.dropped list) ~(recovered : Jide_lang.Span.t list)
+      ~(file : string) ~(items : Syntax.pprogram)
+      ~(idirs : (string * string) list) : result * environment option =
     let initial =
       match List.fold_left Pretyping.Env.add_from Pretyping.Env.empty idirs with
       | environment -> Ok environment
@@ -280,6 +295,12 @@ module Make (A : Arch_full.Arch) = struct
         | Error exn ->
             ({ empty with diagnostics = [ Error.diagnostic_of_exn exn ] }, None)
         | Ok None ->
+            (* [enter_file] answers [None] for a file already in
+               [e_loader.loaded]. Every check starts from [Env.empty], so a
+               top-level document cannot be in it and this branch is
+               unreachable from the engine today; it is kept because the
+               answer is a value, not an exception, and a caller that reuses
+               an environment would meet it. *)
             ( {
                 empty with
                 diagnostics =
@@ -292,28 +313,24 @@ module Make (A : Arch_full.Arch) = struct
               },
               None )
         | Ok (Some (environment, _resolved)) ->
-            let environment = ref environment in
-            let diagnostics = ref [] in
-            let facts = ref Facts.empty in
-            let kept = ref 0 in
-            let stopped = ref false in
-            let suppressions = ref [] in
-            List.iter
-              (fun dropped ->
-                Option.iter
-                  (fun suppression ->
-                    suppressions := suppression :: !suppressions)
-                  (suppression_of_dropped dropped))
-              dropped;
-            let keep ~(in_recovered_item : bool) (error : Error.t) =
-              if
-                Error.belongs_to ~file error
-                && (not (suppressed !suppressions error.Error.message))
-                && not in_recovered_item
-              then (
-                diagnostics := Error.to_diagnostic error :: !diagnostics;
-                incr kept;
-                if !kept >= max_diagnostics then stopped := true)
+            let loop =
+              {
+                file;
+                document = file;
+                resolve;
+                idirs;
+                place = true;
+                origin =
+                  ref (Jide_lang.Span.make ~start_byte:0 ~end_byte:0);
+                environment = ref environment;
+                suppressions = ref [];
+                diagnostics = ref [];
+                facts = ref Facts.empty;
+                kept = ref 0;
+                budget;
+                stopped = ref false;
+                include_errors = ref 0;
+              }
             in
             List.iter
               (fun item ->
