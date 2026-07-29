@@ -71,8 +71,7 @@ let rec names_of_item (item : Jasmin.Syntax.pitem Jasmin.Location.located) =
       [ Jasmin.Location.unloc definition.Jasmin.Syntax.pdf_name ]
   | Jasmin.Syntax.PParam parameter ->
       [ Jasmin.Location.unloc parameter.Jasmin.Syntax.ppa_name ]
-  | Jasmin.Syntax.PTypeAlias (name, _, _) ->
-      [ Jasmin.Location.unloc name ]
+  | Jasmin.Syntax.PTypeAlias (name, _, _) -> [ Jasmin.Location.unloc name ]
   | Jasmin.Syntax.PNamespace (name, inner) ->
       Jasmin.Location.unloc name :: List.concat_map names_of_item inner
   | Jasmin.Syntax.PGlobal global ->
@@ -122,7 +121,6 @@ let keeps_the_compilers_error text parsed =
   | Some expected, Some actual ->
       same_span expected actual && expected.message = actual.message
   | _ -> false
-
 
 let valid =
   {|fn first(reg u32 a) -> reg u32 {
@@ -295,7 +293,9 @@ let test_later_items_survive () =
     (dropped_names parsed = [ "first" ]);
   check "later items: the stub is an item stub"
     (List.exists
-       (function Jide_jasmin.Recover.Dropped { kind; _ } -> kind = "function")
+       (function
+         | Jide_jasmin.Recover.Dropped { kind; _ } ->
+             kind = Jide_jasmin.Recover.Function)
        (Jide_jasmin.Parse.dropped parsed));
   check "later items: the checkpoint restart did the work"
     (item_restarts parsed >= 1 && byte_restarts parsed = 0)
@@ -524,7 +524,8 @@ let broken_functions count =
   for index = 0 to count - 1 do
     Buffer.add_string buffer
       (Printf.sprintf
-         "#[inline]\nfn f%d(reg u32 a) -> reg u32 {\n\
+         "#[inline]\n\
+          fn f%d(reg u32 a) -> reg u32 {\n\
          \  reg u32 b;\n\
          \  b = ;\n\
          \  return a;\n\
@@ -543,18 +544,14 @@ let test_recovery_bound () =
   check "bound: the repaired prefix is kept"
     (List.length (Jide_jasmin.Parse.items parsed) = 50);
   check "bound: with their names, in order"
-    (item_names parsed
-    = List.init 50 (fun index -> Printf.sprintf "f%d" index));
+    (item_names parsed = List.init 50 (fun index -> Printf.sprintf "f%d" index));
   check "bound: the unrepaired tail is stubbed"
     (match Jide_jasmin.Parse.dropped parsed with
     | [ Jide_jasmin.Recover.Dropped { kind; name; _ } ] ->
-        kind = "function" && name = Some "f50"
+        kind = Jide_jasmin.Recover.Function && name = Some "f50"
     | other ->
-        let () =
-          Printf.printf "  (bound: %d stubs)\n%!" (List.length other)
-        in
+        let () = Printf.printf "  (bound: %d stubs)\n%!" (List.length other) in
         false)
-
 
 (* A valid file followed by a comment that is never closed: the compiler
    reports the comment at the end of the buffer, where there is no line left
@@ -582,8 +579,7 @@ let test_virtual_brace_keeps_the_function () =
     (item_names parsed = [ "only" ]);
   check "virtual brace: nothing is dropped"
     (Jide_jasmin.Parse.dropped parsed = []);
-  check "virtual brace: a brace restart did the work"
-    (brace_restarts parsed = 1);
+  check "virtual brace: a brace restart did the work" (brace_restarts parsed = 1);
   check "virtual brace: no byte is rewritten"
     (Jide_jasmin.Parse.recovered parsed = [] && byte_restarts parsed = 0);
   check "virtual brace: the compiler's error is kept"
@@ -622,7 +618,8 @@ let test_namespace_keeps_the_whole_item () =
     (List.length (Jide_jasmin.Parse.dropped parsed) = 1);
   check "namespace: the stub is a function stub"
     (match Jide_jasmin.Parse.dropped parsed with
-    | [ Jide_jasmin.Recover.Dropped { kind; _ } ] -> kind = "function"
+    | [ Jide_jasmin.Recover.Dropped { kind; _ } ] ->
+        kind = Jide_jasmin.Recover.Function
     | _ -> false)
 
 (* An item after a namespace. A restart from a checkpoint inside the
@@ -652,15 +649,19 @@ let test_namespace_and_the_items_after_it () =
      with it either. *)
   let dropped =
     parse
-      "namespace N {\n  fn broken(reg u32 a -> reg u32 { return a; }\n}\n\
-       fn after(reg u32 a) -> reg u32 {\n  return a;\n}\n"
+      "namespace N {\n\
+      \  fn broken(reg u32 a -> reg u32 { return a; }\n\
+       }\n\
+       fn after(reg u32 a) -> reg u32 {\n\
+      \  return a;\n\
+       }\n"
   in
   check "namespace tail: a dropped namespace leaves the rest in the tree"
     (item_names dropped = [ "after" ]);
   check "namespace tail: the dropped namespace is stubbed under its own name"
     (match Jide_jasmin.Parse.dropped dropped with
     | [ Jide_jasmin.Recover.Dropped { kind; name; _ } ] ->
-        kind = "namespace" && name = Some "N"
+        kind = Jide_jasmin.Recover.Namespace && name = Some "N"
     | _ -> false)
 
 (* A stub names the thing it stands for. A parameter and a global are named
@@ -669,17 +670,19 @@ let test_stub_names_the_item () =
   let stub_of text =
     match Jide_jasmin.Parse.dropped (parse text) with
     | [ Jide_jasmin.Recover.Dropped { kind; name; _ } ] -> (kind, name)
-    | other -> ("", Some (string_of_int (List.length other)))
+    | other ->
+        (Jide_jasmin.Recover.Item, Some (string_of_int (List.length other)))
   in
   check "stub name: a parameter is named after its type"
-    (stub_of "param Foo x = ;\n\nfn ok(reg u32 a) -> reg u32 {\n  return a;\n}\n"
-    = ("parameter", Some "x"));
+    (stub_of
+       "param Foo x = ;\n\nfn ok(reg u32 a) -> reg u32 {\n  return a;\n}\n"
+    = (Jide_jasmin.Recover.Parameter, Some "x"));
   check "stub name: a global is named after its type"
     (stub_of "u32 g = ;\n\nfn ok(reg u32 a) -> reg u32 {\n  return a;\n}\n"
-    = ("global", Some "g"));
+    = (Jide_jasmin.Recover.Global, Some "g"));
   check "stub name: a type alias"
     (stub_of "type T = ;\n\nfn ok(reg u32 a) -> reg u32 {\n  return a;\n}\n"
-    = ("type", Some "T"))
+    = (Jide_jasmin.Recover.Type, Some "T"))
 
 (* No two stubs may stand for the same bytes: a consumer that lists them
    would show the same broken item twice. *)
@@ -695,8 +698,7 @@ let test_stubs_do_not_overlap () =
   in
   let rec no_overlap = function
     | [] -> true
-    | span :: others ->
-        List.for_all (disjoint span) others && no_overlap others
+    | span :: others -> List.for_all (disjoint span) others && no_overlap others
   in
   check "stubs: no two stand for the same bytes" (no_overlap spans)
 
@@ -720,9 +722,11 @@ let test_no_function_from_a_string () =
   List.iter
     (fun (label, text) ->
       let parsed = parse text in
-      check (label ^ ": no phantom function")
+      check
+        (label ^ ": no phantom function")
         (not (List.mem "phantom" (all_names parsed)));
-      check (label ^ ": the two real items survive")
+      check
+        (label ^ ": the two real items survive")
         (item_names parsed = [ "first"; "second" ]))
     [
       ("one line", valid ^ "\nrequire \"phantom\n");
@@ -765,7 +769,8 @@ let test_restarted_items_keep_their_place () =
   in
   let stub_end =
     match Jide_jasmin.Parse.dropped parsed with
-    | [ Jide_jasmin.Recover.Dropped { span; _ } ] -> span.Jide_lang.Span.end_byte
+    | [ Jide_jasmin.Recover.Dropped { span; _ } ] ->
+        span.Jide_lang.Span.end_byte
     | _ -> -1
   in
   check "place: the first kept item begins where the stub ends"
@@ -782,7 +787,8 @@ let test_restarted_items_keep_their_place () =
        (fun (start, stop) keyword ->
          let at = index_of first_item_broken keyword in
          at >= 0 && start <= at && at < stop)
-       places [ "fn second"; "fn third" ])
+       places
+       [ "fn second"; "fn third" ])
 
 (* The stub is not a [Syntax.pitem] because that type is the compiler's, so
    the item stream a consumer walks is the merge of the kept items and the
@@ -791,8 +797,9 @@ let test_stubs_are_in_the_item_stream () =
   let parsed = parse first_item_broken in
   let stream = Jide_jasmin.Parse.items_with_stubs parsed in
   check "stream: the stub and the kept items together"
-    (List.length stream = List.length (Jide_jasmin.Parse.dropped parsed)
-                          + List.length (Jide_jasmin.Parse.items parsed));
+    (List.length stream
+    = List.length (Jide_jasmin.Parse.dropped parsed)
+      + List.length (Jide_jasmin.Parse.items parsed));
   (match stream with
   | Jide_jasmin.Parse.Stub (Jide_jasmin.Recover.Dropped { name; _ }) :: rest ->
       check "stream: the stub comes first, where its bytes are"
@@ -800,11 +807,12 @@ let test_stubs_are_in_the_item_stream () =
       check "stream: the kept items follow in source order"
         (List.filter_map
            (function
-             | Jide_jasmin.Parse.Kept (item : Jasmin.Syntax.pitem Jasmin.Location.located)
-               -> (
+             | Jide_jasmin.Parse.Kept
+                 (item : Jasmin.Syntax.pitem Jasmin.Location.located) -> (
                  match Jasmin.Location.unloc item with
                  | Jasmin.Syntax.PFundef definition ->
-                     Some (Jasmin.Location.unloc definition.Jasmin.Syntax.pdf_name)
+                     Some
+                       (Jasmin.Location.unloc definition.Jasmin.Syntax.pdf_name)
                  | _ -> None)
              | _ -> None)
            rest

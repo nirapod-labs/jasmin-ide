@@ -212,6 +212,80 @@ let test_recovered_region_suppresses () =
         ("region: one diagnostic, got " ^ string_of_int (List.length other))
         false
 
+(* A namespace is typed as one item, so one bad item inside it takes every
+   name the namespace declared with it. The call to the healthy item is then
+   an unknown function only because the namespace failed, and the compiler
+   prints the name qualified, so the suppression has to know the path. *)
+let namespace_with_a_bad_item =
+  {|namespace N {
+  fn good(reg u32 a) -> reg u32 { reg bool b; b = a; return a; }
+}
+
+fn use(reg u32 a) -> reg u32 { reg u32 x; x = N::good(a); return x; }
+|}
+
+(* The same namespace, dropped whole by recovery: the stub carries the
+   namespace's name and nothing inside it, so the path is all the loop can
+   key on. *)
+let namespace_dropped_by_recovery =
+  {|namespace N {
+  fn good(reg u32 a -> reg u32 { return a; }
+}
+
+fn use(reg u32 a) -> reg u32 { reg u32 x; x = N::good(a); return x; }
+|}
+
+let test_namespace_does_not_cascade () =
+  let result = check_text namespace_with_a_bad_item in
+  check "namespace: the bad item's own error is the only one"
+    (List.length result.diagnostics = 1
+    && List.mem (Some "typing") (codes result));
+  check "namespace: the healthy item is not reported as unknown"
+    (not (mentions result "unknown function"));
+  let dropped = check_text namespace_dropped_by_recovery in
+  check "namespace dropped: the compiler's error is the only one"
+    (List.length dropped.diagnostics = 1
+    && List.mem (Some "parse") (codes dropped));
+  check "namespace dropped: no unknown function for a name inside it"
+    (not (mentions dropped "unknown function"))
+
+(* Suppression is for names this file used to declare, and only after the
+   item that declares them: a name that was never declared, or a call that
+   comes before the failing declaration, is the program's own error. *)
+let test_genuine_unknown_names_are_reported () =
+  let undeclared =
+    check_text
+      {|fn f(reg u32 a) -> reg u32 {
+  reg u32 x;
+  x = nosuch(a);
+  return x;
+}
+|}
+  in
+  check "unknown: a name that is nowhere is reported"
+    (mentions undeclared "unknown function");
+  check "unknown: and it is the only diagnostic"
+    (List.length undeclared.diagnostics = 1);
+  let before =
+    check_text
+      {|fn use(reg u32 a) -> reg u32 {
+  reg u32 x;
+  x = later(a);
+  return x;
+}
+
+fn later(reg u32 a) -> reg u32 {
+  reg bool b;
+  b = a;
+  return a;
+}
+|}
+  in
+  check "order: a call before the failing declaration is reported"
+    (mentions before "unknown function");
+  check "order: and the failing declaration's own error too"
+    (List.length before.diagnostics = 2)
+
 (* Every typing diagnostic of an item that contains recovered syntax is a
    consequence of the broken text and is dropped with it, wherever in the
    item its span falls. An error in a different, whole item is still the
@@ -282,6 +356,8 @@ let () =
   test_typing_over_recovered ();
   test_failed_item_does_not_cascade ();
   test_dropped_item_does_not_cascade ();
+  test_namespace_does_not_cascade ();
+  test_genuine_unknown_names_are_reported ();
   test_recovered_region_suppresses ();
   test_recovered_item_is_quiet ();
   test_diagnostic_bound ();

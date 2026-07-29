@@ -20,8 +20,8 @@ val parse : name:string -> string -> parse_result
 type check_result = {
   diagnostics : Jide_lang.Diagnostic.t list;
       (** Diagnostics whose span indexes [file]. An error the compiler
-          reports in a file reached through a [require] is not returned: its
-          offsets belong to that file, not to this document. *)
+          reports in a file reached through a [require] is not returned with
+          its own offsets: the require item says the file has one instead. *)
   warnings : Warnings.t list;
       (** Each warning names the file the compiler printed it for, or [file]
           when it printed no location, so the engine keeps the ones for the
@@ -35,9 +35,20 @@ type check_result = {
 }
 
 val check :
+  ?resolve:(string -> string option) ->
   arch ->
   call_conv ->
   file:string ->
   text:string ->
   idirs:(string * string) list ->
   check_result
+(** [check ~resolve arch call_conv ~file ~text ~idirs] parses and types
+    [text] as [file]. [resolve] answers with the bytes of a file a [require]
+    item names, or [None] when it has none; the engine passes its open
+    buffers first and falls back to disk, which is what the default does. A
+    missing file, a cycle and a file that does not type are diagnostics of
+    the require item, and the names a file that did type declares, or that
+    one which did not would have declared, are not reported as unknown
+    afterwards. A file that cannot be read at all is the one exception to
+    the last clause: nothing is known about a file that has no bytes, so a
+    reference to a name only it would have declared is reported as well. *)

@@ -120,6 +120,40 @@ let suppression_of_dropped = function
       Some (Namespace name)
   | Recover.Dropped _ -> None
 
+(** [lookup path] is the bytes of a file a [require] names, when the caller
+    has them: an open buffer first, a file on disk when the buffer is not
+    the one asked for. *)
+type lookup = string -> string option
+
+(** The default lookup: the file on disk. *)
+let read_file (path : string) : string option =
+  match In_channel.with_open_bin path In_channel.input_all with
+  | text -> Some text
+  | exception _ -> None
+
+(** A name is a file name as the compiler resolves it: relative to the file
+    that requires it, or to the directory an idir binds when the item names
+    a [from]. *)
+let include_path ~(idirs : (string * string) list) ~(base : string)
+    ~(from : string option) (name : string) : string =
+  let base =
+    match from with
+    | None -> base
+    | Some from -> (
+        match List.assoc_opt from idirs with Some dir -> dir | None -> base)
+  in
+  if Filename.is_relative name then Filename.concat base name else name
+
+(** [normalise_path path] is [path] with a working directory in front of a
+    relative one, which is all a cycle has to compare. *)
+let normalise_path (path : string) : string =
+  if Filename.is_relative path then Filename.concat (Sys.getcwd ()) path
+  else path
+
+(** How many required files one document may nest. A cycle is caught by the
+    chain before this, and this bounds a tree of distinct files. *)
+let max_include_depth = 8
+
 (* The bytes of one item, so the loop can ask whether recovery rewrote any
    of them. *)
 let span_of_item (item : Syntax.pitem Location.located) : Jide_lang.Span.t =
@@ -178,6 +212,42 @@ module Make (A : Arch_full.Arch) = struct
     match Pretyping.Env.exit_file environment with
     | environment -> Ok environment
     | exception exn -> Error exn
+
+  (** Everything one pass over one item stream learns. A required file is
+      typed by the same pass with its own [file] and its own recovered
+      regions, and shares the environment, the suppressions and the budget.
+      The diagnostics are the document's own: an error attributed to another
+      file is counted in [include_errors] instead of being placed. *)
+  type loop = {
+    file : string;
+    document : string;
+        (** The file the caller asked about, which stays the same however deep
+            a [require] chain goes. *)
+    resolve : lookup;
+    idirs : (string * string) list;
+    place : bool;
+        (** True while the loop types the document the caller asked about, and
+            false for a file reached through a [require]. Only the document's
+            own diagnostics have spans the caller can place; an error from an
+            included file names that file, or names no file at all, and either
+            way its offsets do not index the document. *)
+    origin : Jide_lang.Span.t ref;
+        (** The span of the document's item being typed. A failure of the
+            require chain itself is reported there, because it is the
+            document's item that cannot be read, not the included file's. *)
+    environment : environment ref;
+    suppressions : suppression list ref;
+    diagnostics : Error.t list ref;
+    facts : Facts.t ref;
+        (** The typed facts of the document's own items, merged as each one
+            types. Only the document's loop collects them: the facts of an
+            included file carry that file's offsets, which do not index the
+            document the caller asked about. *)
+    kept : int ref;
+    budget : int;
+    stopped : bool ref;
+    include_errors : int ref;
+  }
 
   (** [type_items ~file ~items ~idirs] types the items of one file one by one
       and returns the diagnostics, plus the environment the loop leaves
