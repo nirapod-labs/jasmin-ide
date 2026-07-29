@@ -93,31 +93,39 @@ let rec declarations_of_item ~(prefix : string)
   in
   match Location.unloc item with
   | Syntax.PFundef definition ->
-      Some (Function (Location.unloc definition.pdf_name))
+      [ Function (qualify (Location.unloc definition.pdf_name)) ]
   | Syntax.PParam parameter ->
-      Some (Variable (Location.unloc parameter.ppa_name))
-  | Syntax.PGlobal global -> Some (Variable (Location.unloc global.pgd_name))
-  | Syntax.PTypeAlias (name, _, _) -> Some (Alias (Location.unloc name))
-  | Syntax.Pexec _ | Syntax.Prequire _ | Syntax.PNamespace _ -> None
+      [ Variable (qualify (Location.unloc parameter.ppa_name)) ]
+  | Syntax.PGlobal global ->
+      [ Variable (qualify (Location.unloc global.pgd_name)) ]
+  | Syntax.PTypeAlias (name, _, _) -> [ Alias (qualify (Location.unloc name)) ]
+  | Syntax.PNamespace (name, items) ->
+      let prefix = qualify (Location.unloc name) in
+      List.concat_map (declarations_of_item ~prefix) items
+  | Syntax.Pexec _ | Syntax.Prequire _ -> []
 
-(** The declaration a stub stands for. A namespace has no single name, so a
-    dropped one contributes nothing here: the names inside it are not known
-    until the namespace parses. *)
-let declaration_of_dropped = function
-  | Recover.Dropped { kind = "function"; name = Some name; _ } ->
-      Some (Function name)
-  | Recover.Dropped { kind = "parameter"; name = Some name; _ } ->
-      Some (Variable name)
-  | Recover.Dropped { kind = "global"; name = Some name; _ } ->
-      Some (Variable name)
-  | Recover.Dropped { kind = "type"; name = Some name; _ } -> Some (Alias name)
+let declarations_of_item item = declarations_of_item ~prefix:"" item
+
+(** What a stub stands for. A dropped namespace takes every name under it
+    with it, which is why it is remembered by prefix rather than by name. *)
+let suppression_of_dropped = function
+  | Recover.Dropped { kind = Recover.Function; name = Some name; _ } ->
+      Some (Name (Function name))
+  | Recover.Dropped { kind = Recover.Parameter; name = Some name; _ }
+  | Recover.Dropped { kind = Recover.Global; name = Some name; _ } ->
+      Some (Name (Variable name))
+  | Recover.Dropped { kind = Recover.Type; name = Some name; _ } ->
+      Some (Name (Alias name))
+  | Recover.Dropped { kind = Recover.Namespace; name = Some name; _ } ->
+      Some (Namespace name)
   | Recover.Dropped _ -> None
 
 (* The bytes of one item, so the loop can ask whether recovery rewrote any
    of them. *)
 let span_of_item (item : Syntax.pitem Location.located) : Jide_lang.Span.t =
   let location = item.Location.pl_loc in
-  Jide_lang.Span.make ~start_byte:(max 0 location.Location.loc_bchar)
+  Jide_lang.Span.make
+    ~start_byte:(max 0 location.Location.loc_bchar)
     ~end_byte:(max 0 location.Location.loc_echar)
 
 module Make (A : Arch_full.Arch) = struct
@@ -219,18 +227,18 @@ module Make (A : Arch_full.Arch) = struct
             let facts = ref Facts.empty in
             let kept = ref 0 in
             let stopped = ref false in
-            let suppressed = ref [] in
-            let suppress declaration =
-              suppressed := unresolved_message declaration :: !suppressed
-            in
+            let suppressions = ref [] in
             List.iter
               (fun dropped ->
-                Option.iter suppress (declaration_of_dropped dropped))
+                Option.iter
+                  (fun suppression ->
+                    suppressions := suppression :: !suppressions)
+                  (suppression_of_dropped dropped))
               dropped;
             let keep ~(in_recovered_item : bool) (error : Error.t) =
               if
                 Error.belongs_to ~file error
-                && (not (List.mem error.Error.message !suppressed))
+                && (not (suppressed !suppressions error.Error.message))
                 && not in_recovered_item
               then (
                 diagnostics := Error.to_diagnostic error :: !diagnostics;
@@ -274,10 +282,15 @@ module Make (A : Arch_full.Arch) = struct
                       environment := next
                   | Error exn ->
                       keep ~in_recovered_item (Error.of_exn exn);
-                      (* The item's own name is now absent from the
-                         environment; a later reference to it would be
-                         reported as unresolved. *)
-                      Option.iter suppress (declaration_of_item item);
+                      (* The names the item declares are now absent from the
+                         environment; a later reference to one of them would
+                         be reported as unresolved, and it is this failure
+                         seen again, not a second one. A namespace takes
+                         every name under it with it. *)
+                      List.iter
+                        (fun declaration ->
+                          suppressions := Name declaration :: !suppressions)
+                        (declarations_of_item item);
                       environment := snapshot)
               items;
             let environment =

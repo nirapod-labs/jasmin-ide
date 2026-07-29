@@ -1,23 +1,66 @@
 type state = Uninitialized | Running | Shutting_down | Exited
 
+type analysis = {
+  check : uri:string -> unit;
+  diagnostics : uri:string -> (int * Jide_lang.Diagnostic.t list) option;
+  forget : uri:string -> unit;
+}
+(** What the server asks for when it analyses a document.
+
+    [check ~uri] analyses the document's current text and stores the result;
+    [diagnostics ~uri] is that result, the version of the text it describes
+    and its full set of diagnostics, or [None] when nothing is stored;
+    [forget ~uri] drops what a closed document left behind. The engine
+    satisfies this, and so does the stand-in the executable wires today, so
+    the server itself has no opinion about how a document is analysed. *)
+
 type t = {
   engine : Jide_engine.Engine.t;
   log : string -> unit;
+  analysis : analysis option;
+  debounce : Debounce.t;
+  mutable delay : int;
+  now : unit -> float;
   mutable state : state;
   mutable exit_code : int;
   mutable shutdown_requested : bool;
 }
 
-let create ~log =
+let default_delay = 250
+let min_delay = 50
+let max_delay = 1000
+let clamp_delay delay = max min_delay (min max_delay delay)
+
+let create ~log ?engine ?analysis ?(delay = default_delay)
+    ?(now = fun () -> Unix.gettimeofday ()) () =
   {
-    engine = Jide_engine.Engine.create ();
+    engine =
+      (match engine with
+      | Some engine -> engine
+      | None -> Jide_engine.Engine.create ());
     log;
+    analysis;
+    debounce = Debounce.create ();
+    delay = clamp_delay delay;
+    now;
     state = Uninitialized;
     exit_code = 1;
     shutdown_requested = false;
   }
 
+let delay t = t.delay
 let normalize_uri uri = Jide_lang.Uri.to_string (Jide_lang.Uri.of_string uri)
+
+(* The packet's own JSON, back as the plain value the settings reader takes.
+   A request's parameters are held in a value type of the protocol package's
+   own, which wraps plain JSON and nothing else; a packet that carries none
+   reads as null. *)
+let json_of_parameters (parameters : Jsonrpc.Structured.t option) :
+    Yojson.Safe.t =
+  match parameters with
+  | None -> `Null
+  | Some (`Assoc fields) -> `Assoc fields
+  | Some (`List items) -> `List items
 
 (* The per-handler catch-all: a handler that raises must not end the server,
    and the log line must be able to say what failed, so the exception is
@@ -69,6 +112,95 @@ let root_of_initialize (params : Lsp.Types.InitializeParams.t) =
       | None -> Option.join params.rootPath)
   | None -> Option.join params.rootPath
 
+(* The debounce. A document that was opened or changed waits until no further
+   change has arrived for [delay] milliseconds. The loop that owns the input
+   waits for it no longer than the earliest deadline and analyses what the
+   wait ended for ([time_to_next], [analyse_due]); the wait is what makes a
+   check run at all, so the last change of a session is published as well.
+   Marking again restarts the wait, which is what makes a burst of keystrokes
+   one analysis instead of one per keystroke. *)
+
+let mark_stale t ~uri =
+  match t.analysis with
+  | None -> ()
+  | Some _ ->
+      Debounce.mark t.debounce ~uri
+        ~deadline:(t.now () +. (float_of_int t.delay /. 1000.))
+
+let publish t ~uri ~version ~lines ~diagnostics =
+  match t.analysis with
+  | None -> []
+  | Some _ ->
+      let params = Json_conv.publish_params ~uri ~version ~lines diagnostics in
+      [
+        Jsonrpc.Packet.Notification
+          (Jsonrpc.Notification.create
+             ~method_:"textDocument/publishDiagnostics"
+             ~params:(Jsonrpc.Structured.t_of_yojson params)
+             ());
+      ]
+
+(* Analyse one document and return the packet that publishes its result. A
+   result for a version the document no longer has is dropped, never sent,
+   and the document waits again: the client must not see a set that describes
+   text it has already replaced. *)
+let analyse t ~uri =
+  match t.analysis with
+  | None -> []
+  | Some analysis -> (
+      match
+        guarded (fun () ->
+            analysis.check ~uri;
+            analysis.diagnostics ~uri)
+      with
+      | Error message ->
+          t.log ("analysis failed: " ^ uri ^ ": " ^ message);
+          []
+      | Ok None -> []
+      | Ok (Some (version, diagnostics)) -> (
+          match Jide_engine.Engine.document t.engine ~uri with
+          | None -> []
+          | Some document ->
+              if Jide_engine.Document.version document <> version then (
+                mark_stale t ~uri;
+                [])
+              else
+                publish t ~uri ~version:(Some version)
+                  ~lines:(Jide_engine.Document.lines document)
+                  ~diagnostics))
+
+let analyse_due t =
+  match t.state with
+  | Uninitialized | Shutting_down | Exited -> []
+  | Running ->
+      let ready = Debounce.due t.debounce ~now:(t.now ()) in
+      List.concat_map (fun uri -> analyse t ~uri) ready
+
+let time_to_next t =
+  match t.state with
+  | Uninitialized | Shutting_down | Exited -> None
+  | Running -> Debounce.next_deadline t.debounce ~now:(t.now ())
+
+let ensure_checked t ~uri =
+  match t.state with
+  | Uninitialized | Shutting_down | Exited -> []
+  | Running ->
+      if not (Debounce.stale t.debounce ~uri) then []
+      else (
+        Debounce.clear t.debounce ~uri;
+        analyse t ~uri)
+
+let set_delay t delay =
+  let delay = clamp_delay delay in
+  if delay <> t.delay then (
+    t.delay <- delay;
+    t.log ("diagnostics delay is now " ^ string_of_int delay ^ " ms"))
+
+let apply_settings t settings =
+  match Json_conv.delay_of_settings settings with
+  | None -> ()
+  | Some delay -> set_delay t delay
+
 let handle_initialize t (params : Lsp.Types.InitializeParams.t) =
   match t.state with
   | Uninitialized ->
@@ -99,13 +231,15 @@ let handle_exit t =
    documents the client believes it closed. [exit] and [$/cancelRequest] are
    the two notifications the protocol allows in every state, and they are
    handled before this point. *)
-let dispatch_notification t (notification : Lsp.Client_notification.t) =
+let dispatch_notification t ~parameters
+    (notification : Lsp.Client_notification.t) =
   match notification with
   | Lsp.Client_notification.TextDocumentDidOpen params ->
       let doc = params.textDocument in
       let uri = normalize_uri (Lsp.Uri.to_string doc.uri) in
       Jide_engine.Engine.open_document t.engine ~uri ~version:doc.version
         ~text:doc.text;
+      mark_stale t ~uri;
       []
   | Lsp.Client_notification.TextDocumentDidChange params ->
       let doc = params.textDocument in
@@ -122,15 +256,36 @@ let dispatch_notification t (notification : Lsp.Client_notification.t) =
               | None -> t.log ("didChange for an unopened document: " ^ uri)
               | Some _ ->
                   Jide_engine.Engine.change_document t.engine ~uri
-                    ~version:doc.version ~text:change.text)));
+                    ~version:doc.version ~text:change.text;
+                  mark_stale t ~uri)));
       []
-  | Lsp.Client_notification.TextDocumentDidClose params ->
-      Jide_engine.Engine.close_document t.engine
-        ~uri:(normalize_uri (Lsp.Uri.to_string params.textDocument.uri));
-      []
+  | Lsp.Client_notification.TextDocumentDidClose params -> (
+      let uri = normalize_uri (Lsp.Uri.to_string params.textDocument.uri) in
+      let closed = Jide_engine.Engine.document t.engine ~uri in
+      Jide_engine.Engine.close_document t.engine ~uri;
+      Debounce.clear t.debounce ~uri;
+      (match t.analysis with
+      | None -> ()
+      | Some analysis -> (
+          match guarded (fun () -> analysis.forget ~uri) with
+          | Ok () -> ()
+          | Error message ->
+              t.log ("analysis drop failed: " ^ uri ^ ": " ^ message)));
+      (* An empty set clears the file's diagnostics in the client. The
+         version is the last one the document had, which is the text the
+         client saw; a document the server never held is not published. *)
+      match closed with
+      | None -> []
+      | Some document ->
+          publish t ~uri
+            ~version:(Some (Jide_engine.Document.version document))
+            ~lines:(Jide_engine.Document.lines document)
+            ~diagnostics:[])
   | Lsp.Client_notification.Initialized -> []
+  | Lsp.Client_notification.ChangeConfiguration _ ->
+      apply_settings t parameters;
+      []
   | Lsp.Client_notification.DidSaveTextDocument _
-  | Lsp.Client_notification.ChangeConfiguration _
   | Lsp.Client_notification.SetTrace _ ->
       []
   | Lsp.Client_notification.UnknownNotification { method_; _ } ->
@@ -161,7 +316,12 @@ let handle_notification t (notification : Jsonrpc.Notification.t) =
        ^ ", not running: " ^ notification.method_);
       []
   | Ok client_notification -> (
-      match guarded (fun () -> dispatch_notification t client_notification) with
+      match
+        guarded (fun () ->
+            dispatch_notification t
+              ~parameters:(json_of_parameters notification.params)
+              client_notification)
+      with
       | Ok packets -> packets
       | Error message ->
           t.log
@@ -219,6 +379,9 @@ let dispatch_request t (request : Jsonrpc.Request.t) =
     | Error message ->
         [ reply_error request.id (error_code `InvalidRequest) message ]
     | Ok (E (Lsp.Client_request.Initialize params)) -> (
+        (* A client may send the debounce with its initialization options,
+           which the raw parameters carry as JSON. *)
+        apply_settings t (json_of_parameters request.params);
         match handle_initialize t params with
         | Some result -> [ reply_ok request.id result ]
         | None ->

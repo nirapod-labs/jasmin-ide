@@ -250,7 +250,9 @@ let lex_all ~name text =
         let length = String.length text in
         if repairs <= 0 || start >= length then (tokens, text, List.rev blanked)
         else
-          let upto = if text.[start] = '"' then length else rest_of_line text start in
+          let upto =
+            if text.[start] = '"' then length else rest_of_line text start
+          in
           let text' = blank text ~from:start ~upto in
           if String.equal text' text then (tokens, text, List.rev blanked)
           else

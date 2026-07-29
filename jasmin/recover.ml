@@ -45,11 +45,24 @@
 open Jasmin
 module I = Parser.MenhirInterpreter
 
+(** The kind of declaration a stub stands for, as the item's keyword names
+    it. A consumer that suppresses a later reference to the stub keys on
+    this, not on a string, so the two can never disagree about a spelling. *)
+type kind =
+  | Function
+  | Parameter
+  | Global
+  | Type
+  | Namespace
+  | Exec
+  | Require
+  | Item
+
 (** A broken item, kept so the outline can show it and so typing knows not
     to report its name as unknown later. *)
 type dropped =
   | Dropped of {
-      kind : string;  (** The item's keyword, or ["item"]. *)
+      kind : kind;  (** The item's keyword, or [Item]. *)
       name : string option;  (** Its name, when the header was readable. *)
       span : Jide_lang.Span.t;
     }
@@ -192,7 +205,9 @@ let initial_position =
   { Lexing.pos_fname = ""; pos_lnum = 1; pos_bol = 0; pos_cnum = 0 }
 
 let new_state counters scan =
-  let initial = start_checkpoint ~name:(Scan.name scan) ~position:initial_position in
+  let initial =
+    start_checkpoint ~name:(Scan.name scan) ~position:initial_position
+  in
   {
     scan;
     initial;
@@ -257,12 +272,12 @@ let close_blocks checkpoint ~position ~count =
 let dropped_of scan ~from ~upto =
   let upto = min upto (Scan.count scan) in
   let kind_of = function
-    | Parser.FN -> Some "function"
-    | Parser.PARAM -> Some "parameter"
-    | Parser.TYPE -> Some "type"
-    | Parser.NAMESPACE -> Some "namespace"
-    | Parser.EXEC -> Some "exec"
-    | Parser.REQUIRE | Parser.FROM -> Some "require"
+    | Parser.FN -> Some Function
+    | Parser.PARAM -> Some Parameter
+    | Parser.TYPE -> Some Type
+    | Parser.NAMESPACE -> Some Namespace
+    | Parser.EXEC -> Some Exec
+    | Parser.REQUIRE | Parser.FROM -> Some Require
     | _ -> None
   in
   let rec keyword index =
@@ -298,7 +313,7 @@ let dropped_of scan ~from ~upto =
   in
   let declared kind at =
     match kind with
-    | "parameter" | "global" -> (
+    | Parameter | Global -> (
         match first_eq (at + 1) with
         | Some eq -> last_name ~from:(at + 1) ~upto:eq
         | None -> first_name (at + 1))
@@ -315,8 +330,8 @@ let dropped_of scan ~from ~upto =
         match first_eq from with
         | Some eq -> (
             match last_name ~from ~upto:eq with
-            | Some name -> ("global", Some name)
-            | None -> ("item", None))
+            | Some name -> (Global, Some name)
+            | None -> (Item, None))
         | None -> (
             match
               if from < upto then Some (Scan.token scan from).token else None
@@ -326,8 +341,8 @@ let dropped_of scan ~from ~upto =
                   from + 1 < upto
                   && (Scan.token scan (from + 1)).token = Parser.LPAREN
                 in
-                ((if called then "function" else "item"), Some name)
-            | _ -> ("item", None)))
+                ((if called then Function else Item), Some name)
+            | _ -> (Item, None)))
   in
   Dropped
     {
@@ -529,10 +544,11 @@ let recover ~name ~text : t =
   and close_blocks_here state ~failure : Syntax.pprogram option =
     match state.input with
     | None -> None
-    | Some (at, environment) ->
+    | Some (at, environment) -> (
         let missing =
           if at <> failure then 0
-          else if failure >= Scan.count state.scan then Scan.open_depth state.scan
+          else if failure >= Scan.count state.scan then
+            Scan.open_depth state.scan
           else
             let entry = Scan.token state.scan failure in
             if Scan.hard_keyword entry.token then entry.depth else 0
@@ -540,7 +556,8 @@ let recover ~name ~text : t =
         if missing <= 0 then None
         else
           let position =
-            if failure >= Scan.count state.scan then Scan.eof_position state.scan
+            if failure >= Scan.count state.scan then
+              Scan.eof_position state.scan
             else (Scan.token state.scan failure).start_pos
           in
           let attempt = fork state in
@@ -554,7 +571,7 @@ let recover ~name ~text : t =
                   counters.recoveries <- counters.recoveries + 1;
                   counters.brace_restarts <- counters.brace_restarts + 1;
                   Some items
-              | Failed _ | Raised _ -> None)
+              | Failed _ | Raised _ -> None))
   and run_from state ~depth ~start checkpoint =
     match drive state ~index:start ~eof_sent:false checkpoint with
     | Accepted items -> items
