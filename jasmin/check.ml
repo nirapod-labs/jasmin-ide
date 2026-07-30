@@ -332,63 +332,159 @@ module Make (A : Arch_full.Arch) = struct
                 include_errors = ref 0;
               }
             in
-            List.iter
-              (fun item ->
-                if not !stopped then
-                  let snapshot = !environment in
-                  (* A diagnostic in an item recovery rewrote the syntax of
-                     is a consequence of the broken text: the design drops
-                     every typing diagnostic in a function that contains a
-                     recovered region, not only the ones whose own span
-                     happens to overlap it. The item's span decides, so a
-                     use just after the rewritten bytes is covered too. *)
-                  let item_span = span_of_item item in
-                  let in_recovered_item =
-                    List.exists
-                      (fun (span : Jide_lang.Span.t) ->
-                        Jide_lang.Span.overlaps span item_span)
-                      recovered
-                  in
-                  match type_item snapshot item with
-                  | Ok next ->
-                      let decls =
-                        added
-                          ~before:(Pretyping.Env.decls snapshot)
-                          ~after:(Pretyping.Env.decls next)
-                      in
-                      (match Collect.of_item ~file ~env:next ~item ~decls with
-                      | collected -> facts := Facts.merge !facts collected
-                      | exception exn ->
-                          (* A fact the adapter cannot read is a failure of
-                             this server, never of the user's file: it is
-                             reported as such instead of ending the check. *)
-                          let error = Error.of_exn exn in
-                          if Error.belongs_to ~file error then
-                            diagnostics :=
-                              Error.to_diagnostic error :: !diagnostics);
-                      environment := next
-                  | Error exn ->
-                      keep ~in_recovered_item (Error.of_exn exn);
-                      (* The names the item declares are now absent from the
-                         environment; a later reference to one of them would
-                         be reported as unresolved, and it is this failure
-                         seen again, not a second one. A namespace takes
-                         every name under it with it. *)
-                      List.iter
-                        (fun declaration ->
-                          suppressions := Name declaration :: !suppressions)
-                        (declarations_of_item item);
-                      environment := snapshot)
-              items;
+            type_sequence loop ~chain:[ normalise_path file ] ~dropped ~recovered
+              ~items;
             let environment =
-              match exit_file !environment with
+              match exit_file !(loop.environment) with
               | Ok environment -> Some environment
               | Error exn ->
-                  diagnostics := Error.diagnostic_of_exn exn :: !diagnostics;
+                  loop.diagnostics := Error.of_exn exn :: !(loop.diagnostics);
                   None
             in
-            ( { empty with diagnostics = List.rev !diagnostics; facts = !facts },
+            ( {
+                empty with
+                diagnostics =
+                  List.rev_map Error.to_diagnostic !(loop.diagnostics);
+                facts = !(loop.facts);
+              },
               environment ))
+
+  and type_sequence loop ~(chain : string list)
+      ~(dropped : Recover.dropped list) ~(recovered : Jide_lang.Span.t list)
+      ~(items : Syntax.pprogram) =
+    List.iter
+      (fun dropped ->
+        Option.iter
+          (fun suppression ->
+            loop.suppressions := suppression :: !(loop.suppressions))
+          (suppression_of_dropped dropped))
+      dropped;
+    List.iter
+      (fun item ->
+        if not !(loop.stopped) then
+          let snapshot = !(loop.environment) in
+          let item_span = span_of_item item in
+          if loop.place then loop.origin := item_span;
+          (* A diagnostic in an item recovery rewrote the syntax of is a
+             consequence of the broken text: the design drops every typing
+             diagnostic in a function that contains a recovered region, not
+             only the ones whose own span happens to overlap it. The item's
+             span decides, so a use just after the rewritten bytes is
+             covered too. *)
+          let in_recovered_item =
+            List.exists
+              (fun (span : Jide_lang.Span.t) ->
+                Jide_lang.Span.overlaps span item_span)
+              recovered
+          in
+          match Location.unloc item with
+          | Syntax.Prequire (from, names) ->
+              type_require loop ~chain
+                ~from:(Option.map Location.unloc from)
+                names
+          | _ -> (
+              match type_item snapshot item with
+              | Ok next ->
+                  (* What this item typed left behind, read from the front of
+                     the typed list. Only the document's loop collects facts:
+                     an included file's ranges index that file, not the
+                     document. *)
+                  if loop.place then (
+                    let decls =
+                      added
+                        ~before:(Pretyping.Env.decls snapshot)
+                        ~after:(Pretyping.Env.decls next)
+                    in
+                    match
+                      Collect.of_item ~file:loop.file ~env:next ~item ~decls
+                    with
+                    | collected ->
+                        loop.facts := Facts.merge !(loop.facts) collected
+                    | exception exn ->
+                        (* A fact the adapter cannot read is a failure of this
+                           server, never of the user's file: it is reported as
+                           such instead of ending the check. *)
+                        let error = Error.of_exn exn in
+                        if Error.belongs_to ~file:loop.file error then
+                          keep loop ~in_recovered_item error);
+                  loop.environment := next
+              | Error exn ->
+                  keep loop ~in_recovered_item (Error.of_exn exn);
+                  (* The names the item declares are now absent from the
+                     environment; a later reference to one of them would be
+                     reported as unresolved, and it is this failure seen
+                     again, not a second one. A namespace takes every name
+                     under it with it. *)
+                  List.iter
+                    (fun declaration ->
+                      loop.suppressions := Name declaration :: !(loop.suppressions))
+                    (declarations_of_item item);
+                  loop.environment := snapshot))
+      items
+
+  (** [type_require loop ~chain names] types the files one [require] item
+      names, in the environment the item stream has reached, by the same
+      rules as this file. *)
+  and type_require loop ~(chain : string list) ~(from : string option)
+      (names : string Location.located list) =
+    let base = Filename.dirname loop.file in
+    List.iter
+      (fun (name : string Location.located) ->
+        if not !(loop.stopped) then
+          let written = Location.unloc name in
+          let path = normalise_path (include_path ~idirs:loop.idirs ~base ~from written) in
+          (* A failure of the chain itself is the document's: its item names a
+             file that cannot be read, whatever depth the failure was found
+             at, so it is placed on the document's item and not counted as an
+             error of an included file. *)
+          let report message =
+            note loop
+              (Error.make ~file:(Some loop.document) ~kind:Error.Typing
+                 ~span:!(loop.origin) message)
+          in
+          if List.mem path chain then
+            report (Printf.sprintf "the required file `%s' requires itself" written)
+          else if List.length chain > max_include_depth then
+            report
+              (Printf.sprintf "the required file `%s' is nested too deeply" written)
+          else
+            match loop.resolve path with
+            | None ->
+                report
+                  (Printf.sprintf "cannot read the required file `%s'" written)
+            | Some text ->
+                let parsed = Parse.parse ~name:path text in
+                let before = !(loop.include_errors) in
+                let include_loop = { loop with file = path; place = false } in
+                type_sequence include_loop ~chain:(path :: chain)
+                  ~dropped:(Parse.dropped parsed)
+                  ~recovered:(Parse.recovered parsed)
+                  ~items:(Parse.items parsed);
+                if !(loop.include_errors) > before || Parse.failed parsed then (
+                  (* The file did not type, so its names are not in the
+                     environment and every later reference to one of them is
+                     this failure seen again. Its header is readable even
+                     when its bodies are not, which is where the names come
+                     from. *)
+                  List.iter
+                    (fun (item : Syntax.pitem Location.located) ->
+                      List.iter
+                        (fun declaration ->
+                          loop.suppressions :=
+                            Name declaration :: !(loop.suppressions))
+                        (declarations_of_item item))
+                    (Parse.items parsed);
+                  List.iter
+                    (fun dropped ->
+                      Option.iter
+                        (fun suppression ->
+                          loop.suppressions :=
+                            suppression :: !(loop.suppressions))
+                        (suppression_of_dropped dropped))
+                    (Parse.dropped parsed);
+                  report
+                    (Printf.sprintf "the required file `%s' has errors" written)))
+      names
 
   let check ~(file : string) ~(text : string) ~(idirs : (string * string) list)
       : result =
