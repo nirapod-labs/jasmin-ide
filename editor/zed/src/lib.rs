@@ -346,3 +346,82 @@ fn forward_initialization_options(options: &Map<String, Value>) -> Map<String, V
     forwarded
 }
 
+zed::register_extension!(JasminExtension);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_asset_name_carries_the_version_and_the_platform() {
+        assert_eq!(
+            asset_name("0.1.0", "macos-aarch64"),
+            "jasmin-lsp-0.1.0-macos-aarch64"
+        );
+        assert_eq!(
+            asset_name("0.2.3", "linux-x86_64"),
+            "jasmin-lsp-0.2.3-linux-x86_64"
+        );
+    }
+
+    #[test]
+    fn a_platform_is_spelled_out_for_the_unsupported_message() {
+        assert_eq!(
+            describe_platform((Os::Mac, Architecture::Aarch64)),
+            "macOS on arm64"
+        );
+        assert_eq!(
+            describe_platform((Os::Mac, Architecture::X8664)),
+            "macOS on x86-64"
+        );
+        assert_eq!(
+            describe_platform((Os::Windows, Architecture::X8664)),
+            "Windows on x86-64"
+        );
+        assert_eq!(
+            describe_platform((Os::Linux, Architecture::X86)),
+            "Linux on x86"
+        );
+        assert_eq!(
+            SUPPORTED_PLATFORMS.join(", "),
+            "linux-x86_64, linux-aarch64, macos-aarch64"
+        );
+    }
+
+    #[test]
+    fn the_known_options_are_forwarded_and_the_rest_are_dropped() {
+        let options: Value = zed::serde_json::from_str(
+            r#"{
+                "arch": "arm",
+                "include": { "SECP": "src/jasmin" },
+                "diagnostics": { "delay": 500, "unused": true },
+                "trace": "verbose"
+            }"#,
+        )
+        .expect("a table of initialization options");
+        let options = options
+            .as_object()
+            .expect("the fixture is a table of initialization options");
+
+        let forwarded = forward_initialization_options(options);
+        let expected: Value = zed::serde_json::from_str(
+            r#"{
+                "arch": "arm",
+                "include": { "SECP": "src/jasmin" },
+                "diagnostics": { "delay": 500 }
+            }"#,
+        )
+        .expect("the expected table");
+        assert_eq!(Value::Object(forwarded), expected);
+    }
+
+    #[test]
+    fn an_empty_table_forwards_nothing() {
+        assert!(forward_initialization_options(&Map::new()).is_empty());
+    }
+
+    #[test]
+    fn a_digest_known_for_one_platform_is_not_used_for_another() {
+        assert_eq!(expected_digest("linux-aarch64"), None);
+    }
+}
