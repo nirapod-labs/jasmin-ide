@@ -809,6 +809,21 @@ let () =
   test_notification_before_initialize_is_dropped ();
   test_notification_after_shutdown_is_dropped ();
   test_notification_parse_error_names_the_state ();
+  test_open_waits_for_the_delay ();
+  test_time_to_next ();
+  test_publish_carries_the_full_set ();
+  test_a_change_restarts_the_wait ();
+  test_two_changes_are_one_publish ();
+  test_close_clears ();
+  test_a_superseded_result_is_dropped ();
+  test_ensure_checked_forces_a_check ();
+  test_without_analysis_nothing_is_published ();
+  test_a_failing_analysis_keeps_serving ();
+  test_delay_is_clamped ();
+  test_settings_set_the_delay ();
+  test_initialize_options_set_the_delay ();
+  test_configuration_sets_the_delay ();
+  test_nothing_is_published_after_shutdown ();
   if !failures = 0 then print_endline "all server tests passed"
   else (
     Printf.printf "%d server test(s) failed\n" !failures;

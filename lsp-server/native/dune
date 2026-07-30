@@ -2,4 +2,10 @@
  (name main)
  (public_name jasmin-lsp)
  (package jasmin-lsp)
- (libraries jide_controller jide_check jide_lsp jide_engine jide_lang))
+ (libraries
+  jide_controller
+  jide_check
+  jide_jasmin
+  jide_lsp
+  jide_engine
+  jide_lang))

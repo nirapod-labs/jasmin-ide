@@ -256,8 +256,9 @@ let test_valid () =
   check "valid: no restart" (recoveries parsed = 0)
 
 (* The compiler's own error is the first diagnostic, on its location and its
-   message, for every fault, and it is the only diagnostic the driver adds to
-   it: recovery rewrites bytes or skips them, it does not invent errors. *)
+   message, for every fault, and every diagnostic after it is the stub of an
+   item recovery could not keep: recovery rewrites bytes or skips them, it
+   does not invent errors. *)
 let test_first_error_is_the_compilers () =
   let cases =
     [
@@ -271,18 +272,76 @@ let test_first_error_is_the_compilers () =
   in
   List.iter
     (fun (label, text) ->
-      match (compiler_diagnostic text, first_diagnostic (parse text)) with
+      let parsed = parse text in
+      match (compiler_diagnostic text, first_diagnostic parsed) with
       | Some expected, Some actual ->
           check (label ^ ": same span") (same_span expected actual);
           check (label ^ ": same message") (expected.message = actual.message);
           check (label ^ ": same code")
             (expected.code = actual.code && expected.code = Some "parse");
-          check
-            (label ^ ": one diagnostic")
-            (List.length (Jide_jasmin.Parse.diagnostics (parse text)) = 1)
+          check (label ^ ": one diagnostic per dropped item, and the first")
+            (List.length (Jide_jasmin.Parse.diagnostics parsed)
+            = 1 + List.length (Jide_jasmin.Parse.dropped parsed));
+          check (label ^ ": every later diagnostic is a dropped stub")
+            (match Jide_jasmin.Parse.diagnostics parsed with
+            | [] -> false
+            | _ :: rest ->
+                List.for_all
+                  (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+                    contains diagnostic.message "could not be parsed")
+                  rest)
       | Some _, None -> check (label ^ ": a diagnostic survives recovery") false
       | None, _ -> check (label ^ ": the fixture does not parse") false)
     cases
+
+(* Two broken items in one file. The compiler reports the first and stops, so
+   without a diagnostic per stub the second is absent from the tree and from
+   the diagnostics at once, and the editor shows one hole where there are two.
+   Every stub is reported at its own span, in source order. *)
+let two_broken_items =
+  {|fn broken1(reg u32 a -> reg u32 {
+  return a;
+}
+
+fn ok(reg u32 a) -> reg u32 {
+  return a;
+}
+
+fn broken2(reg u32 a -> reg u32 {
+  return a;
+}
+|}
+
+let test_every_dropped_item_is_reported () =
+  let parsed = parse two_broken_items in
+  check "two holes: the whole item between them survives"
+    (item_names parsed = [ "ok" ]);
+  check "two holes: both broken items are stubbed"
+    (dropped_names parsed = [ "broken1"; "broken2" ]);
+  let dropped = Jide_jasmin.Parse.diagnostics parsed in
+  check "two holes: the compiler's error, then one per stub"
+    (List.length dropped = 3);
+  check "two holes: the stub diagnostics are the two after the first"
+    (match dropped with
+    | _ :: rest ->
+        List.map
+          (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+            diagnostic.span.Jide_lang.Span.start_byte)
+          rest
+        = List.map
+            (function
+              | Jide_jasmin.Recover.Dropped { span; _ } ->
+                  span.Jide_lang.Span.start_byte)
+            (Jide_jasmin.Parse.dropped parsed)
+    | [] -> false);
+  check "two holes: each names the item it stands for"
+    (match dropped with
+    | _ :: rest ->
+        List.for_all2
+          (fun (diagnostic : Jide_lang.Diagnostic.t) name ->
+            contains diagnostic.message ("`" ^ name ^ "'"))
+          rest [ "broken1"; "broken2" ]
+    | [] -> false)
 
 let test_later_items_survive () =
   let parsed = parse first_item_broken in
