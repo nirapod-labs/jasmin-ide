@@ -16,12 +16,12 @@ let contains text fragment =
   in
   fragment_length = 0 || from 0
 
-let create () = Jide_controller.Server.create ~log:(fun _ -> ())
+let create () = Jide_controller.Server.create ~log:(fun _ -> ()) ()
 
 let create_logging () =
   let messages = ref [] in
   let log message = messages := message :: !messages in
-  (Jide_controller.Server.create ~log, messages)
+  (Jide_controller.Server.create ~log (), messages)
 
 let request ?(params = `Assoc []) id method_ =
   Jsonrpc.Packet.Request
@@ -399,6 +399,395 @@ let test_notification_parse_error_names_the_state () =
     (List.exists (fun message -> contains message "exited") !messages);
   check "parse error after exit: the drop is not reported as pre-initialize"
     (not (List.mem "notification ignored before initialize" !messages))
+
+(* The publish path. The analysis and the clock come from the test, so what
+   the server does at a deadline is decided by a number the test writes and
+   never by a sleep. The analysis stores, for each document, the version of
+   the text it read plus whatever offset the test set, which is how a result
+   for a superseded version is produced on demand. *)
+
+let publish_method = "textDocument/publishDiagnostics"
+
+type probe = {
+  mutable checks : string list;  (** The documents analysed, in order. *)
+  mutable forgotten : string list;  (** The documents the analysis dropped. *)
+  mutable raises : bool;  (** Whether the analysis fails instead. *)
+  mutable version_offset : int;  (** Added to the version it read. *)
+  mutable diagnostics : Jide_lang.Diagnostic.t list;  (** What it reports. *)
+}
+
+let probe () =
+  {
+    checks = [];
+    forgotten = [];
+    raises = false;
+    version_offset = 0;
+    diagnostics = [];
+  }
+
+let sample_diagnostic message =
+  Jide_lang.Diagnostic.make ~severity:Jide_lang.Diagnostic.Error
+    (Jide_lang.Span.make ~start_byte:0 ~end_byte:1)
+    message
+
+let probe_analysis (probe : probe) engine : Jide_controller.Server.analysis =
+  let stored = Hashtbl.create 4 in
+  {
+    Jide_controller.Server.check =
+      (fun ~uri ->
+        probe.checks <- probe.checks @ [ uri ];
+        if probe.raises then raise (Failure "the analysis exploded");
+        match Jide_engine.Engine.document engine ~uri with
+        | None -> Hashtbl.remove stored uri
+        | Some document ->
+            Hashtbl.replace stored uri
+              ( Jide_engine.Document.version document + probe.version_offset,
+                probe.diagnostics ));
+    diagnostics = (fun ~uri -> Hashtbl.find_opt stored uri);
+    forget =
+      (fun ~uri ->
+        probe.forgotten <- probe.forgotten @ [ uri ];
+        Hashtbl.remove stored uri);
+  }
+
+let clock = ref 0.0
+let advance seconds = clock := !clock +. seconds
+
+let create_probe ?(log = fun _ -> ()) probe =
+  let engine = Jide_engine.Engine.create () in
+  let server =
+    Jide_controller.Server.create ~log ?engine:(Some engine)
+      ~analysis:(probe_analysis probe engine)
+      ~now:(fun () -> !clock)
+      ()
+  in
+  (server, engine)
+
+let analyse_due server = Jide_controller.Server.analyse_due server
+
+let json_of_params = function
+  | Some (`Assoc fields) -> `Assoc fields
+  | Some (`List items) -> `List items
+  | None -> `Null
+
+let publishes packets =
+  List.filter_map
+    (function
+      | Jsonrpc.Packet.Notification notification
+        when String.equal notification.Jsonrpc.Notification.method_
+               publish_method ->
+          Some (json_of_params notification.params)
+      | _ -> None)
+    packets
+
+let field name = function
+  | `Assoc fields -> List.assoc_opt name fields
+  | _ -> None
+
+let int_field name json =
+  match field name json with Some (`Int value) -> Some value | _ -> None
+
+let string_field name json =
+  match field name json with Some (`String value) -> Some value | _ -> None
+
+let diagnostics_field json =
+  match field "diagnostics" json with
+  | Some (`List items) -> Some items
+  | _ -> None
+
+let check_int name actual expected =
+  if actual <> expected then (
+    incr failures;
+    Printf.printf "FAIL %s (expected %d, got %d)\n%!" name expected actual)
+
+let test_open_waits_for_the_delay () =
+  let probe = probe () in
+  probe.diagnostics <- [ sample_diagnostic "unexpected token" ];
+  let server, _ = create_probe probe in
+  initialize server;
+  let uri = "file:///tmp/late.jazz" in
+  did_open server ~uri ~text:"fn broken( -> { return }";
+  check "open: nothing analysed before the delay" (probe.checks = []);
+  check "open: nothing published before the delay" (analyse_due server = []);
+  advance 0.2;
+  check "open: still inside the delay" (analyse_due server = []);
+  advance 0.1;
+  let packets = analyse_due server in
+  check "open: one analysis" (probe.checks = [ uri ]);
+  check_int "open: one publish" (List.length (publishes packets)) 1;
+  match publishes packets with
+  | [ params ] ->
+      check "open: the file is named" (string_field "uri" params = Some uri);
+      check "open: the document's version" (int_field "version" params = Some 1);
+      check_int "open: the full set is published"
+        (match diagnostics_field params with
+        | Some items -> List.length items
+        | None -> 0)
+        1
+  | _ -> check "open: the publish carries its parameters" false
+
+let close_enough actual expected = Float.abs (actual -. expected) < 0.0001
+
+let test_time_to_next () =
+  let probe = probe () in
+  let server, _ = create_probe probe in
+  let wait_is name expected =
+    match (Jide_controller.Server.time_to_next server, expected) with
+    | None, None -> ()
+    | Some actual, Some expected -> check name (close_enough actual expected)
+    | None, Some _ | Some _, None -> check name false
+  in
+  wait_is "no wait before initialize" None;
+  initialize server;
+  wait_is "no wait while no document is open" None;
+  let uri = "file:///tmp/timed.jazz" in
+  did_open server ~uri ~text:"fn f() {\n}\n";
+  wait_is "an open document asks the loop to wait for the delay" (Some 0.25);
+  advance 0.1;
+  wait_is "the wait shrinks as the clock moves" (Some 0.15);
+  advance 0.2;
+  wait_is "a deadline that has passed asks for no wait" (Some 0.0);
+  ignore (analyse_due server);
+  wait_is "a published document asks for no wait" None;
+  did_change server ~uri ~version:2 ~text:"fn g() {\n}\n";
+  wait_is "a change asks for the wait again" (Some 0.25);
+  shutdown server;
+  wait_is "a server that is shutting down asks for no wait" None
+
+let test_publish_carries_the_full_set () =
+  let probe = probe () in
+  let server, _ = create_probe probe in
+  initialize server;
+  let uri = "file:///tmp/two.jazz" in
+  did_open server ~uri ~text:"fn f() {\n}\n";
+  probe.diagnostics <- [ sample_diagnostic "first"; sample_diagnostic "second" ];
+  advance 0.3;
+  match publishes (analyse_due server) with
+  | [ params ] ->
+      check_int "two diagnostics"
+        (match diagnostics_field params with
+        | Some items -> List.length items
+        | None -> 0)
+        2;
+      check "the message survives"
+        (match diagnostics_field params with
+        | Some (_ :: second :: _) ->
+            field "message" second = Some (`String "second")
+        | _ -> false)
+  | _ -> check "two diagnostics: one publish" false
+
+let test_a_change_restarts_the_wait () =
+  let probe = probe () in
+  let server, _ = create_probe probe in
+  initialize server;
+  let uri = "file:///tmp/restart.jazz" in
+  did_open server ~uri ~text:"fn f() {\n}\n";
+  advance 0.1;
+  did_change server ~uri ~version:2 ~text:"fn g() {\n}\n";
+  advance 0.2;
+  check "a change restarts the wait, so the first deadline does not fire"
+    (analyse_due server = []);
+  advance 0.1;
+  (match publishes (analyse_due server) with
+  | [ params ] ->
+      check "the restarted deadline publishes the new version"
+        (int_field "version" params = Some 2)
+  | _ -> check "the restarted deadline publishes once" false);
+  check_int "one analysis for one settled document" (List.length probe.checks) 1
+
+let test_two_changes_are_one_publish () =
+  let probe = probe () in
+  probe.diagnostics <- [ sample_diagnostic "still broken" ];
+  let server, _ = create_probe probe in
+  initialize server;
+  let uri = "file:///tmp/burst.jazz" in
+  did_open server ~uri ~text:"fn broken( -> { return }";
+  advance 0.3;
+  let first = publishes (analyse_due server) in
+  check_int "the open published once" (List.length first) 1;
+  (* Two keystrokes inside one delay are one analysis, of the last text. *)
+  did_change server ~uri ~version:2 ~text:"fn broken2( -> { return }";
+  advance 0.05;
+  did_change server ~uri ~version:3 ~text:"fn broken3( -> { return }";
+  advance 0.1;
+  check "two changes inside the delay publish nothing yet"
+    (analyse_due server = []);
+  advance 0.2;
+  let second = publishes (analyse_due server) in
+  check_int "two changes publish once" (List.length second) 1;
+  (match second with
+  | [ params ] ->
+      check "the publish is for the last text"
+        (int_field "version" params = Some 3)
+  | _ -> ());
+  check_int "one analysis per settled burst" (List.length probe.checks) 2
+
+let test_close_clears () =
+  let probe = probe () in
+  probe.diagnostics <- [ sample_diagnostic "unexpected token" ];
+  let server, _ = create_probe probe in
+  initialize server;
+  let uri = "file:///tmp/closing.jazz" in
+  did_open server ~uri ~text:"fn broken( -> { return }";
+  advance 0.3;
+  ignore (analyse_due server);
+  let packets =
+    send server
+      (notification ~params:(close_params ~uri) "textDocument/didClose")
+  in
+  (match publishes packets with
+  | [ params ] ->
+      check "close: the file is named" (string_field "uri" params = Some uri);
+      check "close: the set is empty" (diagnostics_field params = Some []);
+      check "close: the version is the last one"
+        (int_field "version" params = Some 1)
+  | _ -> check "close: one publish, and it clears" false);
+  check "close: the analysis is dropped" (probe.forgotten = [ uri ]);
+  advance 1.0;
+  check "close: nothing waits any more" (analyse_due server = [])
+
+let test_a_superseded_result_is_dropped () =
+  let probe = probe () in
+  probe.diagnostics <- [ sample_diagnostic "unexpected token" ];
+  let server, _ = create_probe probe in
+  initialize server;
+  let uri = "file:///tmp/racing.jazz" in
+  did_open server ~uri ~text:"fn broken( -> { return }";
+  probe.version_offset <- -1;
+  advance 0.3;
+  check "a result for an older version is not sent" (analyse_due server = []);
+  check_int "the analysis still ran" (List.length probe.checks) 1;
+  (* The document waits again, and the next deadline publishes the version
+     the analysis now reports. *)
+  probe.version_offset <- 0;
+  advance 0.3;
+  match publishes (analyse_due server) with
+  | [ params ] ->
+      check "the fresh result is sent" (int_field "version" params = Some 1)
+  | _ -> check "the fresh result is published once" false
+
+let test_ensure_checked_forces_a_check () =
+  let probe = probe () in
+  probe.diagnostics <- [ sample_diagnostic "unexpected token" ];
+  let server, _ = create_probe probe in
+  initialize server;
+  let uri = "file:///tmp/requested.jazz" in
+  did_open server ~uri ~text:"fn broken( -> { return }";
+  let packets = Jide_controller.Server.ensure_checked server ~uri in
+  check_int "a request forces one publish" (List.length (publishes packets)) 1;
+  check_int "a request forces one analysis" (List.length probe.checks) 1;
+  check "a second request finds the document fresh"
+    (Jide_controller.Server.ensure_checked server ~uri = []);
+  did_change server ~uri ~version:2 ~text:"fn broken2( -> { return }";
+  (match publishes (Jide_controller.Server.ensure_checked server ~uri) with
+  | [ params ] ->
+      check "a changed document is checked on demand"
+        (int_field "version" params = Some 2)
+  | _ -> check "a changed document is published once" false);
+  check "the forced check ends the wait, so nothing is published twice"
+    (analyse_due server = [])
+
+let test_without_analysis_nothing_is_published () =
+  let server = create () in
+  initialize server;
+  let uri = "file:///tmp/plain.jazz" in
+  did_open server ~uri ~text:"fn f() {\n}\n";
+  advance 1.0;
+  check "no analysis: nothing to publish" (analyse_due server = []);
+  let packets =
+    send server
+      (notification ~params:(close_params ~uri) "textDocument/didClose")
+  in
+  check "no analysis: nothing to clear" (packets = [])
+
+let test_a_failing_analysis_keeps_serving () =
+  let messages = ref [] in
+  let log message = messages := message :: !messages in
+  let probe = probe () in
+  probe.raises <- true;
+  let server, _ = create_probe ~log probe in
+  initialize server;
+  did_open server ~uri:"file:///tmp/failing.jazz" ~text:"fn f() {\n}\n";
+  advance 0.3;
+  check "a failing analysis publishes nothing" (analyse_due server = []);
+  check "a failing analysis is logged"
+    (List.exists (fun message -> contains message "analysis failed") !messages);
+  check_int "the server still answers"
+    (List.length (send server (request 2 "shutdown")))
+    1
+
+let test_delay_is_clamped () =
+  let delay_of server = Jide_controller.Server.delay server in
+  check_int "the default delay is 250 ms" (delay_of (create ())) 250;
+  check_int "a delay below the range is raised"
+    (delay_of (Jide_controller.Server.create ~log:(fun _ -> ()) ~delay:1 ()))
+    50;
+  check_int "a delay above the range is lowered"
+    (delay_of (Jide_controller.Server.create ~log:(fun _ -> ()) ~delay:9000 ()))
+    1000;
+  check_int "a delay inside the range is kept"
+    (delay_of (Jide_controller.Server.create ~log:(fun _ -> ()) ~delay:400 ()))
+    400
+
+let test_settings_set_the_delay () =
+  let section delay =
+    `Assoc [ ("diagnostics", `Assoc [ ("delay", `Int delay) ]) ]
+  in
+  let server = create () in
+  Jide_controller.Server.apply_settings server
+    (`Assoc [ ("jasminIde", section 600) ]);
+  check_int "the settings set the delay"
+    (Jide_controller.Server.delay server)
+    600;
+  Jide_controller.Server.apply_settings server (section 10);
+  check_int "a setting below the range is raised"
+    (Jide_controller.Server.delay server)
+    50;
+  Jide_controller.Server.apply_settings server
+    (`Assoc [ ("capabilities", `Assoc []) ]);
+  check_int "a settings object without a delay changes nothing"
+    (Jide_controller.Server.delay server)
+    50
+
+let test_initialize_options_set_the_delay () =
+  let server = create () in
+  let params =
+    `Assoc
+      [
+        ("capabilities", `Assoc []);
+        ( "initializationOptions",
+          `Assoc [ ("diagnostics", `Assoc [ ("delay", `Int 320) ]) ] );
+      ]
+  in
+  ignore (send server (request ~params 1 "initialize"));
+  check_int "the initialization options set the delay"
+    (Jide_controller.Server.delay server)
+    320
+
+let test_configuration_sets_the_delay () =
+  let server = create () in
+  initialize server;
+  let params =
+    `Assoc
+      [
+        ("settings", `Assoc [ ("diagnostics", `Assoc [ ("delay", `Int 700) ]) ]);
+      ]
+  in
+  ignore (send server (notification ~params "workspace/didChangeConfiguration"));
+  check_int "a change of configuration sets the delay"
+    (Jide_controller.Server.delay server)
+    700
+
+let test_nothing_is_published_after_shutdown () =
+  let probe = probe () in
+  probe.diagnostics <- [ sample_diagnostic "unexpected token" ];
+  let server, _ = create_probe probe in
+  initialize server;
+  did_open server ~uri:"file:///tmp/short.jazz" ~text:"fn broken( -> { return }";
+  shutdown server;
+  advance 1.0;
+  check "after shutdown no check runs" (analyse_due server = []);
+  check "after shutdown nothing was analysed" (probe.checks = [])
 
 let () =
   test_initialize ();
