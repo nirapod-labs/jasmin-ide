@@ -486,25 +486,53 @@ module Make (A : Arch_full.Arch) = struct
                     (Printf.sprintf "the required file `%s' has errors" written)))
       names
 
-  let check ~(file : string) ~(text : string) ~(idirs : (string * string) list)
-      : result =
-    (* The formatter is redirected for the whole check, parse included: the
-       lexer and the parser warn through the same channel as the type
-       checker. [with_capture] restores the formatter on every path. *)
-    let outcome, printed =
+  and keep loop ~(in_recovered_item : bool) (error : Error.t) =
+    (* Only the document's own errors have spans the caller can place. With
+       [place] false every error is the included file's, whatever file it
+       names, and it is counted rather than placed. *)
+    let here = loop.place && Error.belongs_to ~file:loop.file error in
+    if not here then incr loop.include_errors;
+    if here && not in_recovered_item then note loop error
+
+  and note loop (error : Error.t) =
+    if not (suppressed !(loop.suppressions) error.Error.message) then (
+      loop.diagnostics := error :: !(loop.diagnostics);
+      incr loop.kept;
+      if !(loop.kept) >= loop.budget then loop.stopped := true)
+
+  (** [check ~resolve ~file ~text ~idirs] parses and types one document. The
+      parser's formatter is redirected for the whole check, and everything
+      that follows it, the warning parse of the captured text included, is
+      inside a catch-all: an exception the library did not turn into a
+      diagnostic is reported as one, so nothing reaches the engine as a
+      raise. *)
+  let check ~(resolve : lookup) ~(file : string) ~(text : string)
+      ~(idirs : (string * string) list) : result =
+    match
       Warnings.with_capture (fun () ->
           Options.apply ();
           let parsed = Parse.parse ~name:file text in
+          let parse_diagnostics = Parse.diagnostics parsed in
+          let budget = max 0 (max_diagnostics - List.length parse_diagnostics) in
           let typed, _environment =
-            type_items ~dropped:(Parse.dropped parsed)
+            type_items ~resolve ~budget ~dropped:(Parse.dropped parsed)
               ~recovered:(Parse.recovered parsed) ~file
               ~items:(Parse.items parsed) ~idirs
           in
           {
             typed with
-            diagnostics =
-              take max_diagnostics (Parse.diagnostics parsed @ typed.diagnostics);
+            diagnostics = parse_diagnostics @ typed.diagnostics;
           })
-    in
-    { outcome with warnings = Warnings.parse ~file printed }
+    with
+    | outcome, printed -> (
+        match Warnings.parse ~file printed with
+        | warnings -> { outcome with warnings }
+        | exception exn ->
+            {
+              empty with
+              diagnostics =
+                outcome.diagnostics @ [ Error.diagnostic_of_exn exn ];
+            })
+    | exception exn ->
+        { empty with diagnostics = [ Error.diagnostic_of_exn exn ] }
 end

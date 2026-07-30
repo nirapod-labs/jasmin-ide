@@ -8,7 +8,10 @@
     instead of from the beginning of the file.
 
     The error the compiler raised is not lost: the caller keeps it as the
-    first diagnostic, and the driver only decides which items survive.
+    first diagnostic, and the driver only decides which items survive. Every
+    item the driver could not keep is reported too, one diagnostic at the
+    stub's own span, so a hole in the tree is a hole in the diagnostics as
+    well.
 
     Four restarts are tried, in order:
 
@@ -66,6 +69,34 @@ type dropped =
       name : string option;  (** Its name, when the header was readable. *)
       span : Jide_lang.Span.t;
     }
+
+(** The kind as the item's keyword spells it, which is what a diagnostic
+    about the stub says. *)
+let kind_name = function
+  | Function -> "function"
+  | Parameter -> "parameter"
+  | Global -> "global"
+  | Type -> "type"
+  | Namespace -> "namespace"
+  | Exec -> "exec"
+  | Require -> "require"
+  | Item -> "item"
+
+(** The diagnostic one stub produces. The compiler reports the first fault it
+    meets and stops there, so a file with a second broken item would lose it
+    from the tree and from the diagnostics at once: a stub is present in both
+    or it is present in neither. The message names the item, so two holes in
+    one file are two distinguishable markers. *)
+let diagnostic_of_dropped = function
+  | Dropped { kind; name; span } ->
+      let what =
+        match name with
+        | Some name -> Printf.sprintf "the %s `%s'" (kind_name kind) name
+        | None -> Printf.sprintf "an item"
+      in
+      Jide_lang.Diagnostic.make ~code:"parse" ~source:"jasmin"
+        ~severity:Jide_lang.Diagnostic.Error span
+        (what ^ " could not be parsed and is not in the tree")
 
 type counters = {
   mutable recoveries : int;  (** Restarts of any kind. *)
@@ -604,10 +635,22 @@ let recover ~name ~text : t =
       | exception _ -> [])
   in
   let items = pass ~depth:0 text in
+  (* In source order, which is the order an outline shows them in and the
+     order their diagnostics belong in. The restarts meet the bytes in the
+     order they are resolved, which is not always left to right. *)
+  let dropped =
+    List.sort
+      (fun (Dropped a) (Dropped b) ->
+        compare
+          (a.span.Jide_lang.Span.start_byte, a.span.Jide_lang.Span.end_byte)
+          (b.span.Jide_lang.Span.start_byte, b.span.Jide_lang.Span.end_byte))
+      !dropped
+  in
   {
     items;
-    dropped = List.rev !dropped;
+    dropped;
     recovered = List.sort_uniq compare !recovered;
-    diagnostics = List.rev !diagnostics;
+    diagnostics =
+      List.rev !diagnostics @ List.map diagnostic_of_dropped dropped;
     counters;
   }

@@ -26,7 +26,19 @@ let x86_64 = Option.get (Jide_jasmin.Adapter.arch_of_string "x86-64")
 let linux = Option.get (Jide_jasmin.Adapter.call_conv_of_string "linux")
 
 let check_text name text =
-  Jide_jasmin.Adapter.check x86_64 linux ~file:"/tmp/probe.jazz" ~text ~idirs:[]
+  Jide_jasmin.Adapter.check x86_64 linux ~file:"probe.jazz" ~text ~idirs:[]
+
+let check_with ~resolve text =
+  Jide_jasmin.Adapter.check ~resolve x86_64 linux ~file:"probe.jazz" ~text
+    ~idirs:[]
+
+let mentions (result : Jide_jasmin.Adapter.check_result) needle =
+  List.exists
+    (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+      contains
+        (String.lowercase_ascii diagnostic.message)
+        (String.lowercase_ascii needle))
+    result.diagnostics
 
 module X86 =
   (val Jasmin.CoreArchFactory.get_arch_module Jasmin.Utils.X86_64
@@ -135,16 +147,24 @@ let test_valid () =
 
 let test_syntax_error () =
   let result = check_text "syntax error" with_syntax_error in
-  check "syntax error: one diagnostic" (List.length result.diagnostics = 1);
+  (* The compiler's own error, then the stub of the item recovery could not
+     keep: the file's only function is broken, so the tree is empty and the
+     marker for it has to come from the stub. *)
+  check "syntax error: the compiler's error and one stub"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 2);
   match result.diagnostics with
-  | [ diagnostic ] ->
+  | diagnostic :: rest ->
       check "syntax error: code"
         (diagnostic.Jide_lang.Diagnostic.code = Some "parse");
       check "syntax error: non-empty message"
         (String.length diagnostic.message > 0);
       check "syntax error: span inside the text"
         (diagnostic.span.Jide_lang.Span.end_byte
-        <= String.length with_syntax_error)
+        <= String.length with_syntax_error);
+      check "syntax error: the second diagnostic is the stub"
+        (match rest with
+        | [ stub ] -> contains stub.Jide_lang.Diagnostic.message "could not be parsed"
+        | _ -> false)
   | _ -> check "syntax error: shape" false
 
 let test_type_error () =
@@ -160,12 +180,12 @@ let test_type_error () =
   | [] -> check "type error: shape" false
 
 let test_continue_after_failed_item () =
-  let file = "/tmp/probe.jazz" in
+  let file = "probe.jazz" in
   let parsed = Jide_jasmin.Parse.parse ~name:file first_item_fails in
   check "continue: the fixture parses" (not (Jide_jasmin.Parse.failed parsed));
   let result, environment =
-    Loop.type_items ~dropped:[] ~recovered:[] ~file ~items:parsed.items
-      ~idirs:[]
+    Loop.type_items ~resolve:(fun _ -> None) ~budget:200 ~dropped:[]
+      ~recovered:[] ~file ~items:parsed.items ~idirs:[]
   in
   check "continue: only the failed item produces a diagnostic"
     (List.length result.Jide_jasmin.Check.diagnostics = 1);
@@ -303,7 +323,7 @@ let test_parse_warning () =
     (List.exists
        (fun (warning : Jide_jasmin.Warnings.t) ->
          contains (String.lowercase_ascii warning.message) "deprecated"
-         && warning.Jide_jasmin.Warnings.file = "/tmp/probe.jazz")
+         && warning.Jide_jasmin.Warnings.file = "probe.jazz")
        result.warnings)
 
 let test_required_file () =
@@ -319,15 +339,35 @@ let test_required_file () =
   check "required file: no warning is put on the document"
     (List.for_all
        (fun (warning : Jide_jasmin.Warnings.t) ->
-         warning.Jide_jasmin.Warnings.file <> "/tmp/probe.jazz")
+         warning.Jide_jasmin.Warnings.file <> "probe.jazz")
        result.warnings);
   remove_file library
 
+(* A required file with an error of its own is not placed on the document,
+   whose bytes its offsets do not describe. The require item says the file has
+   one instead, and a call to a name the broken file declares is that same
+   failure seen again and is not reported a second time. *)
 let test_required_file_error () =
   let library = write_temp_file ~suffix:".jinc" library_with_type_error in
-  let result = check_text "required error" (requiring library) in
-  check "required error: the diagnostic is not put on the document"
-    (result.Jide_jasmin.Adapter.diagnostics = []);
+  let body =
+    Printf.sprintf
+      "require %S\n\nfn entry(reg u32 a) -> reg u32 {\n  reg u32 x;\n  x = \
+       library(a);\n  return x;\n}\n"
+      library
+  in
+  let result = check_text "required error" body in
+  check "required error: one diagnostic, the require item's"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 1);
+  check "required error: it says the required file has errors"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         contains diagnostic.message "has errors"
+         && contains diagnostic.message library)
+       result.diagnostics);
+  check "required error: the include's own message is not placed"
+    (not (mentions result "implicitly cast"));
+  check "required error: the call to it is not reported as unknown"
+    (not (mentions result "unknown function"));
   let direct =
     Jide_jasmin.Adapter.check x86_64 linux ~file:library
       ~text:library_with_type_error ~idirs:[]
@@ -335,6 +375,78 @@ let test_required_file_error () =
   check "required error: the error itself is real"
     (List.length direct.diagnostics = 1);
   remove_file library
+
+(* The lookup the caller passes in is what a require is read through, so a
+   file the editor has open is used as it is and the disk is not consulted. *)
+let test_required_file_from_a_lookup () =
+  let asked = ref [] in
+  let resolve path =
+    asked := path :: !asked;
+    if Filename.basename path = "open-buffer-only.jinc" then
+      Some "fn library(reg u32 a) -> reg u32 {\n  return a;\n}\n"
+    else None
+  in
+  let body =
+    "require \"open-buffer-only.jinc\"\n\n\
+     fn entry(reg u32 a) -> reg u32 {\n  reg u32 x;\n  x = library(a);\n  \
+     return x;\n}\n"
+  in
+  let result = check_with ~resolve body in
+  check "lookup: the document has no diagnostics"
+    (result.Jide_jasmin.Adapter.diagnostics = []);
+  check "lookup: the path asked for is the required one"
+    (List.exists
+       (fun path -> Filename.basename path = "open-buffer-only.jinc")
+       !asked);
+  let absent = check_text "absent" body in
+  check "lookup: without the buffer the file is not found"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         contains diagnostic.message "cannot read")
+       absent.diagnostics)
+
+(* A file that a require cannot read is a diagnostic of the require item, not
+   an exception from inside the compiler. *)
+let test_required_file_missing () =
+  let result =
+    check_text "missing" (requiring "/nonexistent-directory/no-such.jinc")
+  in
+  check "missing: one diagnostic for the require item"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 1);
+  check "missing: it names the file"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         contains diagnostic.message "cannot read"
+         && contains diagnostic.message "no-such.jinc")
+       result.diagnostics)
+
+(* Two files that require each other are a diagnostic too, not a recursion
+   that ends in a stack overflow. *)
+let test_required_file_cycle () =
+  let resolve path =
+    match Filename.basename path with
+    | "cycle-a.jinc" ->
+        Some
+          "require \"cycle-b.jinc\"\n\nfn a_name(reg u32 x) -> reg u32 {\n  \
+           return x;\n}\n"
+    | "cycle-b.jinc" ->
+        Some
+          "require \"cycle-a.jinc\"\n\nfn b_name(reg u32 x) -> reg u32 {\n  \
+           return x;\n}\n"
+    | _ -> None
+  in
+  let result =
+    check_with ~resolve
+      "require \"cycle-a.jinc\"\n\nfn entry(reg u32 a) -> reg u32 {\n  \
+       return a;\n}\n"
+  in
+  check "cycle: one diagnostic"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 1);
+  check "cycle: it says the file requires itself"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         contains diagnostic.message "requires itself")
+       result.diagnostics)
 
 let test_arch_names () =
   check "arch names"
