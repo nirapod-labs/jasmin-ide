@@ -424,6 +424,146 @@ module Make (A : Arch_full.Arch) = struct
           | _ -> type_ordinary loop ~in_recovered_item snapshot item))
       items
 
+  (** One item typed with the environment kept and restored around it. *)
+  and type_ordinary loop ~(in_recovered_item : bool) snapshot item =
+    match type_item snapshot item with
+    | Ok next ->
+        (* What this item typed left behind, read from the front of the typed
+           list. Only the document's loop collects facts: an included file's
+           ranges index that file, not the document. *)
+        if loop.place then (
+          let decls =
+            added
+              ~before:(Pretyping.Env.decls snapshot)
+              ~after:(Pretyping.Env.decls next)
+          in
+          match Collect.of_item ~file:loop.file ~env:next ~item ~decls with
+          | collected -> loop.facts := Facts.merge !(loop.facts) collected
+          | exception exn ->
+              (* A fact the adapter cannot read is a failure of this server,
+                 never of the user's file: it is reported as such instead of
+                 ending the check. *)
+              let error = Error.of_exn exn in
+              if Error.belongs_to ~file:loop.file error then
+                keep loop ~in_recovered_item error);
+        loop.environment := next
+    | Error exn ->
+        keep loop ~in_recovered_item (Error.of_exn exn);
+        (* The names the item declares are now absent from the environment; a
+           later reference to one of them would be reported as unresolved,
+           and it is this failure seen again, not a second one. A namespace
+           takes every name under it with it. *)
+        List.iter
+          (fun declaration ->
+            loop.suppressions := Name declaration :: !(loop.suppressions))
+          (declarations_of_item item);
+        loop.environment := snapshot
+
+  (** A [require] inside a namespace cannot go through {!type_require}: the
+      library types a namespace's items itself ([Pretyping.tt_item]) and its
+      own include reads the file from disk, not from the caller's lookup.
+      [Pretyping.Env.enter_namespace] is not exported, so the namespace
+      cannot be entered and left here; instead each required file is read
+      through the same lookup a top-level require uses and its items are
+      spliced where the [require] item stood, which is what the library does
+      with them once it has read them. A file that cannot be read is
+      reported on the [require] item, and every name under that namespace is
+      treated as one the include would have declared: a later reference to
+      one of them is this failure seen again, not a second error. *)
+  and expand_namespace loop ~(chain : string list) ~(file : string)
+      ~(prefix : string) (items : Syntax.pitem Location.located list) :
+      Syntax.pitem Location.located list =
+    List.concat_map
+      (fun (item : Syntax.pitem Location.located) ->
+        match Location.unloc item with
+        | Syntax.Prequire (from, names) ->
+            let from = Option.map Location.unloc from in
+            List.concat_map
+              (fun (name : string Location.located) ->
+                expand_required loop ~chain ~file ~prefix ~from
+                  ~at:(span_of_item item) (Location.unloc name))
+              names
+        | Syntax.PNamespace (name, inner) ->
+            let rewritten =
+              expand_namespace loop ~chain ~file
+                ~prefix:(qualified prefix (Location.unloc name))
+                inner
+            in
+            [
+              Location.mk_loc (Location.loc item)
+                (Syntax.PNamespace (name, rewritten));
+            ]
+        | _ -> [ item ])
+      items
+
+  (** One required file of a namespace, read through the lookup and expanded
+      into the items that take the place of the [require] item. *)
+  and expand_required loop ~(chain : string list) ~(file : string)
+      ~(prefix : string) ~(from : string option) ~(at : Jide_lang.Span.t)
+      (written : string) : Syntax.pitem Location.located list =
+    let path =
+      normalise_path
+        (include_path ~idirs:loop.idirs ~base:(Filename.dirname file) ~from
+           written)
+    in
+    (* The require item is the document's when the document is what is being
+       typed, and the document's require that reached this file otherwise. *)
+    let report message =
+      let span = if loop.place then at else !(loop.origin) in
+      note loop
+        (Error.make ~file:(Some loop.document) ~kind:Error.Typing ~span message)
+    in
+    let forget_names () =
+      if not (String.equal prefix "") then
+        loop.suppressions := Namespace prefix :: !(loop.suppressions)
+    in
+    if List.mem path chain then (
+      report (Printf.sprintf "the required file `%s' requires itself" written);
+      forget_names ();
+      [])
+    else if List.length chain > max_include_depth then (
+      report
+        (Printf.sprintf "the required file `%s' is nested too deeply" written);
+      forget_names ();
+      [])
+    else
+      match loop.resolve path with
+      | None ->
+          report (Printf.sprintf "cannot read the required file `%s'" written);
+          forget_names ();
+          []
+      | Some text ->
+          let parsed = Parse.parse ~name:path text in
+          if Parse.failed parsed then (
+            (* The items below are spliced, so the names the file does
+               declare are typed with the namespace's own items. The names
+               recovery dropped are not, and a reference to one is this
+               failure seen again. *)
+            List.iter
+              (fun (item : Syntax.pitem Location.located) ->
+                List.iter
+                  (fun declaration ->
+                    loop.suppressions :=
+                      Name (qualify_declaration prefix declaration)
+                      :: !(loop.suppressions))
+                  (declarations_of_item item))
+              (Parse.items parsed);
+            List.iter
+              (fun dropped ->
+                match suppression_of_dropped dropped with
+                | Some (Name declaration) ->
+                    loop.suppressions :=
+                      Name (qualify_declaration prefix declaration)
+                      :: !(loop.suppressions)
+                | Some (Namespace name) ->
+                    loop.suppressions :=
+                      Namespace (qualified prefix name) :: !(loop.suppressions)
+                | None -> ())
+              (Parse.dropped parsed);
+            report (Printf.sprintf "the required file `%s' has errors" written));
+          expand_namespace loop ~chain:(path :: chain) ~file:path ~prefix
+            (Parse.items parsed)
+
   (** [type_require loop ~chain names] types the files one [require] item
       names, in the environment the item stream has reached, by the same
       rules as this file. *)
