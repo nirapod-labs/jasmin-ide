@@ -587,10 +587,12 @@ module Make (A : Arch_full.Arch) = struct
                  ~span:!(loop.origin) message)
           in
           if List.mem path chain then
-            report (Printf.sprintf "the required file `%s' requires itself" written)
+            report
+              (Printf.sprintf "the required file `%s' requires itself" written)
           else if List.length chain > max_include_depth then
             report
-              (Printf.sprintf "the required file `%s' is nested too deeply" written)
+              (Printf.sprintf "the required file `%s' is nested too deeply"
+                 written)
           else
             match loop.resolve path with
             | None ->
@@ -657,7 +659,9 @@ module Make (A : Arch_full.Arch) = struct
           Options.apply ();
           let parsed = Parse.parse ~name:file text in
           let parse_diagnostics = Parse.diagnostics parsed in
-          let budget = max 0 (max_diagnostics - List.length parse_diagnostics) in
+          let budget =
+            max 0 (max_diagnostics - List.length parse_diagnostics)
+          in
           let typed, _environment =
             type_items ~resolve ~budget ~dropped:(Parse.dropped parsed)
               ~recovered:(Parse.recovered parsed) ~file

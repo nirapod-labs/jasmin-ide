@@ -199,10 +199,13 @@ let lex_once ~name text =
   let lexbuf = Lexing.from_string text in
   Lexing.set_filename lexbuf name;
   let rec loop count acc =
-    if count > max_tokens then raise Too_large;
     match Lexer.main lexbuf with
     | Parser.EOF -> (List.rev acc, None)
     | token ->
+        (* [max_tokens] tokens are admitted; the next one is refused. The
+           check is here, after the lexer answered, so a buffer of exactly
+           the bound is not refused by the token it does not have. *)
+        if count >= max_tokens then raise Too_large;
         let start_pos = Lexing.lexeme_start_p lexbuf in
         let end_pos = Lexing.lexeme_end_p lexbuf in
         loop (count + 1)
@@ -298,30 +301,40 @@ let open_depth t =
       | _ -> depth)
     0 t.tokens
 
-(** The one diagnostic a buffer over [max_bytes] or over [max_tokens] gets.
+(** Why a buffer was refused: it has more bytes than one scan will read, or
+    it holds more tokens than one scan will build. The two are reported
+    apart, because the buffer that fills the byte ceiling exactly is refused
+    for its token count and must not be told its size is the fault. *)
+type refusal = Too_many_bytes | Too_many_tokens
+
+(** The one diagnostic a buffer over {!max_bytes} or over {!max_tokens} gets.
     Its code is its own, because a refusal by policy is not a syntax error
     and no consumer should offer a syntax fix for it, and its span is empty:
     there is no byte of a file that was never read that a range could point
     at. *)
-let too_large () =
+let too_large (refusal : refusal) =
+  let reason =
+    match refusal with
+    | Too_many_bytes ->
+        Printf.sprintf "the file is larger than %d bytes" max_bytes
+    | Too_many_tokens ->
+        Printf.sprintf "the file holds more than %d tokens" max_tokens
+  in
   Jide_lang.Diagnostic.make ~code:"size" ~source:"jasmin"
     ~severity:Jide_lang.Diagnostic.Error
     (Jide_lang.Span.make ~start_byte:0 ~end_byte:0)
-    (Printf.sprintf
-       "the file is larger than %d bytes or holds more than %d tokens, which \
-        is too large to analyse"
-       max_bytes max_tokens)
+    (reason ^ ", which is too large to analyse")
 
 (** [make ~name text] is the scan of [text], or the diagnostic that says the
     buffer is too large to look at. The byte order mark is blanked first, and
     the blanking is reported like every other one. *)
 let make ~name text : (t, Jide_lang.Diagnostic.t) result =
-  if String.length text > max_bytes then Error (too_large ())
+  if String.length text > max_bytes then Error (too_large Too_many_bytes)
   else
     let bom = bom_length text in
     let text = blank_bom text in
     match lex_all ~name text with
-    | exception Too_large -> Error (too_large ())
+    | exception Too_large -> Error (too_large Too_many_tokens)
     | tokens, text, blanked ->
         let blanked =
           if bom = 0 then blanked

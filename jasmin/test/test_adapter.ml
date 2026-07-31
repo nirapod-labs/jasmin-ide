@@ -163,7 +163,8 @@ let test_syntax_error () =
         <= String.length with_syntax_error);
       check "syntax error: the second diagnostic is the stub"
         (match rest with
-        | [ stub ] -> contains stub.Jide_lang.Diagnostic.message "could not be parsed"
+        | [ stub ] ->
+            contains stub.Jide_lang.Diagnostic.message "could not be parsed"
         | _ -> false)
   | _ -> check "syntax error: shape" false
 
@@ -184,8 +185,9 @@ let test_continue_after_failed_item () =
   let parsed = Jide_jasmin.Parse.parse ~name:file first_item_fails in
   check "continue: the fixture parses" (not (Jide_jasmin.Parse.failed parsed));
   let result, environment =
-    Loop.type_items ~resolve:(fun _ -> None) ~budget:200 ~dropped:[]
-      ~recovered:[] ~file ~items:parsed.items ~idirs:[]
+    Loop.type_items
+      ~resolve:(fun _ -> None)
+      ~budget:200 ~dropped:[] ~recovered:[] ~file ~items:parsed.items ~idirs:[]
   in
   check "continue: only the failed item produces a diagnostic"
     (List.length result.Jide_jasmin.Check.diagnostics = 1);
@@ -351,8 +353,12 @@ let test_required_file_error () =
   let library = write_temp_file ~suffix:".jinc" library_with_type_error in
   let body =
     Printf.sprintf
-      "require %S\n\nfn entry(reg u32 a) -> reg u32 {\n  reg u32 x;\n  x = \
-       library(a);\n  return x;\n}\n"
+      "require %S\n\n\
+       fn entry(reg u32 a) -> reg u32 {\n\
+      \  reg u32 x;\n\
+      \  x = library(a);\n\
+      \  return x;\n\
+       }\n"
       library
   in
   let result = check_text "required error" body in
@@ -388,8 +394,11 @@ let test_required_file_from_a_lookup () =
   in
   let body =
     "require \"open-buffer-only.jinc\"\n\n\
-     fn entry(reg u32 a) -> reg u32 {\n  reg u32 x;\n  x = library(a);\n  \
-     return x;\n}\n"
+     fn entry(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = library(a);\n\
+    \  return x;\n\
+     }\n"
   in
   let result = check_with ~resolve body in
   check "lookup: the document has no diagnostics"
@@ -427,18 +436,24 @@ let test_required_file_cycle () =
     match Filename.basename path with
     | "cycle-a.jinc" ->
         Some
-          "require \"cycle-b.jinc\"\n\nfn a_name(reg u32 x) -> reg u32 {\n  \
-           return x;\n}\n"
+          "require \"cycle-b.jinc\"\n\n\
+           fn a_name(reg u32 x) -> reg u32 {\n\
+          \  return x;\n\
+           }\n"
     | "cycle-b.jinc" ->
         Some
-          "require \"cycle-a.jinc\"\n\nfn b_name(reg u32 x) -> reg u32 {\n  \
-           return x;\n}\n"
+          "require \"cycle-a.jinc\"\n\n\
+           fn b_name(reg u32 x) -> reg u32 {\n\
+          \  return x;\n\
+           }\n"
     | _ -> None
   in
   let result =
     check_with ~resolve
-      "require \"cycle-a.jinc\"\n\nfn entry(reg u32 a) -> reg u32 {\n  \
-       return a;\n}\n"
+      "require \"cycle-a.jinc\"\n\n\
+       fn entry(reg u32 a) -> reg u32 {\n\
+      \  return a;\n\
+       }\n"
   in
   check "cycle: one diagnostic"
     (List.length result.Jide_jasmin.Adapter.diagnostics = 1);
@@ -447,6 +462,155 @@ let test_required_file_cycle () =
        (fun (diagnostic : Jide_lang.Diagnostic.t) ->
          contains diagnostic.message "requires itself")
        result.diagnostics)
+
+(* Two files that require each other, spelled with [./] on every name. The
+   path is normalised before it is compared with the chain, so the same two
+   files are the same two files however the require spelled them: one
+   diagnostic that says the file requires itself, not a pile of markers
+   whose first one blames the nesting bound. *)
+let test_dot_prefixed_cycle () =
+  let asked = ref [] in
+  let resolve path =
+    asked := path :: !asked;
+    match Filename.basename path with
+    | "dot-a.jinc" ->
+        Some
+          "require \"./dot-b.jinc\"\n\n\
+           fn a_name(reg u32 x) -> reg u32 {\n\
+          \  return x;\n\
+           }\n"
+    | "dot-b.jinc" ->
+        Some
+          "require \"./dot-a.jinc\"\n\n\
+           fn b_name(reg u32 x) -> reg u32 {\n\
+          \  return x;\n\
+           }\n"
+    | _ -> None
+  in
+  let result =
+    check_with ~resolve
+      "require \"./dot-a.jinc\"\n\n\
+       fn entry(reg u32 a) -> reg u32 {\n\
+      \  return a;\n\
+       }\n"
+  in
+  check "dot cycle: one diagnostic"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 1);
+  check "dot cycle: it says the file requires itself"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         contains diagnostic.message "requires itself")
+       result.diagnostics);
+  check "dot cycle: it does not blame the nesting bound"
+    (not (mentions result "nested too deeply"));
+  check "dot cycle: the path asked for has no [.] left in it"
+    (List.for_all
+       (fun path -> (not (contains path "/./")) && not (contains path "/../"))
+       !asked);
+  check "dot cycle: both files were asked for, once each"
+    (List.sort String.compare (List.map Filename.basename !asked)
+    = [ "dot-a.jinc"; "dot-b.jinc" ])
+
+(* A require inside a namespace goes through the same lookup a top-level one
+   uses. The library's own include path reads the disk and cannot be reached
+   from here, so the adapter reads the file through the lookup and types its
+   items inside the namespace: the file is open in the editor, and the
+   namespaced name it declares resolves. *)
+let test_require_inside_namespace () =
+  let asked = ref [] in
+  let resolve path =
+    asked := path :: !asked;
+    if Filename.basename path = "namespaced-only.jinc" then
+      Some "fn library(reg u32 a) -> reg u32 {\n  return a;\n}\n"
+    else None
+  in
+  let body =
+    "namespace N {\n\
+    \  require \"namespaced-only.jinc\"\n\n\
+    \  fn g(reg u32 a) -> reg u32 {\n\
+    \    return a;\n\
+    \  }\n\
+     }\n\n\
+     fn use(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = N::library(a);\n\
+    \  return x;\n\
+     }\n"
+  in
+  let result = check_with ~resolve body in
+  check "namespace require: no diagnostics"
+    (result.Jide_jasmin.Adapter.diagnostics = []);
+  check "namespace require: the lookup was asked for the file"
+    (List.exists
+       (fun path -> Filename.basename path = "namespaced-only.jinc")
+       !asked);
+  check "namespace require: the path asked for is normalised"
+    (List.for_all
+       (fun path -> (not (contains path "/./")) && not (contains path "/../"))
+       !asked)
+
+(* The same require when the lookup and the disk both have nothing: the
+   require item says the file cannot be read, once, and the names the file
+   would have declared are treated as absent rather than reported as a
+   fabricated unknown function. No raw compiler rendering is placed on the
+   document. *)
+let test_require_inside_namespace_missing () =
+  let body =
+    "namespace N {\n\
+    \  require \"namespaced-missing.jinc\"\n\n\
+    \  fn g(reg u32 a) -> reg u32 {\n\
+    \    return a;\n\
+    \  }\n\
+     }\n\n\
+     fn use(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = N::library(a);\n\
+    \  return x;\n\
+     }\n"
+  in
+  let result = check_text "namespace missing" body in
+  check "namespace missing: one diagnostic"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 1);
+  check "namespace missing: it is the adapter's cannot-read"
+    (mentions result "cannot read");
+  check "namespace missing: it names the file"
+    (mentions result "namespaced-missing.jinc");
+  check "namespace missing: no raw compiler error is placed"
+    (not (mentions result "error reading file"));
+  check "namespace missing: no fabricated unknown function"
+    (not (mentions result "unknown function"))
+
+(* A namespaced include that does not parse: the require item says the file
+   has errors and the names it would have declared are absent, so the call
+   to one of them is that failure seen again. *)
+let test_require_inside_namespace_has_errors () =
+  let resolve path =
+    if Filename.basename path = "namespaced-broken.jinc" then
+      Some "fn library(reg u32 a -> reg u32 {\n  return a;\n}\n"
+    else None
+  in
+  let body =
+    "namespace N {\n\
+    \  require \"namespaced-broken.jinc\"\n\n\
+    \  fn g(reg u32 a) -> reg u32 {\n\
+    \    return a;\n\
+    \  }\n\
+     }\n\n\
+     fn use(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = N::library(a);\n\
+    \  return x;\n\
+     }\n"
+  in
+  let result = check_with ~resolve body in
+  check "namespace errors: one diagnostic"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 1);
+  check "namespace errors: it says the required file has errors"
+    (mentions result "has errors");
+  check "namespace errors: it names the file"
+    (mentions result "namespaced-broken.jinc");
+  check "namespace errors: no fabricated unknown function"
+    (not (mentions result "unknown function"))
 
 let test_arch_names () =
   check "arch names"

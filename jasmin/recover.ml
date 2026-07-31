@@ -151,6 +151,11 @@ type state = {
   mutable closed_item : int;
       (** The token index the last completed item ends at, which is where
           the item that is now broken begins. *)
+  mutable stubbed_upto : int;
+      (** The token index the last stub ended at. A restart that covers the
+          bytes between [closed_item] and this index would be reporting a
+          hole that is already stubbed, so only the bytes after it are a new
+          hole. *)
   mutable input : (int * Syntax.pprogram I.env) option;
       (** The last state that asked for a token and the index it asked for.
           A failure at that index is a failure to shift that token, and the
@@ -246,6 +251,7 @@ let new_state counters scan =
     statements = ref [];
     tried = ref [];
     closed_item = 0;
+    stubbed_upto = 0;
     input = None;
     offered = false;
     counters;
@@ -261,6 +267,7 @@ let fork state =
     statements = ref !(state.statements);
     tried = ref !(state.tried);
     closed_item = state.closed_item;
+    stubbed_upto = state.stubbed_upto;
     input = state.input;
     offered = state.offered;
     counters = no_counters ();
@@ -270,7 +277,8 @@ let commit state attempt =
   state.boundaries := !(attempt.boundaries);
   state.statements := !(attempt.statements);
   state.tried := !(attempt.tried);
-  state.closed_item <- attempt.closed_item
+  state.closed_item <- attempt.closed_item;
+  state.stubbed_upto <- attempt.stubbed_upto
 
 (** Where the parser can be handed a token. *)
 let rec wait_for_input checkpoint =
@@ -483,16 +491,28 @@ let recover ~name ~text : t =
     | Some target -> target
     | None -> Scan.count state.scan
   in
-  (* One stub and one recovered region for the bytes of a dropped item. A
-     later stub that covers an earlier one replaces it, so a region is never
-     reported twice. *)
+  (* One stub and one recovered region for the bytes of one hole. Two holes
+     are two stubs even when one of them is first seen as part of a wider
+     restart, which is why the restart that follows one starts at the end of
+     the stub already reported ([stubbed_upto]) rather than at the last
+     completed item. A restart that has nothing new to report (its span is
+     already inside a stub) adds nothing, and one that sees the same hole
+     again from further out replaces it. *)
   let note_dropped state ~from ~upto =
     let span =
       Scan.span state.scan
         ~start_byte:(Scan.start_byte state.scan from)
         ~end_byte:(Scan.start_byte state.scan upto)
     in
-    if span.Jide_lang.Span.start_byte < span.Jide_lang.Span.end_byte then (
+    let reported =
+      List.exists
+        (function Dropped { span = earlier; _ } -> contains span earlier)
+        !dropped
+    in
+    if
+      span.Jide_lang.Span.start_byte < span.Jide_lang.Span.end_byte
+      && not reported
+    then (
       let stub = dropped_of state.scan ~from ~upto in
       dropped :=
         stub
@@ -500,6 +520,7 @@ let recover ~name ~text : t =
              (function
                | Dropped { span = earlier; _ } -> not (contains span earlier))
              !dropped;
+      state.stubbed_upto <- max state.stubbed_upto upto;
       recovered :=
         span :: List.filter (fun older -> not (contains span older)) !recovered)
   in
@@ -566,7 +587,13 @@ let recover ~name ~text : t =
               else (
                 counters.recoveries <- counters.recoveries + 1;
                 counters.byte_restarts <- counters.byte_restarts + 1;
-                note_dropped state ~from:state.closed_item ~upto:target;
+                (* The bytes before [stubbed_upto] are a hole already
+                   reported; only the region after it is a new one. The
+                   blanking still starts at [closed_item], because every
+                   broken byte has to leave the buffer. *)
+                note_dropped state
+                  ~from:(max state.closed_item state.stubbed_upto)
+                  ~upto:target;
                 pass ~depth:(depth + 1)
                   (Scan.blank (Scan.text state.scan) ~from ~upto)))
   (* A block that was never closed is closed without a byte being rewritten.
@@ -629,7 +656,9 @@ let recover ~name ~text : t =
     if String.equal text (Scan.text scan) then []
     else (
       if cut < String.length base then
-        note_dropped state ~from:cut_index ~upto:(Scan.count scan);
+        note_dropped state
+          ~from:(max cut_index state.stubbed_upto)
+          ~upto:(Scan.count scan);
       match Parseio.parse_program ~name (Utils.IO.input_string text) with
       | items -> items
       | exception _ -> [])
@@ -650,7 +679,6 @@ let recover ~name ~text : t =
     items;
     dropped;
     recovered = List.sort_uniq compare !recovered;
-    diagnostics =
-      List.rev !diagnostics @ List.map diagnostic_of_dropped dropped;
+    diagnostics = List.rev !diagnostics @ List.map diagnostic_of_dropped dropped;
     counters;
   }
