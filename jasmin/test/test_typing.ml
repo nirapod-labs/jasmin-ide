@@ -20,7 +20,7 @@ let contains haystack needle =
   in
   loop 0
 
-let file = "/tmp/probe.jazz"
+let file = "probe.jazz"
 let x86_64 = Option.get (Jide_jasmin.Adapter.arch_of_string "x86-64")
 let linux = Option.get (Jide_jasmin.Adapter.call_conv_of_string "linux")
 
@@ -116,8 +116,10 @@ let test_typing_over_recovered () =
   let result = check_text broken_first_typed_second in
   check "recovered: the parse error is kept"
     (List.mem (Some "parse") (codes result));
-  check "recovered: one parse diagnostic and one typing diagnostic"
-    (List.length result.diagnostics = 2);
+  (* The compiler's error, the stub of the item it could not keep, and the
+     type error of the item that survived. *)
+  check "recovered: the compiler's error, the stub, and the typing error"
+    (List.length result.diagnostics = 3);
   check "recovered: the second one is a typing diagnostic"
     (List.exists
        (fun (diagnostic : Jide_lang.Diagnostic.t) ->
@@ -144,8 +146,10 @@ let test_failed_item_does_not_cascade () =
    unknown function if the stub's name were not known to the loop. *)
 let test_dropped_item_does_not_cascade () =
   let result = check_text dropped_then_called in
-  check "dropped: the compiler's parse error is the only one"
-    (List.length result.diagnostics = 1);
+  (* The compiler's error and the stub of the item it dropped: two parse
+     diagnostics, and nothing invented about the call to it. *)
+  check "dropped: the compiler's error and the stub, and nothing else"
+    (List.length result.diagnostics = 2);
   check "dropped: no unknown function is reported"
     (not (mentions result "unknown function"));
   check "dropped: the diagnostic is the parse one"
@@ -193,15 +197,15 @@ let test_recovered_region_suppresses () =
   let parsed = Jide_jasmin.Parse.parse ~name:file with_type_error in
   check "region: the fixture parses" (not (Jide_jasmin.Parse.failed parsed));
   let plain, _ =
-    Loop.type_items ~dropped:[] ~recovered:[] ~file ~items:parsed.items
-      ~idirs:[]
+    Loop.type_items ~resolve:(fun _ -> None) ~budget:200 ~dropped:[]
+      ~recovered:[] ~file ~items:parsed.items ~idirs:[]
   in
   check "region: the error is reported without a recovered region"
     (List.length plain.Jide_jasmin.Check.diagnostics = 1);
   match plain.diagnostics with
   | [ diagnostic ] ->
       let suppressed, _ =
-        Loop.type_items ~dropped:[]
+        Loop.type_items ~resolve:(fun _ -> None) ~budget:200 ~dropped:[]
           ~recovered:[ diagnostic.Jide_lang.Diagnostic.span ]
           ~file ~items:parsed.items ~idirs:[]
       in
@@ -243,9 +247,9 @@ let test_namespace_does_not_cascade () =
   check "namespace: the healthy item is not reported as unknown"
     (not (mentions result "unknown function"));
   let dropped = check_text namespace_dropped_by_recovery in
-  check "namespace dropped: the compiler's error is the only one"
-    (List.length dropped.diagnostics = 1
-    && List.mem (Some "parse") (codes dropped));
+  check "namespace dropped: the compiler's error and the stub, and nothing else"
+    (List.length dropped.diagnostics = 2
+    && List.for_all (fun code -> code = Some "parse") (codes dropped));
   check "namespace dropped: no unknown function for a name inside it"
     (not (mentions dropped "unknown function"))
 
@@ -326,6 +330,91 @@ let test_diagnostic_bound () =
        (fun (diagnostic : Jide_lang.Diagnostic.t) ->
          diagnostic.code = Some "typing")
        result.diagnostics)
+
+(* The bound is one number for the whole check. The loop's budget is what is
+   left after the parse diagnostics, so a parse error and a stub are not
+   silently traded against typing errors by a second truncation at the end. *)
+let test_diagnostic_bound_with_parse_errors () =
+  let buffer = Buffer.create 65536 in
+  Buffer.add_string buffer
+    "fn broken(reg u32 a -> reg u32 {\n  return a;\n}\n\n";
+  for index = 0 to 299 do
+    Buffer.add_string buffer
+      (Printf.sprintf
+         "fn f%d(reg u32 a) -> reg u32 {\n\
+         \  reg bool b;\n\
+         \  b = a;\n\
+         \  return a;\n\
+          }\n\n"
+         index)
+  done;
+  let result = check_text (Buffer.contents buffer) in
+  let count code =
+    List.length (List.filter (fun got -> got = Some code) (codes result))
+  in
+  check "bound with holes: two hundred diagnostics in all"
+    (List.length result.diagnostics = 200);
+  check "bound with holes: the compiler's error and the stub are kept"
+    (count "parse" = 2);
+  check "bound with holes: the typing budget is what is left" (count "typing" = 198)
+
+(* An exec clause is typed by the same call: a name that is not declared is a
+   typing diagnostic, and one that is declared is silent. *)
+let test_exec_clause () =
+  let missing =
+    check_text
+      "exec no_such_fn (0 : 16)\n\nfn f(reg u32 a) -> reg u32 {\n  return a;\n}\n"
+  in
+  check "exec: the missing name is reported"
+    (mentions missing "unknown function");
+  check "exec: and it is the only diagnostic"
+    (List.length missing.diagnostics = 1);
+  let resolved =
+    check_text
+      "fn g(reg u32 a) -> reg u32 {\n  return a;\n}\n\nexec g (0 : 16)\n"
+  in
+  check "exec: a declared name is silent" (resolved.diagnostics = [])
+
+(* The compiler's annotation exception is one of the five the adapter maps.
+   No input in this suite makes the library raise it for a plain annotation,
+   because annotation checking happens after pretyping, so the mapping is
+   pinned here directly rather than left untested. *)
+let test_annotation_error_mapping () =
+  let location : Jasmin.Location.t =
+    {
+      Jasmin.Location.loc_fname = file;
+      loc_start = (1, 0);
+      loc_end = (1, 3);
+      loc_bchar = 0;
+      loc_echar = 3;
+    }
+  in
+  let diagnostic =
+    Jide_jasmin.Error.to_diagnostic
+      (Jide_jasmin.Error.of_exn
+         (Jasmin.Annot.AnnotationError
+            (location, fun formatter -> Format.pp_print_string formatter "boom")))
+  in
+  check "annotation: the code is the annotation one"
+    (diagnostic.Jide_lang.Diagnostic.code = Some "annotation");
+  check "annotation: the message is printed" (diagnostic.message = "boom");
+  check "annotation: the span is the location's"
+    (diagnostic.span.Jide_lang.Span.start_byte = 0
+    && diagnostic.span.Jide_lang.Span.end_byte = 3)
+
+(* A dropped item whose header carries no name at all declares nothing the
+   loop could know, so it suppresses nothing: an unrelated unknown name after
+   it is still the program's own error. *)
+let test_nameless_stub_suppresses_nothing () =
+  let result =
+    check_text
+      "type ;\n\nfn use(reg u32 a) -> reg u32 {\n  reg u32 x;\n  x = \
+       nosuch(a);\n  return x;\n}\n"
+  in
+  check "nameless: the unknown name is reported"
+    (mentions result "unknown function");
+  check "nameless: beside the compiler's error and the stub"
+    (List.length result.diagnostics = 3)
 
 (* No exception leaves the adapter, whatever the input. *)
 let test_nothing_escapes () =

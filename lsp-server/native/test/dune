@@ -1,8 +1,14 @@
-; The end-to-end check drives the built server over pipes, so it needs the
-; executable itself, not a library.
+; The end-to-end checks drive the built server over pipes, so they need the
+; executable itself, not a library. frames.sh is shared by both of them.
 
 (rule
  (alias runtest)
- (deps e2e.sh %{exe:../main.exe})
+ (deps e2e.sh frames.sh %{exe:../main.exe})
  (action
   (run sh %{dep:e2e.sh} %{exe:../main.exe})))
+
+(rule
+ (alias runtest)
+ (deps diagnostics.sh frames.sh %{exe:../main.exe})
+ (action
+  (run sh %{dep:diagnostics.sh} %{exe:../main.exe})))

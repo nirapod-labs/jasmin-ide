@@ -743,6 +743,23 @@ let test_stub_names_the_item () =
     (stub_of "type T = ;\n\nfn ok(reg u32 a) -> reg u32 {\n  return a;\n}\n"
     = (Jide_jasmin.Recover.Type, Some "T"))
 
+(* A stub whose header carries no name at all: it stands for a real item, it
+   is reported like any other, and there is nothing for it to suppress. *)
+let test_nameless_stub () =
+  let text = "type ;\n\nfn ok(reg u32 a) -> reg u32 {\n  return a;\n}\n" in
+  let parsed = parse text in
+  check "nameless: the whole item after it survives" (item_names parsed = [ "ok" ]);
+  check "nameless: one stub, of the item's own kind, with no name"
+    (match Jide_jasmin.Parse.dropped parsed with
+    | [ Jide_jasmin.Recover.Dropped { kind; name; _ } ] ->
+        kind = Jide_jasmin.Recover.Type && name = None
+    | _ -> false);
+  check "nameless: it is still reported"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         contains diagnostic.message "an item could not be parsed")
+       (Jide_jasmin.Parse.diagnostics parsed))
+
 (* No two stubs may stand for the same bytes: a consumer that lists them
    would show the same broken item twice. *)
 let test_stubs_do_not_overlap () =
@@ -904,6 +921,7 @@ let test_no_exception_escapes () =
 let () =
   test_valid ();
   test_first_error_is_the_compilers ();
+  test_every_dropped_item_is_reported ();
   test_later_items_survive ();
   test_missing_rbrace ();
   test_missing_semicolon ();
@@ -923,6 +941,7 @@ let () =
   test_namespace_keeps_the_whole_item ();
   test_namespace_and_the_items_after_it ();
   test_stub_names_the_item ();
+  test_nameless_stub ();
   test_stubs_do_not_overlap ();
   test_no_function_from_a_string ();
   test_blanked_bytes_are_reported ();
