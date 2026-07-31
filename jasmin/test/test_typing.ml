@@ -450,6 +450,10 @@ let () =
   test_recovered_region_suppresses ();
   test_recovered_item_is_quiet ();
   test_diagnostic_bound ();
+  test_diagnostic_bound_with_parse_errors ();
+  test_exec_clause ();
+  test_annotation_error_mapping ();
+  test_nameless_stub_suppresses_nothing ();
   test_nothing_escapes ();
   if !failures = 0 then print_endline "all typing tests passed"
   else (

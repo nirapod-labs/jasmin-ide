@@ -46,9 +46,15 @@ val check :
     [text] as [file]. [resolve] answers with the bytes of a file a [require]
     item names, or [None] when it has none; the engine passes its open
     buffers first and falls back to disk, which is what the default does. A
-    missing file, a cycle and a file that does not type are diagnostics of
-    the require item, and the names a file that did type declares, or that
-    one which did not would have declared, are not reported as unknown
-    afterwards. A file that cannot be read at all is the one exception to
-    the last clause: nothing is known about a file that has no bytes, so a
-    reference to a name only it would have declared is reported as well. *)
+    [require] inside a namespace is read through [resolve] too: the adapter
+    reads the file itself and types its items in the namespace, because the
+    library's own include path reads the disk and cannot be reached from
+    here. A missing file, a cycle and a file that does not type are
+    diagnostics of the require item, and the names a file that did type
+    declares, or that one which did not would have declared, are not reported
+    as unknown afterwards. A file that cannot be read at all is the one
+    exception to the last clause at the top level: nothing is known about a
+    file that has no bytes, so a reference to a name only it would have
+    declared is reported as well. Inside a namespace the opposite is the
+    safer answer, because every name under it is the unread file's as far as
+    the document can tell, so those references are suppressed instead. *)

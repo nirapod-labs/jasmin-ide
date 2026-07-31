@@ -27,6 +27,17 @@ type declaration = Function of string | Variable of string | Alias of string
 let name_of_declaration = function
   | Function name | Variable name | Alias name -> name
 
+(** [qualified prefix name] is the name the compiler prints for [name]
+    declared inside the namespace [prefix]. *)
+let qualified prefix name =
+  if String.equal prefix "" then name else prefix ^ "::" ^ name
+
+(** The same name, for a declaration. *)
+let qualify_declaration prefix = function
+  | Function name -> Function (qualified prefix name)
+  | Variable name -> Variable (qualified prefix name)
+  | Alias name -> Alias (qualified prefix name)
+
 (** [between ~prefix ~suffix message] is the part of [message] between the
     two, when it has both. *)
 let between ~prefix ~suffix message =
@@ -88,9 +99,7 @@ let suppressed (suppressions : suppression list) message =
     inside it are what a failure to type it takes away. *)
 let rec declarations_of_item ~(prefix : string)
     (item : Syntax.pitem Location.located) : declaration list =
-  let qualify name =
-    if String.equal prefix "" then name else prefix ^ "::" ^ name
-  in
+  let qualify name = qualified prefix name in
   match Location.unloc item with
   | Syntax.PFundef definition ->
       [ Function (qualify (Location.unloc definition.pdf_name)) ]
@@ -120,10 +129,10 @@ let suppression_of_dropped = function
       Some (Namespace name)
   | Recover.Dropped _ -> None
 
+type lookup = string -> string option
 (** [lookup path] is the bytes of a file a [require] names, when the caller
     has them: an open buffer first, a file on disk when the buffer is not
     the one asked for. *)
-type lookup = string -> string option
 
 (** The default lookup: the file on disk. *)
 let read_file (path : string) : string option =
@@ -144,11 +153,28 @@ let include_path ~(idirs : (string * string) list) ~(base : string)
   in
   if Filename.is_relative name then Filename.concat base name else name
 
-(** [normalise_path path] is [path] with a working directory in front of a
-    relative one, which is all a cycle has to compare. *)
+(** [normalise_path path] is one spelling for one file: an absolute path
+    with no [.] and no [..] left in it. The fold is lexical, like the
+    engine's own resolution: nothing here asks the filesystem, so a symbolic
+    link is not resolved and two paths that name one file through different
+    links stay different. It is what makes a cycle compare equal to itself
+    however the require spelled the file. *)
 let normalise_path (path : string) : string =
-  if Filename.is_relative path then Filename.concat (Sys.getcwd ()) path
-  else path
+  let path =
+    if Filename.is_relative path then Filename.concat (Sys.getcwd ()) path
+    else path
+  in
+  let absolute = String.length path > 0 && path.[0] = '/' in
+  let parts = String.split_on_char '/' path in
+  let rec fold stack = function
+    | [] -> List.rev stack
+    | ("" | ".") :: rest -> fold stack rest
+    | ".." :: rest -> (
+        match stack with [] -> fold stack rest | _ :: stack -> fold stack rest)
+    | part :: rest -> fold (part :: stack) rest
+  in
+  let body = String.concat "/" (fold [] parts) in
+  if absolute then "/" ^ body else if body = "" then "." else body
 
 (** How many required files one document may nest. A cycle is caught by the
     chain before this, and this bounds a tree of distinct files. *)
@@ -213,11 +239,6 @@ module Make (A : Arch_full.Arch) = struct
     | environment -> Ok environment
     | exception exn -> Error exn
 
-  (** Everything one pass over one item stream learns. A required file is
-      typed by the same pass with its own [file] and its own recovered
-      regions, and shares the environment, the suppressions and the budget.
-      The diagnostics are the document's own: an error attributed to another
-      file is counted in [include_errors] instead of being placed. *)
   type loop = {
     file : string;
     document : string;
@@ -248,6 +269,11 @@ module Make (A : Arch_full.Arch) = struct
     stopped : bool ref;
     include_errors : int ref;
   }
+  (** Everything one pass over one item stream learns. A required file is
+      typed by the same pass with its own [file] and its own recovered
+      regions, and shares the environment, the suppressions and the budget.
+      The diagnostics are the document's own: an error attributed to another
+      file is counted in [include_errors] instead of being placed. *)
 
   (** [type_items ~file ~items ~idirs] types the items of one file one by one
       and returns the diagnostics, plus the environment the loop leaves
@@ -320,8 +346,7 @@ module Make (A : Arch_full.Arch) = struct
                 resolve;
                 idirs;
                 place = true;
-                origin =
-                  ref (Jide_lang.Span.make ~start_byte:0 ~end_byte:0);
+                origin = ref (Jide_lang.Span.make ~start_byte:0 ~end_byte:0);
                 environment = ref environment;
                 suppressions = ref [];
                 diagnostics = ref [];
@@ -332,8 +357,9 @@ module Make (A : Arch_full.Arch) = struct
                 include_errors = ref 0;
               }
             in
-            type_sequence loop ~chain:[ normalise_path file ] ~dropped ~recovered
-              ~items;
+            type_sequence loop
+              ~chain:[ normalise_path file ]
+              ~dropped ~recovered ~items;
             let environment =
               match exit_file !(loop.environment) with
               | Ok environment -> Some environment
@@ -361,7 +387,7 @@ module Make (A : Arch_full.Arch) = struct
       dropped;
     List.iter
       (fun item ->
-        if not !(loop.stopped) then
+        if not !(loop.stopped) then (
           let snapshot = !(loop.environment) in
           let item_span = span_of_item item in
           if loop.place then loop.origin := item_span;
@@ -382,44 +408,20 @@ module Make (A : Arch_full.Arch) = struct
               type_require loop ~chain
                 ~from:(Option.map Location.unloc from)
                 names
-          | _ -> (
-              match type_item snapshot item with
-              | Ok next ->
-                  (* What this item typed left behind, read from the front of
-                     the typed list. Only the document's loop collects facts:
-                     an included file's ranges index that file, not the
-                     document. *)
-                  if loop.place then (
-                    let decls =
-                      added
-                        ~before:(Pretyping.Env.decls snapshot)
-                        ~after:(Pretyping.Env.decls next)
-                    in
-                    match
-                      Collect.of_item ~file:loop.file ~env:next ~item ~decls
-                    with
-                    | collected ->
-                        loop.facts := Facts.merge !(loop.facts) collected
-                    | exception exn ->
-                        (* A fact the adapter cannot read is a failure of this
-                           server, never of the user's file: it is reported as
-                           such instead of ending the check. *)
-                        let error = Error.of_exn exn in
-                        if Error.belongs_to ~file:loop.file error then
-                          keep loop ~in_recovered_item error);
-                  loop.environment := next
-              | Error exn ->
-                  keep loop ~in_recovered_item (Error.of_exn exn);
-                  (* The names the item declares are now absent from the
-                     environment; a later reference to one of them would be
-                     reported as unresolved, and it is this failure seen
-                     again, not a second one. A namespace takes every name
-                     under it with it. *)
-                  List.iter
-                    (fun declaration ->
-                      loop.suppressions := Name declaration :: !(loop.suppressions))
-                    (declarations_of_item item);
-                  loop.environment := snapshot))
+          | Syntax.PNamespace (name, inner) ->
+              (* The library types a namespace's items itself, and its own
+                 [tt_file] reads the disk. The namespace cannot be entered
+                 here, so its requires are routed before it is typed. *)
+              let rewritten =
+                expand_namespace loop ~chain ~file:loop.file
+                  ~prefix:(Location.unloc name) inner
+              in
+              let item =
+                Location.mk_loc (Location.loc item)
+                  (Syntax.PNamespace (name, rewritten))
+              in
+              type_ordinary loop ~in_recovered_item snapshot item
+          | _ -> type_ordinary loop ~in_recovered_item snapshot item))
       items
 
   (** [type_require loop ~chain names] types the files one [require] item
