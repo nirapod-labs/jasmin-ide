@@ -574,7 +574,9 @@ module Make (A : Arch_full.Arch) = struct
       (fun (name : string Location.located) ->
         if not !(loop.stopped) then
           let written = Location.unloc name in
-          let path = normalise_path (include_path ~idirs:loop.idirs ~base ~from written) in
+          let path =
+            normalise_path (include_path ~idirs:loop.idirs ~base ~from written)
+          in
           (* A failure of the chain itself is the document's: its item names a
              file that cannot be read, whatever depth the failure was found
              at, so it is placed on the document's item and not counted as an
