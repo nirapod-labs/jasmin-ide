@@ -929,6 +929,9 @@ let () =
   test_require_inside_namespace_has_errors ();
   test_require_inside_namespace_type_error ();
   test_require_inside_namespace_suppression_scope ();
+  test_require_inside_namespace_two_levels ();
+  test_require_inside_namespaced_include_is_placed ();
+  test_expansion_respects_the_diagnostic_bound ();
   test_arch_names ();
   test_version ();
   test_recovery_not_yet ();

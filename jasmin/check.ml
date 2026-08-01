@@ -140,17 +140,32 @@ let read_file (path : string) : string option =
   | text -> Some text
   | exception _ -> None
 
+(** The directory a [require] item's [from] names, or the name itself when
+    no [-I NAME=PATH] bound one. [Ok None] is an item with no [from]: the
+    file it names is read beside the file that writes the item.
+
+    An [Error] is a name the compiler refuses at the name's own location:
+    [Pretyping.Env.enter_file] raises [unknown name %s] for it rather than
+    reading anything. There is no fallback to the writer's directory here,
+    because a program that builds only because the file happens to sit
+    beside the document is one the compiler rejects. *)
+let include_directory ~(idirs : (string * string) list)
+    (from : string Location.located option) :
+    (string option, string Location.located) Stdlib.result =
+  match from with
+  | None -> Ok None
+  | Some name -> (
+      match List.assoc_opt (Location.unloc name) idirs with
+      | Some directory -> Ok (Some directory)
+      | None -> Error name)
+
 (** A name is a file name as the compiler resolves it: relative to the file
     that requires it, or to the directory an idir binds when the item names
-    a [from]. *)
-let include_path ~(idirs : (string * string) list) ~(base : string)
-    ~(from : string option) (name : string) : string =
-  let base =
-    match from with
-    | None -> base
-    | Some from -> (
-        match List.assoc_opt from idirs with Some dir -> dir | None -> base)
-  in
+    a [from]. [from] is already resolved by {!include_directory}, so it is
+    either no directory at all or the one an idir bound. *)
+let include_path ~(base : string) ~(from : string option) (name : string) :
+    string =
+  let base = match from with None -> base | Some directory -> directory in
   if Filename.is_relative name then Filename.concat base name else name
 
 (** [normalise_path path] is one spelling for one file: an absolute path
@@ -180,13 +195,17 @@ let normalise_path (path : string) : string =
     chain before this, and this bounds a tree of distinct files. *)
 let max_include_depth = 8
 
-(* The bytes of one item, so the loop can ask whether recovery rewrote any
-   of them. *)
-let span_of_item (item : Syntax.pitem Location.located) : Jide_lang.Span.t =
-  let location = item.Location.pl_loc in
+(* The bytes of one location, so a diagnostic can be placed on the text it
+   is about. *)
+let span_of_location (location : Location.t) : Jide_lang.Span.t =
   Jide_lang.Span.make
     ~start_byte:(max 0 location.Location.loc_bchar)
     ~end_byte:(max 0 location.Location.loc_echar)
+
+(* The bytes of one item, so the loop can ask whether recovery rewrote any
+   of them. *)
+let span_of_item (item : Syntax.pitem Location.located) : Jide_lang.Span.t =
+  span_of_location item.Location.pl_loc
 
 (** [within ~length span] is [span] cut to the bytes of a document [length]
     long. Nothing is returned at an offset past the document's end: such a
@@ -311,6 +330,31 @@ module Make (A : Arch_full.Arch) = struct
       the item stood. A namespace is typed as one item, so the first error
       inside it ends the item; this is what lets the loop say which of the
       namespace's files the error came from. *)
+
+  (** The span of a diagnostic about an item written in [file]: the item's
+      own span when the document wrote it, and otherwise the span of the
+      document's item whose typing reached [file], which is [loop.origin],
+      because an included file's offsets do not index the document. The
+      answer is cut to the document's bytes. *)
+  let span_of_writer loop ~(file : string) ~(at : Jide_lang.Span.t) =
+    within ~length:loop.length
+      (if loop.place && String.equal file loop.file then at else !(loop.origin))
+
+  (** The diagnostic a [from] name no [-I NAME=PATH] bound is refused with:
+      the compiler's own message, on the name's own bytes when the document
+      wrote the [require] item and on the document's item otherwise. *)
+  let unknown_name loop ~(file : string) (name : string Location.located) =
+    Error.make ~file:(Some loop.document) ~kind:Error.Typing
+      ~span:
+        (span_of_writer loop ~file ~at:(span_of_location (Location.loc name)))
+      (Printf.sprintf "unknown name %s" (Location.unloc name))
+
+  (** A namespace whose required file was not read has no names the document
+      can know: nothing says which of them are the namespace's own, so every
+      name under it is treated as one the file would have declared. *)
+  let forget_names (loop : loop) (prefix : string) =
+    if not (String.equal prefix "") then
+      loop.suppressions := Namespace prefix :: !(loop.suppressions)
 
   (** [type_items ~file ~items ~idirs] types the items of one file one by one
       and returns the diagnostics, plus the environment the loop leaves
