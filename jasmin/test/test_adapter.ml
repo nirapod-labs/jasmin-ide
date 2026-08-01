@@ -40,6 +40,29 @@ let mentions (result : Jide_jasmin.Adapter.check_result) needle =
         (String.lowercase_ascii needle))
     result.diagnostics
 
+(* Whether a span can index [text]: both offsets inside it, the end not
+   before the start. A diagnostic whose span does not pass this indexes some
+   other file, and a caller that places it would reject it or highlight
+   nothing. *)
+let indexes (text : string) (span : Jide_lang.Span.t) =
+  span.Jide_lang.Span.start_byte >= 0
+  && span.Jide_lang.Span.start_byte <= span.Jide_lang.Span.end_byte
+  && span.Jide_lang.Span.end_byte <= String.length text
+
+(* The bytes a span indexes, when it indexes [text] at all. *)
+let text_at (text : string) (span : Jide_lang.Span.t) =
+  if indexes text span then
+    Some
+      (String.sub text span.Jide_lang.Span.start_byte
+         (span.Jide_lang.Span.end_byte - span.Jide_lang.Span.start_byte))
+  else None
+
+(* Whether every diagnostic's span can be placed on [text]. *)
+let all_placed (text : string) (result : Jide_jasmin.Adapter.check_result) =
+  List.for_all
+    (fun (diagnostic : Jide_lang.Diagnostic.t) -> indexes text diagnostic.span)
+    result.diagnostics
+
 module X86 =
   (val Jasmin.CoreArchFactory.get_arch_module Jasmin.Utils.X86_64
          Jasmin.Glob_options.Linux
@@ -187,7 +210,9 @@ let test_continue_after_failed_item () =
   let result, environment =
     Loop.type_items
       ~resolve:(fun _ -> None)
-      ~budget:200 ~dropped:[] ~recovered:[] ~file ~items:parsed.items ~idirs:[]
+      ~budget:200 ~dropped:[] ~recovered:[] ~file
+      ~length:(String.length first_item_fails)
+      ~items:parsed.items ~idirs:[]
   in
   check "continue: only the failed item produces a diagnostic"
     (List.length result.Jide_jasmin.Check.diagnostics = 1);
@@ -725,6 +750,139 @@ let test_require_inside_namespace_suppression_scope () =
        result.diagnostics);
   check "suppression scope: the fabricated cascade is not reported"
     (not (mentions result "unknown function"))
+
+(* A namespaced require of a file that requires another one, and the file
+   that one requires does not type. The failure is two levels down, so the
+   error the namespace fails on names the deeper file, not the file the
+   document named. One diagnostic per require item of the chain has to say
+   what it read, the deeper file first, which is the answer the same two
+   files give when the document requires them at top level. Without the
+   deeper require's record reaching the site list, the error names a file no
+   require item was recorded as having read and the document is silent. *)
+let test_require_inside_namespace_two_levels () =
+  let outer = "namespaced-outer.jinc" in
+  let inner = "namespaced-inner.jinc" in
+  let resolve path =
+    match Filename.basename path with
+    | "namespaced-outer.jinc" -> Some (Printf.sprintf "require %S\n" inner)
+    | "namespaced-inner.jinc" ->
+        Some
+          "fn library(reg u32 a) -> reg u32 {\n\
+          \  reg u32 x;\n\
+          \  x = not_a_function(a);\n\
+          \  return x;\n\
+           }\n"
+    | _ -> None
+  in
+  let names file (result : Jide_jasmin.Adapter.check_result) =
+    List.exists
+      (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+        contains diagnostic.message "has errors"
+        && contains diagnostic.message file)
+      result.diagnostics
+  in
+  let namespaced =
+    Printf.sprintf
+      "namespace N {\n\
+      \  require %S\n\
+       }\n\n\
+       fn use(reg u32 a) -> reg u32 {\n\
+      \  reg u32 x;\n\
+      \  x = N::library(a);\n\
+      \  return x;\n\
+       }\n"
+      outer
+  in
+  let result = check_with ~resolve namespaced in
+  check "two levels: one diagnostic per require item"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 2);
+  check "two levels: the deeper file is reported" (names inner result);
+  check "two levels: the file that read it is reported" (names outer result);
+  check "two levels: the include's own message is not placed"
+    (not (mentions result "not_a_function"));
+  check "two levels: no fabricated unknown function"
+    (not (mentions result "unknown function"));
+  check "two levels: every span indexes the document"
+    (all_placed namespaced result);
+  (* The same two files required from the top of the document are the oracle:
+     they give one diagnostic per require item, the deeper file first. *)
+  let top_level =
+    check_with ~resolve
+      (Printf.sprintf
+         "require %S\n\n\
+          fn use(reg u32 a) -> reg u32 {\n\
+         \  reg u32 x;\n\
+         \  x = library(a);\n\
+         \  return x;\n\
+          }\n"
+         outer)
+  in
+  check "two levels: the top-level require agrees on the count"
+    (List.length top_level.Jide_jasmin.Adapter.diagnostics
+    = List.length result.Jide_jasmin.Adapter.diagnostics);
+  check "two levels: the top-level require agrees on the deeper file"
+    (names inner top_level);
+  check "two levels: the top-level require agrees on the file that read it"
+    (names outer top_level)
+
+(* A require written inside a namespaced include is an item of that include,
+   so its offsets index the include and not the document. The failure is
+   reported on the document item whose expansion reached the file — the
+   namespace item — and the span never reaches past the document's end. A
+   span taken from the include would be more than twice this document's
+   length. *)
+let test_require_inside_namespaced_include_is_placed () =
+  let far =
+    String.make 240 ' ' ^ "require \"namespaced-nested-missing.jinc\"\n"
+  in
+  let resolve path =
+    if Filename.basename path = "namespaced-far.jinc" then Some far else None
+  in
+  let body =
+    "namespace N {\n\
+    \  require \"namespaced-far.jinc\"\n\
+     }\n\n\
+     fn use(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = N::library(a);\n\
+    \  return x;\n\
+     }\n"
+  in
+  let result = check_with ~resolve body in
+  check "nested missing: one diagnostic"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 1);
+  check "nested missing: it says the file cannot be read"
+    (mentions result "cannot read"
+    && mentions result "namespaced-nested-missing.jinc");
+  check "nested missing: its span indexes the document" (all_placed body result);
+  check "nested missing: it attaches to the namespace item"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         match text_at body diagnostic.span with
+         | Some text -> contains text "namespace N"
+         | None -> false)
+       result.diagnostics)
+
+(* A namespace's requires are expanded before the namespace is typed, and the
+   expansion is the one path that can write several diagnostics for one item.
+   The 200-diagnostic bound is still the answer: the loop stops at it, and
+   the items after it are not typed. Without the bound being tested there,
+   one diagnostic per unreadable file comes back, 250 in this document. *)
+let test_expansion_respects_the_diagnostic_bound () =
+  let requires =
+    List.init 250 (fun index ->
+        Printf.sprintf "  require \"namespaced-absent-%d.jinc\"\n" index)
+  in
+  let body = "namespace N {\n" ^ String.concat "" requires ^ "}\n" in
+  let result = check_with ~resolve:(fun _ -> None) body in
+  check "bound: the expansion does not overshoot the bound"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 200);
+  check "bound: every returned diagnostic is the expansion's own"
+    (List.for_all
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         contains diagnostic.message "cannot read")
+       result.diagnostics);
+  check "bound: every span indexes the document" (all_placed body result)
 
 let test_arch_names () =
   check "arch names"

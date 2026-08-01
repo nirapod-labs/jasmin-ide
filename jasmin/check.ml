@@ -585,10 +585,12 @@ module Make (A : Arch_full.Arch) = struct
       one of them is this failure seen again, not a second error.
 
       A file that was read and does not type is reported on the [require]
-      item too, by {!report_spliced_failure}, which is why a file is answered
-      with the record of the item that read it. The suppression above is for
-      the fabricated cascade only; it is never what an error of a file that
-      was read depends on, because such an error is counted in
+      item too, by {!report_spliced_failure}, which is why the answer carries
+      a record for every [require] the expansion made, the ones written in a
+      required file included: a failure in the deepest file has to be
+      attributable to the item of the file that read it. The suppression
+      above is for the fabricated cascade only; it is never what an error of
+      a file that was read depends on, because such an error is counted in
       [include_errors] rather than filtered. *)
   and expand_namespace loop ~(chain : string list) ~(file : string)
       ~(prefix : string) (items : Syntax.pitem Location.located list) :
@@ -606,7 +608,7 @@ module Make (A : Arch_full.Arch) = struct
                       ~at:(span_of_item item) (Location.unloc name))
                   names
               in
-              (List.concat_map fst expanded, List.filter_map snd expanded)
+              (List.concat_map fst expanded, List.concat_map snd expanded)
           | Syntax.PNamespace (name, inner) ->
               let rewritten, spliced =
                 expand_namespace loop ~chain ~file
@@ -625,22 +627,28 @@ module Make (A : Arch_full.Arch) = struct
 
   (** One required file of a namespace, read through the lookup and expanded
       into the items that take the place of the [require] item. A file that
-      was read is also answered with the record that lets a failure inside
-      its items be reported on this item; a file that could not be read has
-      no items to fail, and nothing is known about the names it would have
-      declared. *)
+      was read is answered with the records that let a failure inside its
+      items be reported: its own [require] item and, below it, every require
+      the file made in turn. A file that could not be read has no items to
+      fail, and nothing is known about the names it would have declared. *)
   and expand_required loop ~(chain : string list) ~(file : string)
       ~(prefix : string) ~(from : string option) ~(at : Jide_lang.Span.t)
-      (written : string) : Syntax.pitem Location.located list * spliced option =
+      (written : string) : Syntax.pitem Location.located list * spliced list =
     let path =
       normalise_path
         (include_path ~idirs:loop.idirs ~base:(Filename.dirname file) ~from
            written)
     in
-    (* The require item is the document's when the document is what is being
-       typed, and the document's require that reached this file otherwise. *)
+    (* [at] is the [require] item's span in [file], the file that wrote it:
+       the document's item when the document wrote it, and otherwise an
+       included file's, which does not index the document. The failure is
+       placed on the document item that reached the file in that case. *)
     let report message =
-      let span = if loop.place then at else !(loop.origin) in
+      let span =
+        within ~length:loop.length
+          (if loop.place && String.equal file loop.file then at
+           else !(loop.origin))
+      in
       note loop
         (Error.make ~file:(Some loop.document) ~kind:Error.Typing ~span message)
     in
@@ -651,18 +659,18 @@ module Make (A : Arch_full.Arch) = struct
     if List.mem path chain then (
       report (Printf.sprintf "the required file `%s' requires itself" written);
       forget_names ();
-      ([], None))
+      ([], []))
     else if List.length chain > max_include_depth then (
       report
         (Printf.sprintf "the required file `%s' is nested too deeply" written);
       forget_names ();
-      ([], None))
+      ([], []))
     else
       match loop.resolve path with
       | None ->
           report (Printf.sprintf "cannot read the required file `%s'" written);
           forget_names ();
-          ([], None)
+          ([], [])
       | Some text ->
           let parsed = Parse.parse ~name:path text in
           let failed = Parse.failed parsed in
@@ -698,7 +706,8 @@ module Make (A : Arch_full.Arch) = struct
               (Parse.items parsed)
           in
           ( items,
-            Some { written; path; at; span_file = file; reported = failed } )
+            { written; path; at; span_file = file; reported = failed }
+            :: spliced )
 
   (** [type_require loop ~chain names] types the files one [require] item
       names, in the environment the item stream has reached, by the same
@@ -777,7 +786,18 @@ module Make (A : Arch_full.Arch) = struct
     if here && not in_recovered_item then note loop error
 
   and note loop (error : Error.t) =
-    if not (suppressed !(loop.suppressions) error.Error.message) then (
+    (* Everything [note] is given is placed on the document, so its span is
+       cut to the document's bytes first. The budget is enforced here rather
+       than at the call sites as well, so no path — the expansion of a
+       namespace's requires included, which writes several diagnostics for
+       one item — can return more than the budget it was given. *)
+    let error =
+      { error with Error.span = within ~length:loop.length error.Error.span }
+    in
+    if
+      (not !(loop.stopped))
+      && not (suppressed !(loop.suppressions) error.Error.message)
+    then (
       loop.diagnostics := error :: !(loop.diagnostics);
       incr loop.kept;
       if !(loop.kept) >= loop.budget then loop.stopped := true)
@@ -801,7 +821,7 @@ module Make (A : Arch_full.Arch) = struct
           let typed, _environment =
             type_items ~resolve ~budget ~dropped:(Parse.dropped parsed)
               ~recovered:(Parse.recovered parsed) ~file
-              ~items:(Parse.items parsed) ~idirs
+              ~length:(String.length text) ~items:(Parse.items parsed) ~idirs
           in
           {
             typed with
