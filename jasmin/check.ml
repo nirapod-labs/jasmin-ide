@@ -487,9 +487,7 @@ module Make (A : Arch_full.Arch) = struct
           in
           match Location.unloc item with
           | Syntax.Prequire (from, names) ->
-              type_require loop ~chain
-                ~from:(Option.map Location.unloc from)
-                names
+              type_require loop ~chain ~from names
           | Syntax.PNamespace (name, inner) -> (
               (* The library types a namespace's items itself, and its own
                  [tt_file] reads the disk. The namespace cannot be entered
@@ -523,21 +521,21 @@ module Make (A : Arch_full.Arch) = struct
         (* What this item typed left behind, read from the front of the typed
            list. Only the document's loop collects facts: an included file's
            ranges index that file, not the document. *)
-        if loop.place then (
-          let decls =
-            added
-              ~before:(Pretyping.Env.decls snapshot)
-              ~after:(Pretyping.Env.decls next)
-          in
-          match Collect.of_item ~file:loop.file ~env:next ~item ~decls with
-          | collected -> loop.facts := Facts.merge !(loop.facts) collected
-          | exception exn ->
-              (* A fact the adapter cannot read is a failure of this server,
-                 never of the user's file: it is reported as such instead of
-                 ending the check. *)
-              let error = Error.of_exn exn in
-              if Error.belongs_to ~file:loop.file error then
-                keep loop ~in_recovered_item error);
+        (if loop.place then
+           let decls =
+             added
+               ~before:(Pretyping.Env.decls snapshot)
+               ~after:(Pretyping.Env.decls next)
+           in
+           match Collect.of_item ~file:loop.file ~env:next ~item ~decls with
+           | collected -> loop.facts := Facts.merge !(loop.facts) collected
+           | exception exn ->
+               (* A fact the adapter cannot read is a failure of this server,
+                  never of the user's file: it is reported as such instead of
+                  ending the check. *)
+               let error = Error.of_exn exn in
+               if Error.belongs_to ~file:loop.file error then
+                 keep loop ~in_recovered_item error);
         loop.environment := next;
         None
     | Error exn ->
@@ -612,9 +610,7 @@ module Make (A : Arch_full.Arch) = struct
       offsets do not index the document. The answer is cut to the document's
       bytes either way. *)
   and span_of_site loop (site : spliced) =
-    within ~length:loop.length
-      (if loop.place && String.equal site.span_file loop.file then site.at
-       else !(loop.origin))
+    span_of_writer loop ~file:site.span_file ~at:site.at
 
   (** A [require] inside a namespace cannot go through {!type_require}: the
       library types a namespace's items itself ([Pretyping.tt_item]) and its
@@ -643,16 +639,25 @@ module Make (A : Arch_full.Arch) = struct
       List.map
         (fun (item : Syntax.pitem Location.located) ->
           match Location.unloc item with
-          | Syntax.Prequire (from, names) ->
-              let from = Option.map Location.unloc from in
-              let expanded =
-                List.map
-                  (fun (name : string Location.located) ->
-                    expand_required loop ~chain ~file ~prefix ~from
-                      ~at:(span_of_item item) (Location.unloc name))
-                  names
-              in
-              (List.concat_map fst expanded, List.concat_map snd expanded)
+          | Syntax.Prequire (from, names) -> (
+              match include_directory ~idirs:loop.idirs from with
+              | Error name ->
+                  (* One name for the item, not one per file it lists: the
+                     compiler refuses the item at the name and reads nothing
+                     for it, so the file it names is not read beside the
+                     document in the name's place. *)
+                  note loop (unknown_name loop ~file name);
+                  forget_names loop prefix;
+                  ([], [])
+              | Ok from ->
+                  let expanded =
+                    List.map
+                      (fun (name : string Location.located) ->
+                        expand_required loop ~chain ~file ~prefix ~from
+                          ~at:(span_of_item item) (Location.unloc name))
+                      names
+                  in
+                  (List.concat_map fst expanded, List.concat_map snd expanded))
           | Syntax.PNamespace (name, inner) ->
               let rewritten, spliced =
                 expand_namespace loop ~chain ~file
@@ -678,42 +683,36 @@ module Make (A : Arch_full.Arch) = struct
   and expand_required loop ~(chain : string list) ~(file : string)
       ~(prefix : string) ~(from : string option) ~(at : Jide_lang.Span.t)
       (written : string) : Syntax.pitem Location.located list * spliced list =
+    (* [from] is already resolved by {!include_directory}: an item whose
+       [from] names no directory an idir bound never reaches here, so no
+       file is read from the writer's directory in the name's place. *)
     let path =
-      normalise_path
-        (include_path ~idirs:loop.idirs ~base:(Filename.dirname file) ~from
-           written)
+      normalise_path (include_path ~base:(Filename.dirname file) ~from written)
     in
     (* [at] is the [require] item's span in [file], the file that wrote it:
        the document's item when the document wrote it, and otherwise an
        included file's, which does not index the document. The failure is
        placed on the document item that reached the file in that case. *)
     let report message =
-      let span =
-        within ~length:loop.length
-          (if loop.place && String.equal file loop.file then at
-           else !(loop.origin))
-      in
       note loop
-        (Error.make ~file:(Some loop.document) ~kind:Error.Typing ~span message)
-    in
-    let forget_names () =
-      if not (String.equal prefix "") then
-        loop.suppressions := Namespace prefix :: !(loop.suppressions)
+        (Error.make ~file:(Some loop.document) ~kind:Error.Typing
+           ~span:(span_of_writer loop ~file ~at)
+           message)
     in
     if List.mem path chain then (
       report (Printf.sprintf "the required file `%s' requires itself" written);
-      forget_names ();
+      forget_names loop prefix;
       ([], []))
     else if List.length chain > max_include_depth then (
       report
         (Printf.sprintf "the required file `%s' is nested too deeply" written);
-      forget_names ();
+      forget_names loop prefix;
       ([], []))
     else
       match loop.resolve path with
       | None ->
           report (Printf.sprintf "cannot read the required file `%s'" written);
-          forget_names ();
+          forget_names loop prefix;
           ([], [])
       | Some text ->
           let parsed = Parse.parse ~name:path text in
@@ -755,17 +754,30 @@ module Make (A : Arch_full.Arch) = struct
 
   (** [type_require loop ~chain names] types the files one [require] item
       names, in the environment the item stream has reached, by the same
-      rules as this file. *)
-  and type_require loop ~(chain : string list) ~(from : string option)
+      rules as this file. The item's [from] is refused once, at the name
+      itself, and no file is read for the item when no idir bound the name:
+      falling back to the writer's directory would accept a program the
+      compiler rejects.
+
+      The name is the item's own, so one refusal is the answer however many
+      files the item lists; the empty list is how the loop reads nothing for
+      it. *)
+  and type_require loop ~(chain : string list)
+      ~(from : string Location.located option)
       (names : string Location.located list) =
     let base = Filename.dirname loop.file in
+    let from, names =
+      match include_directory ~idirs:loop.idirs from with
+      | Ok from -> (from, names)
+      | Error name ->
+          note loop (unknown_name loop ~file:loop.file name);
+          (None, [])
+    in
     List.iter
       (fun (name : string Location.located) ->
         if not !(loop.stopped) then
           let written = Location.unloc name in
-          let path =
-            normalise_path (include_path ~idirs:loop.idirs ~base ~from written)
-          in
+          let path = normalise_path (include_path ~base ~from written) in
           (* A failure of the chain itself is the document's: its item names a
              file that cannot be read, whatever depth the failure was found
              at, so it is placed on the document's item and not counted as an
@@ -867,10 +879,7 @@ module Make (A : Arch_full.Arch) = struct
               ~recovered:(Parse.recovered parsed) ~file
               ~length:(String.length text) ~items:(Parse.items parsed) ~idirs
           in
-          {
-            typed with
-            diagnostics = parse_diagnostics @ typed.diagnostics;
-          })
+          { typed with diagnostics = parse_diagnostics @ typed.diagnostics })
     with
     | outcome, printed -> (
         match Warnings.parse ~file printed with

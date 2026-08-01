@@ -884,6 +884,114 @@ let test_expansion_respects_the_diagnostic_bound () =
        result.diagnostics);
   check "bound: every span indexes the document" (all_placed body result)
 
+(* A [from] name no [-I NAME=PATH] bound is refused, not resolved against
+   the document's directory: the compiler's own [unknown name %s] at the
+   name's bytes, and nothing is read for the item. The file is beside the
+   document and the lookup would answer it, which is exactly the program the
+   compiler rejects; with the binding the same document reads the same file
+   and has nothing to report. *)
+let test_unknown_include_name () =
+  let asked = ref [] in
+  let resolve path =
+    asked := path :: !asked;
+    if Filename.basename path = "bound-inc.jazz" then
+      Some "fn inc(reg u32 x) -> reg u32 {\n  return x;\n}\n"
+    else None
+  in
+  let body =
+    "from LIB require \"bound-inc.jazz\"\n\n\
+     fn main(reg u32 a) -> reg u32 {\n\
+    \  return a;\n\
+     }\n"
+  in
+  let with_idirs idirs =
+    Jide_jasmin.Adapter.check ~resolve x86_64 linux ~file:"probe.jazz"
+      ~text:body ~idirs
+  in
+  let unbound = with_idirs [] in
+  check "unknown name: one diagnostic"
+    (List.length unbound.Jide_jasmin.Adapter.diagnostics = 1);
+  check "unknown name: the compiler's message on the name's bytes"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         diagnostic.message = "unknown name LIB"
+         && text_at body diagnostic.span = Some "LIB")
+       unbound.diagnostics);
+  check "unknown name: the file beside the document is not read" (!asked = []);
+  let bound = with_idirs [ ("LIB", "lib") ] in
+  check "unknown name: the binding reads the file and passes"
+    (bound.Jide_jasmin.Adapter.diagnostics = []);
+  check "unknown name: the path asked for is the bound one"
+    (List.exists (fun path -> contains path "/lib/bound-inc.jazz") !asked)
+
+(* The same item inside a namespace: one diagnostic on the name, no file
+   read, and the namespace's names treated as the unread file's, so the
+   reference to N::library is not a second, fabricated error. Written in a
+   namespaced include instead, the name's bytes index the include, so the
+   refusal is placed on the document's namespace item like every other
+   failure of that expansion. *)
+let test_unknown_include_name_inside_namespace () =
+  let asked = ref [] in
+  let resolve path =
+    asked := path :: !asked;
+    if Filename.basename path = "bound-ns.jazz" then
+      Some "fn library(reg u32 a) -> reg u32 {\n  return a;\n}\n"
+    else None
+  in
+  let body =
+    "namespace N {\n\
+    \  from LIB require \"bound-ns.jazz\"\n\
+     }\n\n\
+     fn use(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = N::library(a);\n\
+    \  return x;\n\
+     }\n"
+  in
+  let result = check_with ~resolve body in
+  check "namespaced unknown name: one diagnostic"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 1);
+  check "namespaced unknown name: the compiler's message on the name's bytes"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         diagnostic.message = "unknown name LIB"
+         && text_at body diagnostic.span = Some "LIB")
+       result.diagnostics);
+  check "namespaced unknown name: the file beside the document is not read"
+    (!asked = []);
+  check "namespaced unknown name: no fabricated unknown function"
+    (not (mentions result "unknown function"));
+  (* The same item written in a namespaced include, past 240 bytes of
+     padding, so a span taken from the include would run past this
+     document's end. *)
+  let far = String.make 240 ' ' ^ "from NOPE require \"nowhere.jinc\"\n" in
+  let resolve_far path =
+    if Filename.basename path = "unknown-name-outer.jinc" then Some far
+    else None
+  in
+  let outer_body =
+    "namespace N {\n\
+    \  require \"unknown-name-outer.jinc\"\n\
+     }\n\n\
+     fn use(reg u32 a) -> reg u32 {\n\
+    \  return a;\n\
+     }\n"
+  in
+  let outer = check_with ~resolve:resolve_far outer_body in
+  check "nested unknown name: one diagnostic"
+    (List.length outer.Jide_jasmin.Adapter.diagnostics = 1);
+  check "nested unknown name: it is the compiler's message"
+    (mentions outer "unknown name NOPE");
+  check "nested unknown name: its span indexes the document"
+    (all_placed outer_body outer);
+  check "nested unknown name: it attaches to the namespace item"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         match text_at outer_body diagnostic.span with
+         | Some text -> contains text "namespace N"
+         | None -> false)
+       outer.diagnostics)
+
 let test_arch_names () =
   check "arch names"
     (Jide_jasmin.Adapter.arch_names = [ "x86-64"; "arm-m4"; "armv8a"; "riscv" ]);
@@ -932,6 +1040,8 @@ let () =
   test_require_inside_namespace_two_levels ();
   test_require_inside_namespaced_include_is_placed ();
   test_expansion_respects_the_diagnostic_bound ();
+  test_unknown_include_name ();
+  test_unknown_include_name_inside_namespace ();
   test_arch_names ();
   test_version ();
   test_recovery_not_yet ();
