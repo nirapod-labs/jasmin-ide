@@ -188,6 +188,19 @@ let span_of_item (item : Syntax.pitem Location.located) : Jide_lang.Span.t =
     ~start_byte:(max 0 location.Location.loc_bchar)
     ~end_byte:(max 0 location.Location.loc_echar)
 
+(** [within ~length span] is [span] cut to the bytes of a document [length]
+    long. Nothing is returned at an offset past the document's end: such a
+    span indexes some other file, and a caller that places it would either
+    reject it or highlight none of the document. *)
+let within ~(length : int) (span : Jide_lang.Span.t) : Jide_lang.Span.t =
+  let start_byte = max 0 (min length span.Jide_lang.Span.start_byte) in
+  let end_byte = max start_byte (min length span.Jide_lang.Span.end_byte) in
+  if
+    start_byte = span.Jide_lang.Span.start_byte
+    && end_byte = span.Jide_lang.Span.end_byte
+  then span
+  else Jide_lang.Span.make ~start_byte ~end_byte
+
 module Make (A : Arch_full.Arch) = struct
   type environment = A.extended_op Pretyping.Env.env
 
@@ -244,6 +257,9 @@ module Make (A : Arch_full.Arch) = struct
     document : string;
         (** The file the caller asked about, which stays the same however deep
             a [require] chain goes. *)
+    length : int;
+        (** The document's length in bytes. Nothing is placed past its end,
+            because a span that runs past it indexes some other file. *)
     resolve : lookup;
     idirs : (string * string) list;
     place : bool;
@@ -327,7 +343,7 @@ module Make (A : Arch_full.Arch) = struct
       engine uses, ends in a catch-all: no exception leaves the adapter. *)
   let rec type_items ~(resolve : lookup) ~(budget : int)
       ~(dropped : Recover.dropped list) ~(recovered : Jide_lang.Span.t list)
-      ~(file : string) ~(items : Syntax.pprogram)
+      ~(file : string) ~(length : int) ~(items : Syntax.pprogram)
       ~(idirs : (string * string) list) : result * environment option =
     let initial =
       match List.fold_left Pretyping.Env.add_from Pretyping.Env.empty idirs with
@@ -364,6 +380,7 @@ module Make (A : Arch_full.Arch) = struct
               {
                 file;
                 document = file;
+                length;
                 resolve;
                 idirs;
                 place = true;
@@ -497,9 +514,10 @@ module Make (A : Arch_full.Arch) = struct
       item. When that error names a file a [require] inside the namespace
       read, the file is the one that did not type: its offsets index that
       file, not the document, so {!keep} counted it instead of placing it and
-      nothing else would ever say why the namespace is empty. The [require]
-      item says the file has errors — the same diagnostic a top-level require
-      of the same file gives — and the names under the namespace stay
+      nothing else would ever say why the namespace is empty. Every [require]
+      item between the document and that file says the file it read has
+      errors — the same diagnostic a top-level require of the same file gives,
+      one per file of the chain — and the names under the namespace stay
       suppressed, because a reference to one of them is this failure seen
       again.
 
@@ -516,20 +534,43 @@ module Make (A : Arch_full.Arch) = struct
             (fun (site : spliced) -> String.equal site.path failed)
             spliced
         with
-        | Some site when not site.reported ->
-            (* The item's own span when the item is the document's, and the
-               document's require that reached this namespace otherwise: an
-               included file's offsets do not index the document. *)
-            let span =
-              if loop.place && String.equal site.span_file loop.file then
-                site.at
-              else !(loop.origin)
-            in
-            note loop
-              (Error.make ~file:(Some loop.document) ~kind:Error.Typing ~span
-                 (Printf.sprintf "the required file `%s' has errors"
-                    site.written))
-        | Some _ | None -> ())
+        | Some site -> report_spliced_chain loop spliced site
+        | None -> ())
+
+  (** The [require] items that read the failing file and the files that read
+      them, innermost first: the file that did not type, then the file whose
+      [require] read it, up to the document's own item. The chain is already
+      in {!spliced}: a require written in a file records that file as its
+      [span_file], and the require that read that file records the same file
+      as its [path]. A site the expansion already reported is not repeated,
+      but the chain above it still is, because those files did not type
+      either. *)
+  and report_spliced_chain loop (spliced : spliced list) (site : spliced) =
+    if not site.reported then
+      note loop
+        (Error.make ~file:(Some loop.document) ~kind:Error.Typing
+           ~span:(span_of_site loop site)
+           (Printf.sprintf "the required file `%s' has errors" site.written));
+    if not (String.equal site.span_file loop.file) then
+      match
+        List.find_opt
+          (fun (parent : spliced) -> String.equal parent.path site.span_file)
+          spliced
+      with
+      | Some parent -> report_spliced_chain loop spliced parent
+      | None -> ()
+
+  (** The span a spliced failure is placed at, which says which item it
+      attaches to. A require item that belongs to the document is reported at
+      its own span, [spliced.at]. One written in an included file is reported
+      at the span of the document's item being typed, [loop.origin] — the
+      item whose expansion reached the file — because the included file's
+      offsets do not index the document. The answer is cut to the document's
+      bytes either way. *)
+  and span_of_site loop (site : spliced) =
+    within ~length:loop.length
+      (if loop.place && String.equal site.span_file loop.file then site.at
+       else !(loop.origin))
 
   (** A [require] inside a namespace cannot go through {!type_require}: the
       library types a namespace's items itself ([Pretyping.tt_item]) and its
@@ -583,10 +624,14 @@ module Make (A : Arch_full.Arch) = struct
     (List.concat_map fst expanded, List.concat_map snd expanded)
 
   (** One required file of a namespace, read through the lookup and expanded
-      into the items that take the place of the [require] item. *)
+      into the items that take the place of the [require] item. A file that
+      was read is also answered with the record that lets a failure inside
+      its items be reported on this item; a file that could not be read has
+      no items to fail, and nothing is known about the names it would have
+      declared. *)
   and expand_required loop ~(chain : string list) ~(file : string)
       ~(prefix : string) ~(from : string option) ~(at : Jide_lang.Span.t)
-      (written : string) : Syntax.pitem Location.located list =
+      (written : string) : Syntax.pitem Location.located list * spliced option =
     let path =
       normalise_path
         (include_path ~idirs:loop.idirs ~base:(Filename.dirname file) ~from
@@ -606,21 +651,22 @@ module Make (A : Arch_full.Arch) = struct
     if List.mem path chain then (
       report (Printf.sprintf "the required file `%s' requires itself" written);
       forget_names ();
-      [])
+      ([], None))
     else if List.length chain > max_include_depth then (
       report
         (Printf.sprintf "the required file `%s' is nested too deeply" written);
       forget_names ();
-      [])
+      ([], None))
     else
       match loop.resolve path with
       | None ->
           report (Printf.sprintf "cannot read the required file `%s'" written);
           forget_names ();
-          []
+          ([], None)
       | Some text ->
           let parsed = Parse.parse ~name:path text in
-          if Parse.failed parsed then (
+          let failed = Parse.failed parsed in
+          if failed then (
             (* The items below are spliced, so the names the file does
                declare are typed with the namespace's own items. The names
                recovery dropped are not, and a reference to one is this
@@ -647,8 +693,12 @@ module Make (A : Arch_full.Arch) = struct
                 | None -> ())
               (Parse.dropped parsed);
             report (Printf.sprintf "the required file `%s' has errors" written));
-          expand_namespace loop ~chain:(path :: chain) ~file:path ~prefix
-            (Parse.items parsed)
+          let items, spliced =
+            expand_namespace loop ~chain:(path :: chain) ~file:path ~prefix
+              (Parse.items parsed)
+          in
+          ( items,
+            Some { written; path; at; span_file = file; reported = failed } )
 
   (** [type_require loop ~chain names] types the files one [require] item
       names, in the environment the item stream has reached, by the same

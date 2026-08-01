@@ -612,6 +612,120 @@ let test_require_inside_namespace_has_errors () =
   check "namespace errors: no fabricated unknown function"
     (not (mentions result "unknown function"))
 
+(* A namespaced include that was read and does not type. The error's offsets
+   index the required file, not the document, so it cannot be placed; the
+   require item is what says the file has errors, exactly as it does for a
+   top-level require of the same file. The call to a name the broken file
+   declares is that failure seen again, not a fabricated unknown function. *)
+let test_require_inside_namespace_type_error () =
+  let file = "namespaced-typed-broken.jinc" in
+  let resolve path =
+    if Filename.basename path = file then
+      Some
+        "fn library(reg u32 a) -> reg u32 {\n\
+        \  reg u32 x;\n\
+        \  x = not_a_function(a);\n\
+        \  return x;\n\
+         }\n"
+    else None
+  in
+  let use =
+    "fn use(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = N::library(a);\n\
+    \  return x;\n\
+     }\n"
+  in
+  let namespaced =
+    "namespace N {\n\
+    \  require \"namespaced-typed-broken.jinc\"\n\n\
+    \  fn g(reg u32 a) -> reg u32 {\n\
+    \    return a;\n\
+    \  }\n\
+     }\n\n" ^ use
+  in
+  let result = check_with ~resolve namespaced in
+  check "namespace type error: one diagnostic"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 1);
+  check "namespace type error: it says the required file has errors"
+    (mentions result "has errors");
+  check "namespace type error: it names the file" (mentions result file);
+  check "namespace type error: the include's own message is not placed"
+    (not (mentions result "not_a_function"));
+  check "namespace type error: no fabricated unknown function"
+    (not (mentions result "unknown function"));
+  check "namespace type error: it is placed on the require item"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         diagnostic.span.Jide_lang.Span.start_byte > 0
+         && diagnostic.span.Jide_lang.Span.end_byte
+            > diagnostic.span.Jide_lang.Span.start_byte)
+       result.diagnostics);
+  (* The same file at top level is the same answer, which is the parity this
+     test exists to keep. *)
+  let top_level =
+    check_with ~resolve
+      (Printf.sprintf
+         "require %S\n\n\
+          fn use(reg u32 a) -> reg u32 {\n\
+         \  reg u32 x;\n\
+         \  x = library(a);\n\
+         \  return x;\n\
+          }\n"
+         file)
+  in
+  check "namespace type error: the top-level require agrees"
+    (List.length top_level.Jide_jasmin.Adapter.diagnostics = 1
+    && mentions top_level "has errors"
+    && mentions top_level file)
+
+(* The suppression a namespace require installs is for the fabricated
+   cascade: the unresolved names an unreadable file would have declared. It
+   must not reach an error of a file that was read, so a namespace with both
+   an unreadable require and a readable one that does not type reports both
+   failures, and the call to a name only the unreadable file could declare is
+   still suppressed. *)
+let test_require_inside_namespace_suppression_scope () =
+  let resolve path =
+    match Filename.basename path with
+    | "namespaced-scope-broken.jinc" ->
+        Some
+          "fn library(reg u32 a) -> reg u32 {\n\
+          \  reg u32 x;\n\
+          \  x = not_a_function(a);\n\
+          \  return x;\n\
+           }\n"
+    | _ -> None
+  in
+  let body =
+    "namespace N {\n\
+    \  require \"namespaced-scope-missing.jinc\"\n\
+    \  require \"namespaced-scope-broken.jinc\"\n\
+     }\n\n\
+     fn use(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = N::library(a);\n\
+    \  return x;\n\
+     }\n"
+  in
+  let result = check_with ~resolve body in
+  check "suppression scope: one diagnostic per require item"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 2);
+  check "suppression scope: the unreadable file is reported"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         contains diagnostic.message "cannot read"
+         && contains diagnostic.message "namespaced-scope-missing.jinc")
+       result.diagnostics);
+  check "suppression scope: the read file's failure is not hidden"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         contains diagnostic.message "has errors"
+         && contains diagnostic.message "namespaced-scope-broken.jinc")
+       result.diagnostics);
+  check "suppression scope: the fabricated cascade is not reported"
+    (not (mentions result "unknown function"))
+
 let test_arch_names () =
   check "arch names"
     (Jide_jasmin.Adapter.arch_names = [ "x86-64"; "arm-m4"; "armv8a"; "riscv" ]);
@@ -655,6 +769,8 @@ let () =
   test_require_inside_namespace ();
   test_require_inside_namespace_missing ();
   test_require_inside_namespace_has_errors ();
+  test_require_inside_namespace_type_error ();
+  test_require_inside_namespace_suppression_scope ();
   test_arch_names ();
   test_version ();
   test_recovery_not_yet ();
