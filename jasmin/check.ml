@@ -275,6 +275,27 @@ module Make (A : Arch_full.Arch) = struct
       The diagnostics are the document's own: an error attributed to another
       file is counted in [include_errors] instead of being placed. *)
 
+  type spliced = {
+    written : string;
+        (** The name the [require] item wrote, which is what a diagnostic
+            about the file calls it. *)
+    path : string;
+        (** The normalised path the lookup was asked for, which is the file
+            an error inside the spliced items names. *)
+    at : Jide_lang.Span.t;  (** The [require] item's span. *)
+    span_file : string;
+        (** The file {!at} indexes: the document itself for a require the
+            document wrote, an included file for one written in a file a
+            top-level require pulled in. *)
+    reported : bool;
+        (** True when the expansion already reported on this item, so a
+            failure among the spliced items is not reported twice. *)
+  }
+  (** A [require] inside a namespace whose file was read and spliced where
+      the item stood. A namespace is typed as one item, so the first error
+      inside it ends the item; this is what lets the loop say which of the
+      namespace's files the error came from. *)
+
   (** [type_items ~file ~items ~idirs] types the items of one file one by one
       and returns the diagnostics, plus the environment the loop leaves
       behind when it started at all.
@@ -408,11 +429,11 @@ module Make (A : Arch_full.Arch) = struct
               type_require loop ~chain
                 ~from:(Option.map Location.unloc from)
                 names
-          | Syntax.PNamespace (name, inner) ->
+          | Syntax.PNamespace (name, inner) -> (
               (* The library types a namespace's items itself, and its own
                  [tt_file] reads the disk. The namespace cannot be entered
                  here, so its requires are routed before it is typed. *)
-              let rewritten =
+              let rewritten, spliced =
                 expand_namespace loop ~chain ~file:loop.file
                   ~prefix:(Location.unloc name) inner
               in
@@ -420,11 +441,21 @@ module Make (A : Arch_full.Arch) = struct
                 Location.mk_loc (Location.loc item)
                   (Syntax.PNamespace (name, rewritten))
               in
-              type_ordinary loop ~in_recovered_item snapshot item
-          | _ -> type_ordinary loop ~in_recovered_item snapshot item))
+              match type_ordinary loop ~in_recovered_item snapshot item with
+              | None -> ()
+              | Some error ->
+                  (* The namespace failed, and the failure names a file one
+                     of its requires read: that file is the one that did not
+                     type, and the item that asked for it has to say so. *)
+                  report_spliced_failure loop spliced error)
+          | _ -> ignore (type_ordinary loop ~in_recovered_item snapshot item)))
       items
 
-  (** One item typed with the environment kept and restored around it. *)
+  (** One item typed with the environment kept and restored around it. The
+      failure is returned as well as kept, because a caller that knows what
+      the item contained — a namespace whose requires were spliced into it —
+      can tell which file the error came from and report it on the item that
+      asked for that file. *)
   and type_ordinary loop ~(in_recovered_item : bool) snapshot item =
     match type_item snapshot item with
     | Ok next ->
@@ -446,9 +477,11 @@ module Make (A : Arch_full.Arch) = struct
               let error = Error.of_exn exn in
               if Error.belongs_to ~file:loop.file error then
                 keep loop ~in_recovered_item error);
-        loop.environment := next
+        loop.environment := next;
+        None
     | Error exn ->
-        keep loop ~in_recovered_item (Error.of_exn exn);
+        let error = Error.of_exn exn in
+        keep loop ~in_recovered_item error;
         (* The names the item declares are now absent from the environment; a
            later reference to one of them would be reported as unresolved,
            and it is this failure seen again, not a second one. A namespace
@@ -457,7 +490,46 @@ module Make (A : Arch_full.Arch) = struct
           (fun declaration ->
             loop.suppressions := Name declaration :: !(loop.suppressions))
           (declarations_of_item item);
-        loop.environment := snapshot
+        loop.environment := snapshot;
+        Some error
+
+  (** A namespace is typed as one item and the first error inside it ends the
+      item. When that error names a file a [require] inside the namespace
+      read, the file is the one that did not type: its offsets index that
+      file, not the document, so {!keep} counted it instead of placing it and
+      nothing else would ever say why the namespace is empty. The [require]
+      item says the file has errors — the same diagnostic a top-level require
+      of the same file gives — and the names under the namespace stay
+      suppressed, because a reference to one of them is this failure seen
+      again.
+
+      A suppression never hides this report: only an unresolved-name message
+      can be suppressed, and this one is not one. What the report must not do
+      is fire for an error that came from the document, or twice for one
+      item, which is what [spliced] and [reported] decide. *)
+  and report_spliced_failure loop (spliced : spliced list) (error : Error.t) =
+    match error.Error.file with
+    | None -> ()
+    | Some failed -> (
+        match
+          List.find_opt
+            (fun (site : spliced) -> String.equal site.path failed)
+            spliced
+        with
+        | Some site when not site.reported ->
+            (* The item's own span when the item is the document's, and the
+               document's require that reached this namespace otherwise: an
+               included file's offsets do not index the document. *)
+            let span =
+              if loop.place && String.equal site.span_file loop.file then
+                site.at
+              else !(loop.origin)
+            in
+            note loop
+              (Error.make ~file:(Some loop.document) ~kind:Error.Typing ~span
+                 (Printf.sprintf "the required file `%s' has errors"
+                    site.written))
+        | Some _ | None -> ())
 
   (** A [require] inside a namespace cannot go through {!type_require}: the
       library types a namespace's items itself ([Pretyping.tt_item]) and its
@@ -469,32 +541,46 @@ module Make (A : Arch_full.Arch) = struct
       with them once it has read them. A file that cannot be read is
       reported on the [require] item, and every name under that namespace is
       treated as one the include would have declared: a later reference to
-      one of them is this failure seen again, not a second error. *)
+      one of them is this failure seen again, not a second error.
+
+      A file that was read and does not type is reported on the [require]
+      item too, by {!report_spliced_failure}, which is why a file is answered
+      with the record of the item that read it. The suppression above is for
+      the fabricated cascade only; it is never what an error of a file that
+      was read depends on, because such an error is counted in
+      [include_errors] rather than filtered. *)
   and expand_namespace loop ~(chain : string list) ~(file : string)
       ~(prefix : string) (items : Syntax.pitem Location.located list) :
-      Syntax.pitem Location.located list =
-    List.concat_map
-      (fun (item : Syntax.pitem Location.located) ->
-        match Location.unloc item with
-        | Syntax.Prequire (from, names) ->
-            let from = Option.map Location.unloc from in
-            List.concat_map
-              (fun (name : string Location.located) ->
-                expand_required loop ~chain ~file ~prefix ~from
-                  ~at:(span_of_item item) (Location.unloc name))
-              names
-        | Syntax.PNamespace (name, inner) ->
-            let rewritten =
-              expand_namespace loop ~chain ~file
-                ~prefix:(qualified prefix (Location.unloc name))
-                inner
-            in
-            [
-              Location.mk_loc (Location.loc item)
-                (Syntax.PNamespace (name, rewritten));
-            ]
-        | _ -> [ item ])
-      items
+      Syntax.pitem Location.located list * spliced list =
+    let expanded =
+      List.map
+        (fun (item : Syntax.pitem Location.located) ->
+          match Location.unloc item with
+          | Syntax.Prequire (from, names) ->
+              let from = Option.map Location.unloc from in
+              let expanded =
+                List.map
+                  (fun (name : string Location.located) ->
+                    expand_required loop ~chain ~file ~prefix ~from
+                      ~at:(span_of_item item) (Location.unloc name))
+                  names
+              in
+              (List.concat_map fst expanded, List.filter_map snd expanded)
+          | Syntax.PNamespace (name, inner) ->
+              let rewritten, spliced =
+                expand_namespace loop ~chain ~file
+                  ~prefix:(qualified prefix (Location.unloc name))
+                  inner
+              in
+              ( [
+                  Location.mk_loc (Location.loc item)
+                    (Syntax.PNamespace (name, rewritten));
+                ],
+                spliced )
+          | _ -> ([ item ], []))
+        items
+    in
+    (List.concat_map fst expanded, List.concat_map snd expanded)
 
   (** One required file of a namespace, read through the lookup and expanded
       into the items that take the place of the [require] item. *)

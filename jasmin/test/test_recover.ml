@@ -279,10 +279,12 @@ let test_first_error_is_the_compilers () =
           check (label ^ ": same message") (expected.message = actual.message);
           check (label ^ ": same code")
             (expected.code = actual.code && expected.code = Some "parse");
-          check (label ^ ": one diagnostic per dropped item, and the first")
+          check
+            (label ^ ": one diagnostic per dropped item, and the first")
             (List.length (Jide_jasmin.Parse.diagnostics parsed)
             = 1 + List.length (Jide_jasmin.Parse.dropped parsed));
-          check (label ^ ": every later diagnostic is a dropped stub")
+          check
+            (label ^ ": every later diagnostic is a dropped stub")
             (match Jide_jasmin.Parse.diagnostics parsed with
             | [] -> false
             | _ :: rest ->
@@ -341,6 +343,45 @@ let test_every_dropped_item_is_reported () =
           (fun (diagnostic : Jide_lang.Diagnostic.t) name ->
             contains diagnostic.message ("`" ^ name ^ "'"))
           rest [ "broken1"; "broken2" ]
+    | [] -> false)
+
+(* The same broken item written twice. The two holes are distinct items even
+   though they read the same, so each has its own stub at its own bytes: one
+   stub for two holes would leave the second item in neither the tree nor
+   the diagnostics. *)
+let test_same_broken_item_twice () =
+  let twice =
+    "fn bad(reg u32 a -> reg u32 {\n\
+    \  return a;\n\
+     }\n\
+     fn bad(reg u32 a -> reg u32 {\n\
+    \  return a;\n\
+     }\n"
+  in
+  let parsed = parse twice in
+  check "twice: each hole has its own stub"
+    (List.length (Jide_jasmin.Parse.dropped parsed) = 2);
+  check "twice: each names the function it stands for"
+    (dropped_names parsed = [ "bad"; "bad" ]);
+  check "twice: the stubs are in source order and do not overlap"
+    (match Jide_jasmin.Parse.dropped parsed with
+    | [
+     Jide_jasmin.Recover.Dropped { span = first; _ };
+     Jide_jasmin.Recover.Dropped { span = second; _ };
+    ] ->
+        first.Jide_lang.Span.start_byte < second.Jide_lang.Span.start_byte
+        && first.Jide_lang.Span.end_byte <= second.Jide_lang.Span.start_byte
+    | _ -> false);
+  check "twice: the compiler's error and one marker per hole"
+    (List.length (Jide_jasmin.Parse.diagnostics parsed) = 3);
+  check "twice: both markers are stub diagnostics"
+    (match Jide_jasmin.Parse.diagnostics parsed with
+    | _ :: rest ->
+        List.length rest = 2
+        && List.for_all
+             (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+               contains diagnostic.message "could not be parsed")
+             rest
     | [] -> false)
 
 let test_later_items_survive () =
@@ -525,7 +566,38 @@ let test_size_policy () =
     (match Jide_jasmin.Parse.diagnostics parsed with
     | [ diagnostic ] ->
         contains diagnostic.Jide_lang.Diagnostic.message "larger"
+    | _ -> false);
+  check "size: the message does not blame the tokens"
+    (match Jide_jasmin.Parse.diagnostics parsed with
+    | [ diagnostic ] ->
+        not (contains diagnostic.Jide_lang.Diagnostic.message "tokens")
     | _ -> false)
+
+(* The token bound admits exactly the number of tokens it names and refuses
+   the next one. A buffer that fills the byte ceiling exactly is refused for
+   its token count, and the message must say that rather than claim a file
+   of exactly the ceiling is larger than it. *)
+let test_token_cap_boundary () =
+  let at_cap = parse (String.make Jide_jasmin.Scan.max_tokens '}') in
+  check "tokens: the bound admits exactly its own count"
+    (not (reports at_cap "size"));
+  let over = parse (String.make (Jide_jasmin.Scan.max_tokens + 1) '}') in
+  check "tokens: one over the bound is refused" (reports over "size");
+  let refusal =
+    List.filter
+      (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+        diagnostic.code = Some "size")
+      (Jide_jasmin.Parse.diagnostics over)
+  in
+  check "tokens: the refusal is one diagnostic" (List.length refusal = 1);
+  match refusal with
+  | [ diagnostic ] ->
+      check "tokens: the message names the token ceiling"
+        (contains diagnostic.Jide_lang.Diagnostic.message
+           (string_of_int Jide_jasmin.Scan.max_tokens));
+      check "tokens: the message does not blame the size"
+        (not (contains diagnostic.Jide_lang.Diagnostic.message "bytes"))
+  | _ -> ()
 
 (* A buffer that is under the byte ceiling but is one token per byte is
    refused too: the number of tokens, not the number of bytes, is what the
@@ -748,7 +820,8 @@ let test_stub_names_the_item () =
 let test_nameless_stub () =
   let text = "type ;\n\nfn ok(reg u32 a) -> reg u32 {\n  return a;\n}\n" in
   let parsed = parse text in
-  check "nameless: the whole item after it survives" (item_names parsed = [ "ok" ]);
+  check "nameless: the whole item after it survives"
+    (item_names parsed = [ "ok" ]);
   check "nameless: one stub, of the item's own kind, with no name"
     (match Jide_jasmin.Parse.dropped parsed with
     | [ Jide_jasmin.Recover.Dropped { kind; name; _ } ] ->
@@ -922,6 +995,7 @@ let () =
   test_valid ();
   test_first_error_is_the_compilers ();
   test_every_dropped_item_is_reported ();
+  test_same_broken_item_twice ();
   test_later_items_survive ();
   test_missing_rbrace ();
   test_missing_semicolon ();
@@ -933,6 +1007,7 @@ let () =
   test_guard_statement ();
   test_size_policy ();
   test_token_cap ();
+  test_token_cap_boundary ();
   test_byte_order_mark ();
   test_empty_and_comment ();
   test_recovery_bound ();

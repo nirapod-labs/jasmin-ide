@@ -651,6 +651,10 @@ let () =
   test_required_file_from_a_lookup ();
   test_required_file_missing ();
   test_required_file_cycle ();
+  test_dot_prefixed_cycle ();
+  test_require_inside_namespace ();
+  test_require_inside_namespace_missing ();
+  test_require_inside_namespace_has_errors ();
   test_arch_names ();
   test_version ();
   test_recovery_not_yet ();

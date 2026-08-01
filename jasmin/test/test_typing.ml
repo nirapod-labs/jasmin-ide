@@ -197,15 +197,18 @@ let test_recovered_region_suppresses () =
   let parsed = Jide_jasmin.Parse.parse ~name:file with_type_error in
   check "region: the fixture parses" (not (Jide_jasmin.Parse.failed parsed));
   let plain, _ =
-    Loop.type_items ~resolve:(fun _ -> None) ~budget:200 ~dropped:[]
-      ~recovered:[] ~file ~items:parsed.items ~idirs:[]
+    Loop.type_items
+      ~resolve:(fun _ -> None)
+      ~budget:200 ~dropped:[] ~recovered:[] ~file ~items:parsed.items ~idirs:[]
   in
   check "region: the error is reported without a recovered region"
     (List.length plain.Jide_jasmin.Check.diagnostics = 1);
   match plain.diagnostics with
   | [ diagnostic ] ->
       let suppressed, _ =
-        Loop.type_items ~resolve:(fun _ -> None) ~budget:200 ~dropped:[]
+        Loop.type_items
+          ~resolve:(fun _ -> None)
+          ~budget:200 ~dropped:[]
           ~recovered:[ diagnostic.Jide_lang.Diagnostic.span ]
           ~file ~items:parsed.items ~idirs:[]
       in
@@ -356,14 +359,18 @@ let test_diagnostic_bound_with_parse_errors () =
     (List.length result.diagnostics = 200);
   check "bound with holes: the compiler's error and the stub are kept"
     (count "parse" = 2);
-  check "bound with holes: the typing budget is what is left" (count "typing" = 198)
+  check "bound with holes: the typing budget is what is left"
+    (count "typing" = 198)
 
 (* An exec clause is typed by the same call: a name that is not declared is a
    typing diagnostic, and one that is declared is silent. *)
 let test_exec_clause () =
   let missing =
     check_text
-      "exec no_such_fn (0 : 16)\n\nfn f(reg u32 a) -> reg u32 {\n  return a;\n}\n"
+      "exec no_such_fn (0 : 16)\n\n\
+       fn f(reg u32 a) -> reg u32 {\n\
+      \  return a;\n\
+       }\n"
   in
   check "exec: the missing name is reported"
     (mentions missing "unknown function");
@@ -408,8 +415,12 @@ let test_annotation_error_mapping () =
 let test_nameless_stub_suppresses_nothing () =
   let result =
     check_text
-      "type ;\n\nfn use(reg u32 a) -> reg u32 {\n  reg u32 x;\n  x = \
-       nosuch(a);\n  return x;\n}\n"
+      "type ;\n\n\
+       fn use(reg u32 a) -> reg u32 {\n\
+      \  reg u32 x;\n\
+      \  x = nosuch(a);\n\
+      \  return x;\n\
+       }\n"
   in
   check "nameless: the unknown name is reported"
     (mentions result "unknown function");
