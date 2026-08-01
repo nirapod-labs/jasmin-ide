@@ -35,8 +35,16 @@ open Jasmin
     work a scan does is linear in the tokens it builds, and a buffer at this
     ceiling is well under a tenth of a second even when every byte is a
     token. Every Jasmin file in the corpus and in the reference libraries is
-    two orders of magnitude below it. *)
-let max_bytes = 2 * 1024 * 1024
+    two orders of magnitude below it.
+
+    This must not be smaller than the ceiling the engine applies before it
+    asks for a parse. The engine admits a document of up to its own
+    [max_bytes] and promises it an analysis, so a buffer the engine let
+    through and this module refused would turn a promise into a diagnostic
+    about a size the caller never imposed. The engine depends on this
+    library, not the other way round, so the number is written here; the
+    engine's test suite pins the two ceilings against each other. *)
+let max_bytes = 8 * 1024 * 1024
 
 (** The most tokens one scan will build. A dense buffer reaches this well
     before the byte ceiling, and this, not the byte count, is what bounds

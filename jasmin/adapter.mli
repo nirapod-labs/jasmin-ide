@@ -13,6 +13,17 @@ val call_conv_of_string : string -> call_conv option
 val jasmin_version : string
 (** The Jasmin version the server was built against. *)
 
+val max_bytes : int
+(** The largest document this adapter will parse. A buffer above it is
+    refused with one [size] diagnostic instead of a parse.
+
+    A caller that applies its own admission limit must keep it at or below
+    this one: the adapter answers [parse] with empty items and a refusal for
+    anything larger, so a document a caller admitted above this ceiling
+    would be reported as too large after the caller had promised it an
+    analysis. The engine's [Engine.max_bytes] is that caller's limit and the
+    engine's tests hold the two together. *)
+
 type parse_result = Parse.t
 
 val parse : name:string -> string -> parse_result

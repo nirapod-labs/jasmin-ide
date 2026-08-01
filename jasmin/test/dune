@@ -7,3 +7,18 @@
  (name test_facts)
  (modules test_facts)
  (libraries jide_jasmin jide_lang jasmin))
+
+(test
+ (name test_recover)
+ (modules test_recover token_names)
+ (libraries jide_jasmin jide_lang jasmin menhirLib))
+
+(test
+ (name test_typing)
+ (modules test_typing)
+ (libraries jide_jasmin jide_lang jasmin))
+
+(test
+ (name test_warnings)
+ (modules test_warnings)
+ (libraries jide_jasmin jide_lang))

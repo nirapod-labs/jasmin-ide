@@ -56,4 +56,34 @@ let parse ~(name : string) (text : string) : t =
             Error.to_diagnostic first :: recovered.Recover.diagnostics;
         }
 
-let failed t = t.diagnostics <> []
+let items (parsed : t) = parsed.Recover.items
+let dropped (parsed : t) = parsed.Recover.dropped
+let recovered (parsed : t) = parsed.Recover.recovered
+let diagnostics (parsed : t) = parsed.Recover.diagnostics
+let counters (parsed : t) = parsed.Recover.counters
+let failed (parsed : t) = parsed.Recover.diagnostics <> []
+
+(** One entry of the item stream an outline or a symbol list walks: an item
+    the parse kept, or the stub of one it dropped, in source order. *)
+type item = Kept of Syntax.pitem Location.located | Stub of Recover.dropped
+
+(** [items_with_stubs parsed] is [items] with every [Dropped] stub in the
+    place its bytes belong, so a consumer that lists items still shows a
+    broken one. The stubs are a separate list only because [Syntax.pitem]
+    belongs to the compiler and adding a constructor to it would stop typing
+    from consuming the tree unchanged. *)
+let items_with_stubs (parsed : t) : item list =
+  let start_of_item (item : Syntax.pitem Location.located) =
+    item.Location.pl_loc.Location.loc_bchar
+  in
+  let kept =
+    List.map (fun item -> (start_of_item item, Kept item)) parsed.Recover.items
+  in
+  let stubs =
+    List.map
+      (fun (Recover.Dropped { span; _ } as stub) ->
+        (span.Jide_lang.Span.start_byte, Stub stub))
+      parsed.Recover.dropped
+  in
+  List.map snd
+    (List.stable_sort (fun (a, _) (b, _) -> compare a b) (kept @ stubs))
