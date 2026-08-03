@@ -1,0 +1,22 @@
+# A digest, not a commit. opam 2.6 registers the default repository as the URL
+# https://opam.ocaml.org and keeps it as one tarball, ~/.opam/repo/default.tar.gz;
+# that archive carries a repository format version and no commit, and
+# `opam repository list --all` prints no revision for it. The SHA-256 below
+# identifies the exact archive the lock file was solved against. docs/deps.md
+# says why the file holds a digest and what the digest is good for.
+#
+# archive:  the file opam writes when it fetches or updates the repository.
+# url:      the registration the archive comes from.
+# format:   the repository format version inside the archive, not a revision.
+# sha256:   digest of the archive's bytes. `opam update` replaces the archive,
+#           and with it this digest, so the line records the snapshot the
+#           project was solved against; no build step enforces it.
+# bytes:    size of the archive, so a truncated copy is visible.
+# recorded: the day the digest was taken.
+
+archive  = default.tar.gz
+url      = https://opam.ocaml.org
+format   = 0.9.0
+sha256   = 7cd7c217b096ed6907b0ad02f31ec5fe28b69c8ee9be9f8c1a48535a855b948b
+bytes    = 4080215
+recorded = 2026-11-09

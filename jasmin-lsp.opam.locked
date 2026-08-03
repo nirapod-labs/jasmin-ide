@@ -1,0 +1,40 @@
+opam-version: "2.0"
+name: "jasmin-lsp"
+version: "dev"
+synopsis: "Language server for the Jasmin language"
+description:
+  "Editor support for the Jasmin language in VS Code and Zed: diagnostics, navigation, hover, completion, signature help and rename, from the Jasmin compiler's own parser and type checker."
+depends: [
+  "base-bigarray" {= "base"}
+  "base-threads" {= "base"}
+  "base-unix" {= "base"}
+  "cmdliner" {= "1.3.0"}
+  "dune" {= "3.24.2"}
+  "jsonrpc" {= "1.27.0"}
+  "lsp" {= "1.27.0"}
+  "ocaml" {= "4.14.4"}
+  "ocaml-base-compiler" {= "4.14.4"}
+  "ocaml-config" {= "2"}
+  "ocaml-options-vanilla" {= "1"}
+  "ocamlbuild" {= "0.16.1"}
+  "ocamlfind" {= "1.9.8"}
+  "ppx_yojson_conv_lib" {= "v0.16.0"}
+  "topkg" {= "1.1.1"}
+  "uutf" {= "1.0.4"}
+  "yojson" {= "3.0.0"}
+]
+build: [
+  ["dune" "subst"] {dev}
+  [
+    "dune"
+    "build"
+    "-p"
+    name
+    "-j"
+    jobs
+    "@install"
+    "@runtest" {with-test}
+    "@doc" {with-doc}
+  ]
+]
+x-maintenance-intent: ["(latest)"]
