@@ -1,0 +1,17 @@
+name = "Jasmin"
+grammar = "jasmin"
+path_suffixes = ["jazz", "jinc"]
+
+line_comments = ["// "]
+block_comment = ["/* ", " */"]
+
+autoclose_before = ";:.,=}])>"
+
+brackets = [
+  { start = "{", end = "}", close = true, newline = true, not_in = ["string", "comment"] },
+  { start = "[", end = "]", close = true, newline = true, not_in = ["string", "comment"] },
+  { start = "(", end = ")", close = true, newline = false, not_in = ["string", "comment"] },
+  { start = "\"", end = "\"", close = true, newline = false, not_in = ["string", "comment"] },
+]
+
+scope_opt_in_language_servers = ["jasmin-lsp"]

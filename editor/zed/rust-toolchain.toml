@@ -1,0 +1,5 @@
+[toolchain]
+# A stable compiler, because Zed loads extensions built against stable APIs,
+# and the WebAssembly target the extension host runs.
+channel = "stable"
+targets = ["wasm32-wasip2"]
