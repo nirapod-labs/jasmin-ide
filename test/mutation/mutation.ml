@@ -194,3 +194,164 @@ let baseline ~arch ~call_conv ~budget path display =
         | Isolate.Crashed { detail; _ } ->
             Skipped ("the unmutated file crashes: " ^ detail))
 
+let run options =
+  let arch =
+    match Jide_jasmin.Adapter.arch_of_string options.arch_name with
+    | Some arch -> arch
+    | None ->
+        prerr_endline
+          (Printf.sprintf "mutation: unknown architecture: %s (known: %s)"
+             options.arch_name
+             (String.concat ", " Jide_jasmin.Adapter.arch_names));
+        exit 2
+  in
+  let call_conv =
+    match Jide_jasmin.Adapter.call_conv_of_string options.call_conv_name with
+    | Some call_conv -> call_conv
+    | None ->
+        prerr_endline
+          (Printf.sprintf "mutation: unknown calling convention: %s"
+             options.call_conv_name);
+        exit 2
+  in
+  let found = collect options.corpora in
+  if found = [] then (
+    prerr_endline
+      (Printf.sprintf "mutation: no .jazz file under %s"
+         (String.concat ", " options.corpora));
+    exit 2);
+  let started = Unix.gettimeofday () in
+  let kept = ref [] and skipped = ref [] in
+  let seen = ref 0 in
+  let total = List.length found in
+  List.iter
+    (fun (root, path, relative) ->
+      incr seen;
+      let display =
+        if List.length options.corpora = 1 then relative
+        else Filename.basename root ^ "/" ^ relative
+      in
+      (match baseline ~arch ~call_conv ~budget:options.budget path display with
+      | Kept base -> kept := base :: !kept
+      | Skipped reason -> skipped := (display, reason) :: !skipped);
+      if !seen mod 50 = 0 then
+        Printf.eprintf "  base check %d/%d: %d clean\r%!" !seen total
+          (List.length !kept))
+    found;
+  Printf.eprintf "  base check %d/%d: %d clean\n%!" total total
+    (List.length !kept);
+  let kept = List.rev !kept in
+  let skipped = List.rev !skipped in
+  let sampled_list, kept_count = Mutant.sample ~maximum:options.sample kept in
+  Printf.eprintf "  sampled %d of %d clean files\n%!" (List.length sampled_list)
+    kept_count;
+  let cases = ref [] in
+  let sites = ref [] in
+  List.iteri
+    (fun index base ->
+      List.iter
+        (fun family ->
+          let candidates =
+            Mutant.sites ~every:options.truncate_every base.tokens family
+          in
+          let chosen, available =
+            Mutant.sample ~maximum:options.sites candidates
+          in
+          sites := (family, List.length chosen, available) :: !sites;
+          List.iter
+            (fun site ->
+              let mutation =
+                Mutant.make ~source:base.text base.tokens family site
+              in
+              let outcome =
+                Isolate.run ~budget:options.budget (fun () ->
+                    Probe.run ~arch ~call_conv ~file:base.path
+                      mutation.Mutant.text)
+              in
+              let comparison =
+                match outcome with
+                | Isolate.Returned { result; _ } ->
+                    Outline.compare ~original:base.outline
+                      ~mutant:result.Probe.outline
+                      ~edit_start:mutation.Mutant.edit_start
+                      ~edit_end:mutation.Mutant.edit_end
+                      ~map_back:mutation.Mutant.map_back
+                | _ ->
+                    {
+                      Outline.away =
+                        Outline.away_count base.outline
+                          ~edit_start:mutation.Mutant.edit_start
+                          ~edit_end:mutation.Mutant.edit_end;
+                      identity_ok = false;
+                      span_ok = false;
+                      detail = "the check did not return an outline";
+                    }
+              in
+              let enclosing =
+                if Mutant.is_single_token family then
+                  match
+                    Outline.enclosing base.outline
+                      ~start_byte:mutation.Mutant.edit_start
+                      ~end_byte:mutation.Mutant.edit_end
+                  with
+                  | None -> None
+                  | Some item ->
+                      let present =
+                        match outcome with
+                        | Isolate.Returned { result; _ } ->
+                            Outline.is_present result.Probe.outline item
+                        | _ -> false
+                      in
+                      Some (item.Outline.kind ^ " " ^ item.Outline.name, present)
+                else None
+              in
+              cases :=
+                {
+                  Report.path = base.display;
+                  mutation;
+                  outcome;
+                  comparison;
+                  enclosing;
+                }
+                :: !cases)
+            chosen)
+        Mutant.families;
+      Printf.eprintf "  file %d/%d %s: %d cases\r%!" (index + 1)
+        (List.length sampled_list) base.display (List.length !cases))
+    sampled_list;
+  Printf.eprintf "\n%!";
+  let cases = List.rev !cases in
+  let ran = Unix.gettimeofday () -. started in
+  let site_totals =
+    List.map
+      (fun family ->
+        let of_family =
+          List.filter (fun (name, _, _) -> name = family) !sites
+        in
+        ( family,
+          List.fold_left (fun total (_, used, _) -> total + used) 0 of_family,
+          List.fold_left
+            (fun total (_, _, available) -> total + available)
+            0 of_family ))
+      Mutant.families
+  in
+  Report.header options.corpora options.arch_name options.call_conv_name
+    options.budget;
+  Report.sample
+    {
+      Report.found = List.length found;
+      clean = kept_count;
+      sampled = List.length sampled_list;
+      cases;
+    };
+  Report.sites site_totals;
+  Report.distribution cases;
+  Report.truncation cases;
+  let quiet, unchanged, two = Report.criteria cases in
+  Report.families cases;
+  Report.causes cases;
+  Report.failures ~limit:(if options.list_all then 0 else 25) cases;
+  Report.files ~skipped (List.map (fun base -> base.display) sampled_list);
+  Report.summary ~ran cases;
+  if quiet && unchanged && two then 0 else 1
+
