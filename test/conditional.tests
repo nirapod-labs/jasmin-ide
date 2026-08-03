@@ -1,0 +1,34 @@
+# The cram tests that are only sometimes enabled, and the environment
+# variable that enables each one: the `.t` file, relative to the repository
+# root, then the variable the stanza's `(enabled_if ...)` reads.
+#
+# `scripts/runtest.sh` fails the test step when a `.t` file in this tree has
+# no `cram.out` record after a green run, which is how the saved output of a
+# run shows that the cram tests executed instead of being served from a warm
+# `_build`. A test whose stanza is switched off writes no record either, so
+# a test that is only sometimes enabled cannot be told from a test that did
+# not run. It says which it is here: the runner then demands the record when
+# the variable is on, and reports the test as not executed, with the reason,
+# when it is off. A `.t` file that is not listed here is always demanded, so
+# this file can never excuse one.
+#
+# The condition is dune's own. A stanza written
+#
+#   (enabled_if (<> %{env:VAR=none} "none"))
+#
+# compares `%{env:VAR=none}` with the word `none`, and dune substitutes that
+# word when VAR is unset. The condition is therefore off when VAR is unset or
+# holds the word `none`, and on otherwise — including when it holds the empty
+# string, which dune substitutes as itself. The runner reads the variable the
+# same way, so the two rules cannot disagree.
+#
+# Adding a line here enables nothing: the stanza decides that. The line says
+# what to expect from the run, and the runner checks it against the `.t`
+# file, against the tree, and against an `(enabled_if ...)` naming that
+# variable in the `dune` file beside the test.
+
+test/context/entry.t JASMIN_CONTEXT_CORPUS
+test/context/jinc-alone.t JASMIN_CONTEXT_CORPUS
+test/context/jinc-behind-entry.t JASMIN_CONTEXT_CORPUS
+test/context/jinc-in-context.t JASMIN_CONTEXT_CORPUS
+test/context/required-file.t JASMIN_CONTEXT_CORPUS
