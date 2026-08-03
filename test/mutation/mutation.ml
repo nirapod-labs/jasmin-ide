@@ -355,3 +355,22 @@ let run options =
   Report.summary ~ran cases;
   if quiet && unchanged && two then 0 else 1
 
+let main () =
+  let arguments = Array.to_list Sys.argv |> List.tl in
+  match parse_arguments arguments with
+  | Invalid message ->
+      prerr_endline ("mutation: " ^ message);
+      prerr_endline usage;
+      2
+  | Help ->
+      print_endline usage;
+      0
+  | Run options ->
+      if options.selftest then if Selftest.run () then 0 else 1
+      else if options.corpora = [] then (
+        prerr_endline "mutation: --corpus is required";
+        prerr_endline usage;
+        2)
+      else run options
+
+let () = exit (main ())
