@@ -318,3 +318,61 @@ let sites rows =
     rows;
   Printf.printf "\n"
 
+let starts_with ~prefix text =
+  String.length text >= String.length prefix
+  && String.sub text 0 (String.length prefix) = prefix
+
+(** The reason a file was left out, with its number collapsed, so that a
+    hundred files with one error each print as one line. *)
+let reason_kind reason =
+  if starts_with ~prefix:"cannot be read" reason then "cannot be read"
+  else if reason = "fewer than three tokens" then "fewer than three tokens"
+  else if reason = "fewer than two items to compare" then
+    "fewer than two items to compare"
+  else if starts_with ~prefix:"the unmutated file has" reason then
+    "the unmutated file has errors"
+  else if starts_with ~prefix:"the unmutated file raises" reason then
+    "the unmutated file raises an exception"
+  else if starts_with ~prefix:"the unmutated file hangs" reason then
+    "the unmutated file hangs"
+  else if starts_with ~prefix:"the unmutated file crashes" reason then
+    "the unmutated file crashes"
+  else "other"
+
+let files ?(skipped = []) paths =
+  Printf.printf "## files sampled\n\n";
+  List.iter (fun path -> Printf.printf "  %s\n" path) paths;
+  if skipped <> [] then (
+    Printf.printf "\n## files not sampled\n\n";
+    let kinds =
+      List.sort_uniq compare
+        (List.map (fun (_, reason) -> reason_kind reason) skipped)
+    in
+    List.iter
+      (fun kind ->
+        let count =
+          List.length
+            (List.filter (fun (_, reason) -> reason_kind reason = kind) skipped)
+        in
+        Printf.printf "  %-40s %5d files\n" kind count)
+      kinds;
+    Printf.printf "\n  first 20:\n";
+    List.iteri
+      (fun index (path, reason) ->
+        if index < 20 then Printf.printf "    %s: %s\n" path reason)
+      skipped;
+    if List.length skipped > 20 then
+      Printf.printf "    ... and %d more\n" (List.length skipped - 20));
+  Printf.printf "\n"
+
+let total_errors cases =
+  List.fold_left
+    (fun total case ->
+      match errors case with Some count -> total + count | None -> total)
+    0 cases
+
+let summary ~ran cases =
+  Printf.printf "## summary\n\n";
+  Printf.printf "  %d mutations, %d errors in all, %.1f s of wall clock\n"
+    (List.length cases) (total_errors cases) ran;
+  Printf.printf "\n"
