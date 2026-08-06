@@ -153,3 +153,15 @@ let tokenize text =
   loop 0;
   List.rev !tokens
 
+let is_swap_candidate token = token.text = ";" || token.text = "}"
+
+(** A token's text on one line, short enough for a report line. *)
+let show token =
+  let maximum = 16 in
+  let text =
+    String.map
+      (function '\n' -> ' ' | '\r' -> ' ' | '\t' -> ' ' | c -> c)
+      token.text
+  in
+  if String.length text > maximum then String.sub text 0 maximum ^ "..."
+  else text

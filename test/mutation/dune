@@ -1,15 +1,13 @@
-(library
- (name jide_mutation)
- (wrapped false)
- (modules jide_mutation)
- (libraries jide_jasmin jide_lang jasmin unix))
+; The recovery mutation harness. It needs a corpus, which this repository
+; does not carry, so `dune runtest` runs only its own checks and the corpus
+; run is the `mutation` target of the Makefile.
 
 (executable
- (name mutation_main)
- (modules mutation_main)
- (libraries jide_mutation unix))
+ (name mutation)
+ (modules mutation mutant outline isolate probe report selftest token)
+ (libraries jide_jasmin jide_lang jasmin unix))
 
-(test
- (name test_mutation)
- (modules test_mutation)
- (libraries jide_mutation jide_jasmin unix))
+(rule
+ (alias runtest)
+ (action
+  (run %{exe:mutation.exe} --selftest)))
