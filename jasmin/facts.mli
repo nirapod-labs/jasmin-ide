@@ -37,10 +37,14 @@ type annotation = {
   a_span : Jide_lang.Span.t;
 }
 (** One annotation, for example [#[ct="public -> public"]]. [a_key] is the
-    annotation's name, ["ct"] in the example, and [a_value] the string it
-    carries; [a_value] is [None] for every other form of value. [a_span] is
-    the range of the value, or of the name when the annotation has no
-    value. *)
+    annotation's name, ["ct"] in the example, and [a_value] the value it
+    carries, written out: the string of a quoted value (["public -> public"]),
+    the name of an identifier ([bar] in [#[foo=bar]]), the digits of an
+    integer ([7] in [#[foo=7]]) or the width of a width attribute ([u32] in
+    [#[foo=u32]]). [a_value] is [None] when the annotation has no value, as
+    [#[inline]] has none, and when its value is a structured one,
+    [#[foo={...}]]. [a_span] is the range of the value, or of the name when
+    the annotation has no value. *)
 
 type var = {
   v_name : string;
@@ -57,6 +61,23 @@ type var = {
 type fun_sig = { fs_in : string list; fs_out : string list }
 (** A function's signature: the types of its arguments and of its results,
     printed as [v_ty] is. *)
+
+type use = {
+  u_span : Jide_lang.Span.t;
+  u_name : string;
+  u_item : Jide_lang.Span.t;
+  u_decl : Jide_lang.Span.t;
+  u_dfile : string;
+}
+(** One variable occurrence in a typed body, for example the [a] in
+    [b = a]. [u_span] is the range of the occurrence itself, in the checked
+    file, and [u_name] the name the compiler holds the variable by at it.
+    [u_item] is the range of the item the occurrence belongs to, that item's
+    {!i_span}. [u_decl] is the range of the declaration the compiler bound the
+    occurrence to, which is the {!v_dloc} of that variable, and [u_dfile] the
+    file the range indexes; together they are the declaration's identity. An
+    occurrence the compiler made up itself, which has no place in the source,
+    is not reported. *)
 
 type item_kind = Function | Param | Global
 
@@ -76,11 +97,14 @@ type item = {
     initialiser nor a use is not there: the compiler's typing discards it,
     and these facts are the compiler's answer. *)
 
-type t = { items : item list }
+type t = { items : item list; uses : use list }
 (** [items] are the items of one checked file, in source order, and they
-    all belong to that file. *)
+    all belong to that file. [uses] are the variable occurrences the items'
+    bodies hold, in source order by the byte an occurrence starts at; a
+    parameter and a global have no body and add none. *)
 
 val empty : t
 
 val merge : t -> t -> t
-(** [merge earlier later] holds both sets of items, in that order. *)
+(** [merge earlier later] holds both sets of items and both sets of uses, in
+    that order. *)

@@ -387,6 +387,243 @@ let test_kind_strings () =
   check "an inline value"
     (String.equal (kind Facts.Inline Facts.Direct) "inline")
 
+(* Every scalar form of value reaches the facts: a quoted string, which is the
+   form [ct] and [sct] take because the compiler reads a string expression as
+   a string, an identifier, an integer and a width. An annotation written
+   without a value has none, and its range is its name's. *)
+let with_annotation_values =
+  {|
+#[foo=bar]
+fn ident(reg u64 y) -> reg u64 { return y; }
+
+#[n=7]
+fn number(reg u64 y) -> reg u64 { return y; }
+
+#[ws=u32]
+fn width(reg u64 y) -> reg u64 { return y; }
+
+#[inline]
+fn bare(reg u64 y) -> reg u64 { return y; }
+|}
+
+let test_annotation_values () =
+  let facts = facts_of "annotation values" with_annotation_values in
+  let one name =
+    match
+      List.find_opt
+        (fun (item : Facts.item) -> String.equal item.Facts.i_name name)
+        facts.Facts.items
+    with
+    | Some { Facts.i_annot = [ annotation ]; _ } -> Some annotation
+    | Some { Facts.i_annot; _ } ->
+        check
+          (Printf.sprintf "annotation values: %s has one annotation, got %d"
+             name (List.length i_annot))
+          false;
+        None
+    | None ->
+        check ("annotation values: the program has an item named " ^ name) false;
+        None
+  in
+  let value name expected =
+    match one name with
+    | Some annotation ->
+        check
+          (Printf.sprintf "%s: %s is %s" name annotation.Facts.a_key
+             (match annotation.Facts.a_value with
+             | Some value -> Printf.sprintf "%S" value
+             | None -> "None"))
+          (annotation.Facts.a_value = Some expected)
+    | None -> ()
+  in
+  let span name expected =
+    match one name with
+    | Some annotation ->
+        same_span
+          (name ^ ": the annotation's range")
+          annotation.Facts.a_span expected
+    | None -> ()
+  in
+  value "ident" "bar";
+  span "ident" (span_in with_annotation_values "bar");
+  value "number" "7";
+  span "number" (span_in with_annotation_values "7");
+  value "width" "u32";
+  span "width" (span_in with_annotation_values "u32");
+  match one "bare" with
+  | Some annotation ->
+      check "bare: the annotation is inline"
+        (String.equal annotation.Facts.a_key "inline");
+      check "bare: an annotation without a value has none"
+        (annotation.Facts.a_value = None);
+      same_span "bare: its range is its name" annotation.Facts.a_span
+        (span_in with_annotation_values "#[inline]" ~offset:2 ~length:6)
+  | None -> ()
+
+(* Every variable occurrence of a typed body, against a program small enough
+   to count by hand: a [for] loop counts a variable up to another, a call
+   names a function and passes a variable to it, and [return] names one. *)
+let with_loop_and_call =
+  {|
+fn add(reg u64 a) -> reg u64 { return a; }
+
+fn caller(reg u64 n) -> reg u64 {
+  reg u64 i;
+  reg u64 s;
+  s = 0;
+  for i = 0 to n {
+    s = add(s);
+  }
+  return s;
+}
+|}
+
+(* The uses of one item, in the order the facts hold them. *)
+let uses_of_item (facts : Facts.t) (item : Facts.item) =
+  List.filter
+    (fun (use : Facts.use) ->
+      Jide_lang.Span.compare use.Facts.u_item item.Facts.i_span = 0)
+    facts.Facts.uses
+
+let use_summary (use : Facts.use) =
+  Printf.sprintf "%s at %d..%d" use.Facts.u_name use.Facts.u_span.start_byte
+    use.Facts.u_span.end_byte
+
+let summary_of uses = String.concat ", " (List.map use_summary uses)
+
+let test_uses () =
+  let facts = facts_of "uses" with_loop_and_call in
+  let expected =
+    [
+      (* return a; in add *)
+      ("a", span_in with_loop_and_call "return a;" ~offset:7 ~length:1);
+      (* s = 0; *)
+      ("s", span_in with_loop_and_call "s = 0;" ~offset:0 ~length:1);
+      (* for i = 0 to n { *)
+      ("i", span_in with_loop_and_call "for i = 0 to n {" ~offset:4 ~length:1);
+      ("n", span_in with_loop_and_call "for i = 0 to n {" ~offset:13 ~length:1);
+      (* s = add(s); *)
+      ("s", span_in with_loop_and_call "s = add(s);" ~offset:0 ~length:1);
+      ("s", span_in with_loop_and_call "s = add(s);" ~offset:8 ~length:1);
+      (* return s; *)
+      ("s", span_in with_loop_and_call "return s;" ~offset:7 ~length:1);
+    ]
+  in
+  let describe (name, span) =
+    Printf.sprintf "%s at %d..%d" name span.Jide_lang.Span.start_byte
+      span.Jide_lang.Span.end_byte
+  in
+  let actual =
+    List.map
+      (fun (use : Facts.use) -> (use.Facts.u_name, use.Facts.u_span))
+      facts.Facts.uses
+  in
+  check
+    (Printf.sprintf "uses: got [%s], wanted [%s]"
+       (String.concat ", " (List.map describe actual))
+       (String.concat ", " (List.map describe expected)))
+    (List.length actual = List.length expected
+    && List.for_all2
+         (fun (actual_name, actual_span) (expected_name, expected_span) ->
+           String.equal actual_name expected_name
+           && Jide_lang.Span.compare actual_span expected_span = 0)
+         actual expected);
+  with_item_in facts "add" (fun item ->
+      let uses = uses_of_item facts item in
+      check
+        (Printf.sprintf "add: one use, got [%s]" (summary_of uses))
+        (List.map (fun (use : Facts.use) -> use.Facts.u_name) uses = [ "a" ]);
+      match uses with
+      | [ use ] ->
+          check "add: the use names its own file"
+            (String.equal use.Facts.u_dfile file);
+          same_span "add: the use is bound to the parameter's own declaration"
+            use.Facts.u_decl
+            (span_in with_loop_and_call "reg u64 a)" ~offset:8 ~length:1)
+      | _ -> ());
+  with_item_in facts "caller" (fun item ->
+      let uses = uses_of_item facts item in
+      check
+        (Printf.sprintf "caller: six uses, got %d [%s]" (List.length uses)
+           (summary_of uses))
+        (List.length uses = 6);
+      check
+        (Printf.sprintf "caller: the uses are s, i, n, s, s, s, got [%s]"
+           (summary_of uses))
+        (List.map (fun (use : Facts.use) -> use.Facts.u_name) uses
+        = [ "s"; "i"; "n"; "s"; "s"; "s" ]);
+      (* The two variables inside the loop and the two the call names are
+         bound to their declarations, not to each other. *)
+      let decl_of name =
+        List.find_opt
+          (fun (variable : Facts.var) ->
+            String.equal variable.Facts.v_name name)
+          item.Facts.i_vars
+      in
+      List.iter
+        (fun (use : Facts.use) ->
+          match decl_of use.Facts.u_name with
+          | Some variable ->
+              check
+                (Printf.sprintf "caller: %s is bound to its declaration"
+                   (use_summary use))
+                (Jide_lang.Span.compare use.Facts.u_decl variable.Facts.v_dloc
+                = 0)
+          | None ->
+              check
+                ("caller: the use names a declared variable, "
+               ^ use.Facts.u_name)
+                false)
+        uses;
+      (* The loop's variable is used where the loop names it, and the call
+         passes [s] rather than declaring it. *)
+      match uses with
+      | [ _s0; i; _n; target; argument; returned ] ->
+          same_span "caller: the loop's variable is the for's i" i.Facts.u_span
+            (span_in with_loop_and_call "for i = 0 to n {" ~offset:4 ~length:1);
+          same_span "caller: the call's target is the s before the sign"
+            target.Facts.u_span
+            (span_in with_loop_and_call "s = add(s);" ~offset:0 ~length:1);
+          same_span "caller: the call's argument is the s inside the call"
+            argument.Facts.u_span
+            (span_in with_loop_and_call "s = add(s);" ~offset:8 ~length:1);
+          same_span "caller: the returned s is the one return names"
+            returned.Facts.u_span
+            (span_in with_loop_and_call "return s;" ~offset:7 ~length:1)
+      | _ -> ())
+
+(* An exec declares nothing and has no body, so it holds no use and adds no
+   item: the uses before and after it belong to the functions they sit in. *)
+let test_uses_around_an_exec () =
+  let facts = facts_of "uses around an exec" with_exec in
+  check
+    (Printf.sprintf "uses around an exec: six uses, got %d"
+       (List.length facts.Facts.uses))
+    (List.length facts.Facts.uses = 6);
+  with_item_in facts "two" (fun item ->
+      let uses = uses_of_item facts item in
+      check
+        (Printf.sprintf "uses around an exec: two has three uses, got [%s]"
+           (summary_of uses))
+        (List.map (fun (use : Facts.use) -> use.Facts.u_name) uses
+        = [ "b"; "a"; "b" ]);
+      List.iter
+        (fun (use : Facts.use) ->
+          check
+            ("uses around an exec: " ^ use_summary use
+           ^ " belongs to the function after the exec")
+            (use.Facts.u_span.Jide_lang.Span.start_byte
+           >= item.Facts.i_span.Jide_lang.Span.start_byte))
+        uses);
+  check "uses around an exec: every use belongs to an item"
+    (List.for_all
+       (fun (use : Facts.use) ->
+         List.exists
+           (fun (item : Facts.item) ->
+             Jide_lang.Span.compare use.Facts.u_item item.Facts.i_span = 0)
+           facts.Facts.items)
+       facts.Facts.uses)
+
 let () =
   test_diagnostics ();
   test_items ();

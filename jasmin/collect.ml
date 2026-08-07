@@ -262,15 +262,21 @@ let function_item ~(file : string) ~(env : 'asm Pretyping.Env.env)
   }
 
 let variable_item (kind : Facts.item_kind) ~(item_span : Jide_lang.Span.t)
-    ~(name_span : Jide_lang.Span.t) (v : P.pvar) : Facts.item =
+    ~(name_span : Jide_lang.Span.t) (v : P.pvar) : Facts.t =
   {
-    Facts.i_kind = kind;
-    i_span = item_span;
-    i_name = v.P.v_name;
-    i_name_span = name_span;
-    i_annot = annotations_of v.P.v_annot;
-    i_sig = None;
-    i_vars = [ var_of v ];
+    Facts.items =
+      [
+        {
+          Facts.i_kind = kind;
+          i_span = item_span;
+          i_name = v.P.v_name;
+          i_name_span = name_span;
+          i_annot = annotations_of v.P.v_annot;
+          i_sig = None;
+          i_vars = [ var_of v ];
+        };
+      ];
+    uses = [];
   }
 
 (** [leaves item] is [item] with namespaces flattened: the items a fact can
@@ -300,42 +306,36 @@ let declares ~(item_span : Jide_lang.Span.t) (decl : (unit, 'asm) P.pmod_item) :
 
 let item_of_leaf ~(file : string) ~(env : 'asm Pretyping.Env.env)
     ~(decls : (unit, 'asm) P.pmod_item list) (leaf : S.pitem L.located) :
-    Facts.item option =
+    Facts.t =
   let item_span = span (L.loc leaf) in
   let find () = List.find_opt (declares ~item_span) decls in
   match L.unloc leaf with
   | S.PFundef definition -> (
       match find () with
       | Some (P.MIfun func) ->
-          Some
-            (function_item ~file ~env ~item_span
-               ~name_span:(span (L.loc definition.S.pdf_name))
-               func)
-      | _ -> None)
+          function_item ~file ~env ~item_span
+            ~name_span:(span (L.loc definition.S.pdf_name))
+            func
+      | _ -> Facts.empty)
   | S.PParam definition -> (
       match find () with
       | Some (P.MIparam (v, _)) ->
-          Some
-            (variable_item Facts.Param ~item_span
-               ~name_span:(span (L.loc definition.S.ppa_name))
-               v)
-      | _ -> None)
+          variable_item Facts.Param ~item_span
+            ~name_span:(span (L.loc definition.S.ppa_name))
+            v
+      | _ -> Facts.empty)
   | S.PGlobal definition -> (
       match find () with
       | Some (P.MIglobal (v, _)) ->
-          Some
-            (variable_item Facts.Global ~item_span
-               ~name_span:(span (L.loc definition.S.pgd_name))
-               v)
-      | _ -> None)
-  | S.PTypeAlias _ | S.Pexec _ | S.Prequire _ | S.PNamespace _ -> None
+          variable_item Facts.Global ~item_span
+            ~name_span:(span (L.loc definition.S.pgd_name))
+            v
+      | _ -> Facts.empty)
+  | S.PTypeAlias _ | S.Pexec _ | S.Prequire _ | S.PNamespace _ -> Facts.empty
 
 let of_item ~(file : string) ~(env : 'asm Pretyping.Env.env)
     ~(item : S.pitem L.located) ~(decls : (unit, 'asm) P.pmod_item list) :
     Facts.t =
-  let items =
-    List.filter_map
-      (fun leaf -> item_of_leaf ~file ~env ~decls leaf)
-      (leaves item)
-  in
-  { Facts.items }
+  List.fold_left
+    (fun facts leaf -> Facts.merge facts (item_of_leaf ~file ~env ~decls leaf))
+    Facts.empty (leaves item)

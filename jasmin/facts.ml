@@ -32,6 +32,15 @@ type var = {
 }
 
 type fun_sig = { fs_in : string list; fs_out : string list }
+
+type use = {
+  u_span : Jide_lang.Span.t;
+  u_name : string;
+  u_item : Jide_lang.Span.t;
+  u_decl : Jide_lang.Span.t;
+  u_dfile : string;
+}
+
 type item_kind = Function | Param | Global
 
 type item = {
@@ -44,7 +53,9 @@ type item = {
   i_vars : var list;
 }
 
-type t = { items : item list }
+type t = { items : item list; uses : use list }
 
-let empty = { items = [] }
-let merge (earlier : t) (later : t) = { items = earlier.items @ later.items }
+let empty = { items = []; uses = [] }
+
+let merge (earlier : t) (later : t) =
+  { items = earlier.items @ later.items; uses = earlier.uses @ later.uses }
