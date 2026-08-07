@@ -15,14 +15,20 @@ val jasmin_version : string
 
 val max_bytes : int
 (** The largest document this adapter will parse. A buffer above it is
-    refused with one [size] diagnostic instead of a parse.
+    refused with one [size] diagnostic by {!parse}, and so by {!check},
+    which reaches {!parse} through its own item loop, instead of producing a
+    syntax error.
 
     A caller that applies its own admission limit must keep it at or below
-    this one: the adapter answers [parse] with empty items and a refusal for
+    this one: the adapter answers {!parse} with empty items and a refusal for
     anything larger, so a document a caller admitted above this ceiling
     would be reported as too large after the caller had promised it an
     analysis. The engine's [Engine.max_bytes] is that caller's limit and the
-    engine's tests hold the two together. *)
+    engine's tests hold the two together.
+
+    The adapter also refuses a buffer over its token ceiling, well before
+    this byte count for real Jasmin; that refusal says so in tokens, so it
+    cannot be mistaken for a byte limit. *)
 
 type parse_result = Parse.t
 

@@ -32,10 +32,12 @@ open Jasmin
 
 (** The largest buffer the driver will look at. Above this the parse is
     refused with one diagnostic rather than risking the editor's thread: the
-    work a scan does is linear in the tokens it builds, and a buffer at this
-    ceiling is well under a tenth of a second even when every byte is a
-    token. Every Jasmin file in the corpus and in the reference libraries is
-    two orders of magnitude below it.
+    work a scan does is linear in the tokens it builds. Real Jasmin runs
+    between four and eleven bytes per token, so a buffer at this ceiling
+    holds roughly 800,000 tokens; the token ceiling below is what actually
+    bounds the work, at 262,144 tokens, and it is reached well before this
+    byte count. Every Jasmin file in the corpus and in the reference
+    libraries is under 7 KiB, four orders of magnitude below it.
 
     This must not be smaller than the ceiling the engine applies before it
     asks for a parse. The engine admits a document of up to its own

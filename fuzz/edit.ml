@@ -2,9 +2,9 @@
 
     A case is one client's session over a handful of documents, driven
     straight into [Jide_controller.Server.handle_packet]: opens, changes,
-    closes, requests the server does not serve, notifications it does not
-    know, and a shutdown and an exit at the end. The properties are the ones
-    a client depends on:
+    closes, requests the server does not serve, a request it does serve whose
+    parameters do not parse, notifications it does not know, and a shutdown
+    and an exit at the end. The properties are the ones a client depends on:
 
     - a full-sync change leaves exactly the text that was sent, at the
       version that was sent, and the versions only grow;
@@ -228,6 +228,9 @@ let case ?(corpus = [||]) (st : Gen.state) : string =
       | 3 | 4 | 5 -> change_one (Gen.pick st uris)
       | 6 -> close_one (Gen.pick st uris)
       | 7 ->
+          (* A protocol method this server does not implement: completion is
+             in the library's request type and outside the lifecycle and the
+             four navigation requests the server answers. *)
           let id = new_id () in
           expect_reply ~what:"an unsupported request" ~id
             ~expect:
@@ -236,16 +239,13 @@ let case ?(corpus = [||]) (st : Gen.state) : string =
                    Jsonrpc.Response.Error.Code.InvalidRequest;
                    Jsonrpc.Response.Error.Code.MethodNotFound;
                  ])
-            (send server (request ~id "textDocument/hover"))
+            (send server (request ~id "textDocument/completion"))
       | 8 ->
+          (* A request the server does serve, with parameters that do not
+             parse: the protocol names InvalidParams, not MethodNotFound. *)
           let id = new_id () in
           expect_reply ~what:"a request with malformed params" ~id
-            ~expect:
-              (Any_error
-                 [
-                   Jsonrpc.Response.Error.Code.InvalidRequest;
-                   Jsonrpc.Response.Error.Code.MethodNotFound;
-                 ])
+            ~expect:(Any_error [ Jsonrpc.Response.Error.Code.InvalidParams ])
             (send server
                (request ~id
                   ~params:(`Assoc [ ("textDocument", `Int 1) ])
