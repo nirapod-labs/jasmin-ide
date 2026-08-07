@@ -228,9 +228,11 @@ let case ?(corpus = [||]) (st : Gen.state) : string =
       | 3 | 4 | 5 -> change_one (Gen.pick st uris)
       | 6 -> close_one (Gen.pick st uris)
       | 7 ->
-          (* A protocol method this server does not implement: completion is
-             in the library's request type and outside the lifecycle and the
-             four navigation requests the server answers. *)
+          (* A protocol method this server does not implement. Completion
+             used to stand here and no longer can: the server answers it now,
+             with the snapshot's candidates. Folding ranges is in the
+             library's request type and outside everything the server
+             answers, so it is the stand-in. *)
           let id = new_id () in
           expect_reply ~what:"an unsupported request" ~id
             ~expect:
@@ -239,7 +241,7 @@ let case ?(corpus = [||]) (st : Gen.state) : string =
                    Jsonrpc.Response.Error.Code.InvalidRequest;
                    Jsonrpc.Response.Error.Code.MethodNotFound;
                  ])
-            (send server (request ~id "textDocument/completion"))
+            (send server (request ~id "textDocument/foldingRange"))
       | 8 ->
           (* A request the server does serve, with parameters that do not
              parse: the protocol names InvalidParams, not MethodNotFound. *)

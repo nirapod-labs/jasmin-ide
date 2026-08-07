@@ -636,6 +636,9 @@ let () =
   test_second_item_is_a_global ();
   test_second_item_is_an_exec ();
   test_kind_strings ();
+  test_annotation_values ();
+  test_uses ();
+  test_uses_around_an_exec ();
   if !failures = 0 then print_endline "all facts tests passed"
   else (
     Printf.printf "%d facts test(s) failed\n" !failures;
