@@ -99,52 +99,264 @@ let messages (loaded : Jide_engine.Project.loaded) =
 let one_message (loaded : Jide_engine.Project.loaded) =
   match messages loaded with [ message ] -> message | _ -> "<not one problem>"
 
+let no_span = Jide_lang.Span.make ~start_byte:(-1) ~end_byte:(-1)
+
 let one_span (loaded : Jide_engine.Project.loaded) =
   match loaded.problems with
   | [ problem ] -> problem.Jide_engine.Project.span
-  | _ -> Jide_lang.Span.make ~start_byte:(-1) ~end_byte:(-1)
+  | _ -> no_span
+
+let check_messages name (loaded : Jide_engine.Project.loaded) expected =
+  let actual = messages loaded in
+  if actual <> expected then (
+    incr failures;
+    Printf.printf "FAIL %s: expected [%s], got [%s]\n%!" name
+      (String.concat "; " expected)
+      (String.concat "; " actual))
+
+(* One problem, with exactly [message], covering [fragment] on [line]: a second
+   problem, none, or a span elsewhere fails the test. *)
+let check_problem name text (loaded : Jide_engine.Project.loaded) ~line
+    ~fragment ~message =
+  check_messages name loaded [ message ];
+  check_span name text ~line fragment (one_span loaded)
 
 let parse = Jide_engine.Project.parse
-let x86_64 = Option.get (Jide_jasmin.Adapter.arch_of_string "x86-64")
-let arm_m4 = Option.get (Jide_jasmin.Adapter.arch_of_string "arm-m4")
+let load = Jide_engine.Project.load
+let load_above = Jide_engine.Project.load_above
+let find_above = Jide_engine.Project.find_above
+let file_name = Jide_engine.Project.file_name
+let path_of root name = Filename.concat root name
+let arch name = Option.get (Jide_jasmin.Adapter.arch_of_string name)
+let x86_64 = arch "x86-64"
+let arm_m4 = arch "arm-m4"
+let riscv = arch "riscv"
 let linux = Option.get (Jide_jasmin.Adapter.call_conv_of_string "linux")
 let windows = Option.get (Jide_jasmin.Adapter.call_conv_of_string "windows")
 
-let full =
-  String.concat "\n"
-    [
-      "{";
-      "  \"version\": 1,";
-      "  \"arch\": \"arm-m4\",";
-      "  \"call_conv\": \"windows\",";
-      "  \"include\": { \"SECP\": \"src/jasmin\", \"ARCH\": \
-       \"src/jasmin/x86_64\" },";
-      "  \"entries\": [\"src/jasmin/secp256k1.jazz\"]";
-      "}";
-      "";
-    ]
+(* The name the adapter gave an architecture, read back through the same table
+   the project file is checked against, because the type is the library's and
+   has no printer here. *)
+let name_of_arch arch =
+  match
+    List.find_opt
+      (fun name -> Jide_jasmin.Adapter.arch_of_string name = Some arch)
+      Jide_jasmin.Adapter.arch_names
+  with
+  | Some name -> name
+  | None -> "<an architecture the adapter does not know>"
 
-let test_a_full_file () =
-  let loaded = parse ~path:"/work/project/jasmin-project.json" full in
-  check "full: no problem" (loaded.problems = []);
-  check "full: the architecture"
-    ((loaded.project : Jide_engine.Project.t).arch = Some arm_m4);
-  check "full: the calling convention"
-    ((loaded.project : Jide_engine.Project.t).call_conv = Some windows);
-  check "full: both include paths, resolved"
-    ((loaded.project : Jide_engine.Project.t).idirs
+let lines = String.concat "\n"
+
+(* The files a test makes, as a relative path and its text; [None] makes a
+   directory. Every root is removed when the tests end. *)
+let roots = ref []
+
+let write path text =
+  let channel = open_out_bin path in
+  output_string channel text;
+  close_out channel
+
+let rec remove_tree path =
+  match Sys.is_directory path with
+  | true ->
+      Array.iter
+        (fun name -> remove_tree (Filename.concat path name))
+        (Sys.readdir path);
+      Sys.rmdir path
+  | false -> Sys.remove path
+  | exception Sys_error _ -> ()
+
+let make_directory path =
+  if not (Sys.file_exists path) then Sys.mkdir path 0o700
+
+let rec make_parents root path =
+  let parent = Filename.dirname path in
+  if (not (String.equal parent root)) && not (String.equal parent path) then (
+    make_parents root parent;
+    make_directory parent)
+
+let make entries =
+  let root = Filename.temp_file "jide-project" "" in
+  Sys.remove root;
+  Sys.mkdir root 0o700;
+  roots := root :: !roots;
+  List.iter
+    (fun (name, content) ->
+      let path = path_of root name in
+      make_parents root path;
+      match content with
+      | Some text -> write path text
+      | None -> make_directory path)
+    entries;
+  root
+
+let cleanup () =
+  List.iter remove_tree !roots;
+  roots := []
+
+(* The design's worked example, byte for byte, comments and blank lines
+   included. Its tree holds [src/main.jazz], [src/shared] and [lib/x86_64],
+   which is what makes the include paths and the entry checkable. *)
+let worked_example =
+  {|# crypto/jasmin.project
+
+[jasmin]
+# The target this project is written for. Values are the ones the linked
+# compiler accepts; `jasminc -arch help` in a shell lists them.
+arch = x86-64
+
+call_conv = linux
+
+# Where `from NAME require "…"` looks. Repeat the key to bind several names.
+include = LIB = lib/x86_64
+include = SHARED = src/shared
+
+# The file whose environment a bare `.jinc` should be read in. Optional: a
+# `.jazz` file opened on its own needs no entry.
+entry = src/main.jazz
+|}
+
+let worked_example_tree =
+  [
+    (file_name, Some worked_example);
+    ("src/main.jazz", Some "");
+    ("src/primitives/aead.jazz", Some "");
+    ("src/shared/common.jinc", Some "");
+    ("lib/x86_64/intrinsics.jinc", Some "");
+    ("lib/arm/intrinsics.jinc", Some "");
+  ]
+
+let test_the_worked_example () =
+  let root = make worked_example_tree in
+  let path = path_of root file_name in
+  let loaded = load path in
+  check "worked: the name the walk looks for"
+    (String.equal file_name "jasmin.project");
+  check "worked: no problem" (loaded.problems = []);
+  check "worked: the file it came from" (loaded.path = Some path);
+  check "worked: no byte-order mark" (loaded.bom = 0);
+  check "worked: the text as written" (loaded.text = worked_example);
+  let (project : Jide_engine.Project.t) = loaded.project in
+  check "worked: the architecture" (project.arch = Some x86_64);
+  check "worked: the calling convention" (project.call_conv = Some linux);
+  check "worked: both include names, in file order, resolved"
+    (project.idirs
     = [
-        ("SECP", "/work/project/src/jasmin");
-        ("ARCH", "/work/project/src/jasmin/x86_64");
+        ("LIB", path_of root "lib/x86_64"); ("SHARED", path_of root "src/shared");
       ]);
-  check "full: the entry, resolved"
-    ((loaded.project : Jide_engine.Project.t).entries
-    = [ "/work/project/src/jasmin/secp256k1.jazz" ]);
-  check "full: the file it came from"
-    (loaded.path = Some "/work/project/jasmin-project.json");
-  check "full: no byte-order mark" (loaded.bom = 0);
-  check "full: the text" (loaded.text = full);
-  check "full: no diagnostics for the reader"
+  check "worked: the entry, resolved"
+    (project.entries = [ path_of root "src/main.jazz" ]);
+  check "worked: no diagnostic for the reader"
+    (Jide_engine.Project.diagnostics ~uri:"file:///p" loaded = []);
+  (* A file one directory down finds the same project, and one that sits two
+     directories down finds it by walking up. *)
+  let below = load_above (path_of root "src/primitives") in
+  check "worked: found from a nested directory" (below.path = Some path);
+  check "worked: the nested document gets the same record"
+    (below.project = project)
+
+let test_a_minimal_file () =
+  let loaded = parse "" in
+  check "empty: no problem" (loaded.problems = []);
+  check "empty: nothing set" (loaded.project = Jide_engine.Project.empty);
+  check "empty: no text" (loaded.text = "");
+  check "empty: no byte-order mark" (loaded.bom = 0);
+  let loaded = parse (lines [ "[jasmin]" ]) in
+  check "section alone: no problem" (loaded.problems = []);
+  check "section alone: nothing set" (loaded.project = Jide_engine.Project.empty)
+
+let test_the_two_values () =
+  let text = lines [ "[jasmin]"; "arch = arm-m4"; "call_conv = windows" ] in
+  let loaded = parse text in
+  check "values: no problem" (loaded.problems = []);
+  let (project : Jide_engine.Project.t) = loaded.project in
+  check "values: the architecture" (project.arch = Some arm_m4);
+  check "values: the calling convention" (project.call_conv = Some windows)
+
+(* The design's failure table, one test per row. *)
+
+let test_an_unknown_architecture () =
+  let text =
+    lines
+      [
+        "[jasmin]";
+        "# a commented-out key is not read";
+        "arch = cortex-m4";
+        "call_conv = linux";
+      ]
+  in
+  let loaded = parse text in
+  check_problem "bad arch" text loaded ~line:3 ~fragment:"cortex-m4"
+    ~message:
+      (Printf.sprintf "unknown architecture: cortex-m4 (known: %s)"
+         (String.concat ", " Jide_jasmin.Adapter.arch_names));
+  check "bad arch: every name the adapter knows is listed"
+    (List.for_all
+       (contains (one_message loaded))
+       Jide_jasmin.Adapter.arch_names);
+  let (project : Jide_engine.Project.t) = loaded.project in
+  check "bad arch: no architecture is set" (project.arch = None);
+  check "bad arch: the rest of the file is still read"
+    (project.call_conv = Some linux)
+
+let test_a_bad_calling_convention () =
+  let text = lines [ "[jasmin]"; "call_conv = plan9" ] in
+  let loaded = parse text in
+  check_problem "bad call conv" text loaded ~line:2 ~fragment:"plan9"
+    ~message:"unknown calling convention: plan9 (known: linux, windows)";
+  check "bad call conv: nothing is set"
+    ((loaded.project : Jide_engine.Project.t).call_conv = None)
+
+let test_an_include_without_an_inner_equal () =
+  let text = lines [ "[jasmin]"; "include = LIB" ] in
+  let loaded = parse text in
+  check_problem "include without an inner =" text loaded ~line:2 ~fragment:"LIB"
+    ~message:"expected key = value";
+  check "include without an inner =: nothing is bound"
+    ((loaded.project : Jide_engine.Project.t).idirs = [])
+
+let test_an_unknown_key () =
+  let text = lines [ "[jasmin]"; "arch = x86-64"; "nonsense = 1" ] in
+  let loaded = parse text in
+  check_problem "unknown key" text loaded ~line:3 ~fragment:"nonsense"
+    ~message:"unknown key: nonsense";
+  check "unknown key: the known key still applies"
+    ((loaded.project : Jide_engine.Project.t).arch = Some x86_64);
+  (* The JSON schema's version field is gone with the JSON: it is a key this
+     parser does not know, and a typo is why unknown keys are refused. *)
+  let text = lines [ "[jasmin]"; "version = 1" ] in
+  let loaded = parse text in
+  check_problem "the version key is unknown" text loaded ~line:2
+    ~fragment:"version" ~message:"unknown key: version"
+
+let test_a_missing_entry () =
+  let text = lines [ "[jasmin]"; "entry = src/missing.jazz" ] in
+  let root = make [ (file_name, Some text) ] in
+  let loaded = load (path_of root file_name) in
+  check_problem "missing entry" text loaded ~line:2 ~fragment:"src/missing.jazz"
+    ~message:"the entry file does not exist";
+  check "missing entry: nothing is recorded"
+    ((loaded.project : Jide_engine.Project.t).entries = [])
+
+let test_an_include_that_is_not_a_directory () =
+  let text = lines [ "[jasmin]"; "include = LIB = notes.txt" ] in
+  let root = make [ (file_name, Some text); ("notes.txt", Some "a note") ] in
+  let loaded = load (path_of root file_name) in
+  check_problem "include that is a file" text loaded ~line:2
+    ~fragment:"LIB = notes.txt" ~message:"include LIB is not a directory";
+  check "include that is a file: nothing is bound"
+    ((loaded.project : Jide_engine.Project.t).idirs = [])
+
+let test_a_missing_file () =
+  let root = make [] in
+  let loaded = load (path_of root file_name) in
+  check "missing: no problem" (loaded.problems = []);
+  check "missing: no file" (loaded.path = None);
+  check "missing: no text" (loaded.text = "");
+  check "missing: the defaults apply"
+    (loaded.project = Jide_engine.Project.empty);
+  check "missing: no diagnostic"
     (Jide_engine.Project.diagnostics ~uri:"file:///p" loaded = [])
 
 let test_a_minimal_file () =
