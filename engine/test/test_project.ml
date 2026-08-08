@@ -1,3 +1,10 @@
+(* The project file, [jasmin.project]: what the parser reads, and what it says
+   about a line that is wrong.
+
+   Every problem is a diagnostic on the project file itself, at the line that
+   is wrong, so every test that expects one also pins its span: which bytes it
+   covers and which line they are on. *)
+
 let failures = ref 0
 
 let check name condition =
@@ -16,6 +23,8 @@ let contains text fragment =
   in
   fragment_length = 0 || from 0
 
+(* The bytes of the first [fragment] in [text]: for the cases where the span
+   indexes the file the reader holds, byte-order mark included. *)
 let span text fragment =
   let text_length = String.length text in
   let fragment_length = String.length fragment in
@@ -28,6 +37,59 @@ let span text fragment =
     else from (index + 1)
   in
   from 0
+
+(* The content of a one-based line of [text], without its terminator. *)
+let line_bounds text number =
+  let length = String.length text in
+  let rec seek index current =
+    if current = number then
+      match String.index_from_opt text index '\n' with
+      | None -> (index, length)
+      | Some stop ->
+          let stop =
+            if stop > index && String.get text (stop - 1) = '\r' then stop - 1
+            else stop
+          in
+          (index, stop)
+    else
+      match String.index_from_opt text index '\n' with
+      | None -> (length, length)
+      | Some stop -> seek (stop + 1) (current + 1)
+  in
+  seek 0 1
+
+(* The bytes of [fragment], searched from the start of [line], so a fragment
+   that appears twice in a file is still the one meant. *)
+let span_on_line text ~line fragment =
+  let start, stop = line_bounds text line in
+  let fragment_length = String.length fragment in
+  let rec from index =
+    if index + fragment_length > stop then None
+    else if String.equal (String.sub text index fragment_length) fragment then
+      Some
+        (Jide_lang.Span.make ~start_byte:index
+           ~end_byte:(index + fragment_length))
+    else from (index + 1)
+  in
+  from start
+
+(* The span a problem must have: exactly [fragment], on [line]. *)
+let check_span name text ~line fragment (actual : Jide_lang.Span.t) =
+  match span_on_line text ~line fragment with
+  | Some expected when actual = expected -> ()
+  | Some expected ->
+      incr failures;
+      Printf.printf
+        "FAIL %s: the problem covers bytes %d-%d, not the %S of line %d at \
+         bytes %d-%d\n\
+         %!"
+        name actual.Jide_lang.Span.start_byte actual.Jide_lang.Span.end_byte
+        fragment line expected.Jide_lang.Span.start_byte
+        expected.Jide_lang.Span.end_byte
+  | None ->
+      incr failures;
+      Printf.printf "FAIL %s: line %d holds no %S to point at\n%!" name line
+        fragment
 
 let messages (loaded : Jide_engine.Project.loaded) =
   List.map

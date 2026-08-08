@@ -295,20 +295,25 @@ let parse ?path text =
 
 (* A file that is not there is the ordinary case: the defaults apply and
    nothing is wrong. [In_channel.with_open_bin] raises [Sys_error] for that
-   case and for every other read failure, so the two are told apart before
-   the read, with [Sys.file_exists]. A file removed between the two calls is
+   case and for every other read failure, so the two are told apart before the
+   read, with [Sys.file_exists]. A file removed between the two calls is
    reported as unreadable, which is the honest answer: it was there when the
    project was looked for. *)
 let load path =
-  if not (Sys.file_exists path) then
-    { path = None; text = ""; bom = 0; project = empty; problems = [] }
+  if not (Sys.file_exists path) then absent
   else
     match In_channel.with_open_bin path In_channel.input_all with
     | text -> (
         match parse ~path text with
-        | loaded -> { loaded with path = Some path }
+        | loaded -> loaded
         | exception exn -> unreadable path exn)
     | exception exn -> unreadable path exn
+
+(* The project a directory is analysed under: the first file at it or above
+   it. A directory with no such file above it is the ordinary case: the
+   defaults apply and nothing is reported. *)
+let load_above directory =
+  match find_above directory with Some path -> load path | None -> absent
 
 let diagnostics ~uri (loaded : loaded) =
   List.map
