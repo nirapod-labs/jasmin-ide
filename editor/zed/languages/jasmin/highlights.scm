@@ -1,0 +1,133 @@
+; Highlights. Every capture name here is one Zed gives a style to, and
+; every node name exists in the pinned grammar.
+
+; Keywords
+[
+  "fn"
+  "param"
+  "type"
+  "exec"
+  "global"
+  "namespace"
+  "require"
+  "from"
+  "return"
+  "if"
+  "else"
+  "while"
+  "for"
+  "to"
+  "downto"
+  "const"
+  "mut"
+  "ptr"
+] @keyword
+
+(call_conv) @keyword
+(storage) @keyword
+(keyword) @keyword
+(alignment) @keyword
+
+; Module names: @module is the preferred capture, @type the fallback.
+(namespace
+  name: (identifier) @type @module)
+
+(from
+  id: (identifier) @type @module)
+
+; Types
+(type_definition
+  alias_name: (identifier) @type)
+
+(type_alias) @type
+
+(array_type
+  type: (identifier) @type)
+
+[
+  (bool_type)
+  (int_type)
+  (utype)
+  (swsize)
+  (svsize)
+] @type.builtin
+
+; Intrinsics
+(intrinsic) @function
+
+(intrinsic
+  "#" @punctuation.special)
+
+; Annotations and their contents
+(annotations) @attribute
+
+(annotations
+  "#" @punctuation.special)
+
+(annotations
+  (keyword) @keyword)
+
+(annotations
+  (string_literal) @string)
+
+(annotations
+  (aint) @number)
+
+; Functions
+(function_definition
+  name: (identifier) @function)
+
+(call_expr
+  function: (identifier) @function)
+
+(call_instr
+  function: (identifier) @function)
+
+"ArrayInit" @function
+
+; Variables and parameters
+(variable) @variable
+(parameter) @variable.parameter
+(ignore) @variable.special
+
+; Literals
+(int_literal) @number
+
+(string_literal) @string
+(escape_sequence) @string.escape
+
+[
+  (true)
+  (false)
+] @boolean
+
+; Operators
+(operator) @operator
+
+(unary_expr
+  [
+    "!"
+    "-"
+  ] @operator)
+
+(ternary_expr
+  "?" @operator)
+
+; Punctuation
+[
+  "("
+  ")"
+  "["
+  "]"
+  "{"
+  "}"
+] @punctuation.bracket
+
+[
+  ";"
+  ","
+  ":"
+] @punctuation.delimiter
+
+; Comments
+(comment) @comment
