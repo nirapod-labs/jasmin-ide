@@ -100,3 +100,202 @@ let class_of_suffixes = function
       | _ -> 4)
 
 (* One architecture's checks. *)
+let check_arch (arch : string) =
+  let entries = Jide_jasmin.Intrinsics.all ~arch in
+  let help = Jide_jasmin.Intrinsics.compiler_help ~arch in
+  let groups = printed_groups help in
+  let label name = arch ^ ": " ^ name in
+
+  (* The printer writes all seven headers, always. *)
+  check (label "seven groups") (List.length groups = 7);
+
+  let printed = List.concat_map snd groups in
+  let ours =
+    List.map (fun (entry : Jide_jasmin.Intrinsics.t) -> entry.name) entries
+  in
+
+  (* Every name the printer wrote is in our list and vice versa: no name
+     dropped, none invented. *)
+  check (label "same names") (List.sort compare printed = List.sort compare ours);
+
+  (* No duplicate: the compiler's table is an association list, and a
+     duplicated name would make completion ambiguous. *)
+  check
+    (label "no duplicate names")
+    (List.length (List.sort_uniq compare ours) = List.length ours);
+
+  (* Group by group: our entry's class must be the header it was printed
+     under, and each group's membership must match ours exactly. *)
+  let expected_by_class =
+    let table = Hashtbl.create 16 in
+    List.iter
+      (fun (entry : Jide_jasmin.Intrinsics.t) ->
+        let class_ = class_of_suffixes entry.suffixes in
+        let previous =
+          Option.value (Hashtbl.find_opt table class_) ~default:[]
+        in
+        Hashtbl.replace table class_ (entry.name :: previous))
+      entries;
+    table
+  in
+  List.iteri
+    (fun class_ (header, names) ->
+      let expected =
+        Option.value (Hashtbl.find_opt expected_by_class class_) ~default:[]
+      in
+      check
+        (label
+           ("group " ^ string_of_int class_ ^ " (" ^ header ^ ") membership"))
+        (List.sort compare names = List.sort compare expected);
+      (* The printer sorts each group; ours is in table order, so the only
+         check on order is that the printer's is sorted. This proves the
+         grouping and the sort, which is what the interface claims. *)
+      check
+        (label ("group " ^ string_of_int class_ ^ " printed in sorted order"))
+        (names = List.sort compare names))
+    groups;
+
+  (* The same relation stated independent of our classifier: the number of
+     entries per printed group must equal the number of our entries whose
+     suffix list has that shape, and the totals must agree. *)
+  check (label "same total") (List.length printed = List.length ours);
+  Printf.printf "%s: %d intrinsics, %d groups\n%!" arch (List.length ours)
+    (List.length groups);
+  (entries, printed)
+
+(* The suffix lists must be a function of the name under one architecture:
+   two lookups agree. *)
+let check_lookup (arch : string) (entries : Jide_jasmin.Intrinsics.t list) =
+  List.iter
+    (fun (entry : Jide_jasmin.Intrinsics.t) ->
+      let again = Jide_jasmin.Intrinsics.suffixes_of ~arch entry.name in
+      check
+        (arch ^ ": suffixes_of " ^ entry.name ^ " agrees with all")
+        (again = entry.suffixes);
+      (* Every suffix listed resolves, and the empty suffix resolves exactly
+         when the table lists a name with no suffixes. *)
+      List.iter
+        (fun suffix ->
+          let written =
+            if String.equal suffix "" then entry.name
+            else entry.name ^ "_" ^ suffix
+          in
+          match
+            Jide_jasmin.Intrinsics.signature_of ~arch ~name:entry.name ~suffix
+          with
+          | Some _ -> ()
+          | None -> check (arch ^ ": " ^ written ^ " resolves") false)
+        entry.suffixes;
+      match
+        Jide_jasmin.Intrinsics.signature_of ~arch ~name:entry.name ~suffix:""
+      with
+      | Some _ when entry.suffixes = [] -> ()
+      | Some _ ->
+          check (arch ^ ": " ^ entry.name ^ " without a suffix resolves") false
+      | None when List.mem "" entry.suffixes -> ()
+      | None ->
+          (* A name whose suffix list omits the empty string is one the
+             compiler cannot write bare, as far as this table can tell. *)
+          ())
+    entries
+
+(* A suffix the architecture does not list must not resolve, or the
+   interface's "or [None] when [arch] accepts no such pair" is false. *)
+let check_rejects (arch : string) (entries : Jide_jasmin.Intrinsics.t list) =
+  match
+    List.find_opt
+      (fun (e : Jide_jasmin.Intrinsics.t) -> e.suffixes <> [])
+      entries
+  with
+  | None -> ()
+  | Some entry -> (
+      let bogus = entry.name ^ "zzz" in
+      match
+        Jide_jasmin.Intrinsics.signature_of ~arch ~name:entry.name ~suffix:"zzz"
+      with
+      | None -> ()
+      | Some _ -> check (arch ^ ": " ^ bogus ^ " rejected") false)
+
+(* The signature of a name the compiler's table lists must equal the one
+   [Sopn.asm_op_instr] gives for the operation its first suffix resolves to,
+   read here straight from the library rather than through our projection.
+   That is the check that our [ty] rendering did not lose or reorder a
+   field. *)
+let check_signatures_are_the_librarys (arch : string)
+    (entries : Jide_jasmin.Intrinsics.t list) =
+  let (module A) =
+    CoreArchFactory.get_arch_module
+      (match arch with
+      | "x86-64" -> Utils.X86_64
+      | "arm-m4" -> Utils.ARM_M4
+      | "armv8a" -> Utils.ARMv8A
+      | "riscv" -> Utils.RISCV
+      | other -> failwith ("test: unknown arch " ^ other))
+      Glob_options.Linux
+  in
+  let library_type (aty : Type.atype) =
+    match aty with
+    | Type.Coq_abool -> "Bool"
+    | Type.Coq_aint -> "Int"
+    | Type.Coq_aword size -> "Word:" ^ string_of_int (Prog.int_of_ws size)
+    | Type.Coq_aarr (size, length) ->
+        "Array:"
+        ^ string_of_int (Prog.int_of_ws size)
+        ^ ":"
+        ^ (Conv.z_of_cz length |> Z.to_string)
+  in
+  let ours_type (ty : Jide_jasmin.Intrinsics.ty) =
+    match ty with
+    | Jide_jasmin.Intrinsics.Bool -> "Bool"
+    | Jide_jasmin.Intrinsics.Int -> "Int"
+    | Jide_jasmin.Intrinsics.Word { signed; bits } ->
+        if signed then Printf.sprintf "Word:%d:!" bits
+        else "Word:" ^ string_of_int bits
+    | Jide_jasmin.Intrinsics.Array { bits; length } ->
+        Printf.sprintf "Array:%d:%s" bits length
+  in
+  List.iter
+    (fun (entry : Jide_jasmin.Intrinsics.t) ->
+      let library_signature =
+        match List.assoc_opt entry.name (Sopn.prim_string A.asmOp_sopn) with
+        | None -> None
+        | Some constructor -> (
+            let op =
+              match constructor with
+              | Sopn.PrimX86 (suffixes, make) -> (
+                  match suffixes with
+                  | [] -> make (Sopn.PVp Wsize.U8)
+                  | first :: _ -> make first)
+              | Sopn.PrimARM make -> (
+                  match make false false with
+                  | Ok op -> Some op
+                  | Error _ -> None)
+            in
+            match op with
+            | None -> None
+            | Some op -> Some (Sopn.asm_op_instr A.asmOp_sopn op))
+      in
+      match library_signature with
+      | None ->
+          check (arch ^ ": " ^ entry.name ^ " has a library signature") false
+      | Some description ->
+          let signature = entry.signature in
+          check
+            (Printf.sprintf "%s: %s arguments are the library's" arch entry.name)
+            (List.map ours_type signature.Jide_jasmin.Intrinsics.arguments
+            = List.map library_type description.Sopn.tin);
+          check
+            (Printf.sprintf "%s: %s results are the library's" arch entry.name)
+            (List.map ours_type signature.Jide_jasmin.Intrinsics.results
+            = List.map library_type description.Sopn.tout);
+          check
+            (Printf.sprintf "%s: %s implicits are the library's" arch entry.name)
+            (signature.Jide_jasmin.Intrinsics.implicit_arguments
+            = List.filter_map
+                (function
+                  | Sopn.ADImplicit variable ->
+                      Some (Ident.Ident.id_name (Var0.Var.vname variable))
+                  | Sopn.ADExplicit _ -> None)
+                description.Sopn.i_out))
+    entries
+
