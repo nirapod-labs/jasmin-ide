@@ -1,12 +1,18 @@
+(* The project file, [jasmin.project]: an INI file with one optional
+   [[jasmin]] section, one [key = value] per line, whole-line comments and
+   repeated keys that accumulate in file order. It is found by walking up from
+   the file being analysed, and every problem in it is reported at the line it
+   is on rather than only in a log. *)
+
 type t = {
   arch : Jide_jasmin.Adapter.arch option;
   call_conv : Jide_jasmin.Adapter.call_conv option;
-  idirs : (string * string) list;
+  idirs : (string * string) list;  (** in the order the file gives them *)
   entries : string list;
 }
 
 let empty = { arch = None; call_conv = None; idirs = []; entries = [] }
-let file_name = "jasmin-project.json"
+let file_name = "jasmin.project"
 
 type problem = { span : Jide_lang.Span.t; message : string }
 
@@ -18,10 +24,12 @@ type loaded = {
   problems : problem list;
 }
 
+(* No file: no path, no text, no setting and nothing wrong. *)
+let absent = { path = None; text = ""; bom = 0; project = empty; problems = [] }
 let blank_span = Jide_lang.Span.make ~start_byte:0 ~end_byte:0
 
-(* The same rule as the engine's: a byte-order mark is not part of the JSON
-   and every byte offset moves back by it. *)
+(* The same rule as the engine's: a byte-order mark is not part of the file's
+   own text and every byte offset moves back by it. *)
 let strip_bom text =
   let length = String.length text in
   if
@@ -32,114 +40,53 @@ let strip_bom text =
   then (3, String.sub text 3 (length - 3))
   else (0, text)
 
-(* Every top-level member's name, the range of that name and the range of its
-   value, in the order the text holds them. The JSON has already been
-   accepted, so this only has to walk it; a text this cannot follow yields no
-   ranges at all, and an unknown field then sits at the first byte. *)
-let member_ranges text =
+(* A blank within a line: a space, a tab, or a carriage return that no line
+   terminator took. *)
+let is_blank character = character = ' ' || character = '\t' || character = '\r'
+
+(* The part of a line that is not blank at either end, as the offsets left.
+   Every span below is taken from the result, so a problem covers the text it
+   is about and never the whitespace round it. *)
+let trim text start stop =
+  let start = ref start and stop = ref stop in
+  while !start < !stop && is_blank text.[!start] do
+    incr start
+  done;
+  while !stop > !start && is_blank text.[!stop - 1] do
+    decr stop
+  done;
+  (!start, !stop)
+
+(* The content of every line as [start, stop) byte offsets: the line feed
+   excluded, and a carriage return before it too. A text that ends in a line
+   feed has a final empty line, which is blank and so passed over. *)
+let line_bounds text =
   let length = String.length text in
-  let skip_space index =
-    let rec loop index =
-      if index >= length then index
-      else
-        match text.[index] with
-        | ' ' | '\t' | '\r' | '\n' -> loop (index + 1)
-        | _ -> index
-    in
-    loop index
-  in
-  (* The index just past the string that starts at [index], and the string
-     with its escapes resolved. *)
-  let scan_string index =
-    let buffer = Buffer.create 16 in
-    let rec loop index =
-      if index >= length then (index, Buffer.contents buffer)
-      else
-        match text.[index] with
-        | '"' -> (index + 1, Buffer.contents buffer)
-        | '\\' when index + 1 < length ->
-            let escaped = text.[index + 1] in
-            let character =
-              match escaped with
-              | 'n' -> '\n'
-              | 't' -> '\t'
-              | 'r' -> '\r'
-              | 'b' -> '\b'
-              | 'f' -> '\012'
-              | other -> other
-            in
-            Buffer.add_char buffer character;
-            loop (index + 2)
-        | character ->
-            Buffer.add_char buffer character;
-            loop (index + 1)
-    in
-    loop (index + 1)
-  in
-  (* The index just past the value that starts at [index]. A string's braces
-     and brackets do not count, which is what makes this walk safe. *)
-  let rec scan_value index =
-    let index = skip_space index in
-    if index >= length then index
+  let rec loop index acc =
+    if index > length then List.rev acc
     else
-      match text.[index] with
-      | '"' -> fst (scan_string index)
-      | '{' -> scan_container index '{' '}'
-      | '[' -> scan_container index '[' ']'
-      | _ ->
-          let rec loop index =
-            if index >= length then index
-            else
-              match text.[index] with
-              | ',' | '}' | ']' -> index
-              | _ -> loop (index + 1)
+      match String.index_from_opt text index '\n' with
+      | None -> List.rev ((index, length) :: acc)
+      | Some stop ->
+          let content_end =
+            if stop > index && text.[stop - 1] = '\r' then stop - 1 else stop
           in
-          loop index
-  and scan_container index open_ close =
-    let rec loop depth index =
-      if index >= length then index
-      else
-        match text.[index] with
-        | '"' -> loop depth (fst (scan_string index))
-        | character when character = open_ -> loop (depth + 1) (index + 1)
-        | character when character = close ->
-            if depth = 1 then index + 1 else loop (depth - 1) (index + 1)
-        | _ -> loop depth (index + 1)
-    in
-    loop 0 index
+          loop (stop + 1) ((index, content_end) :: acc)
   in
-  let rec members index acc =
-    let index = skip_space index in
-    if index >= length then List.rev acc
-    else
-      match text.[index] with
-      | '"' ->
-          let start = index in
-          let key_end, name = scan_string index in
-          let next = skip_space key_end in
-          let after_key =
-            if next < length && text.[next] = ':' then skip_space (next + 1)
-            else next
-          in
-          let after_value = scan_value after_key in
-          let acc =
-            ( name,
-              ( Jide_lang.Span.make ~start_byte:start ~end_byte:key_end,
-                Jide_lang.Span.make ~start_byte:after_key ~end_byte:after_value
-              ) )
-            :: acc
-          in
-          let after_value = skip_space after_value in
-          if after_value < length && text.[after_value] = ',' then
-            members (after_value + 1) acc
-          else List.rev acc
-      | _ -> List.rev acc
-  in
-  let start = skip_space 0 in
-  if start < length && text.[start] = '{' then members (start + 1) [] else []
+  loop 0 []
+
+(* The first [jasmin.project] in this directory or in the nearest directory
+   above it. The filesystem root stops the walk, and it does so by itself:
+   [Filename.dirname "/"] is "/". *)
+let rec find_above directory =
+  let candidate = Filename.concat directory file_name in
+  if Sys.file_exists candidate then Some candidate
+  else
+    let parent = Filename.dirname directory in
+    if String.equal parent directory then None else find_above parent
 
 (* The names of the values the file may hold. Their order is the order the
-   error message lists the accepted values in. *)
+   message that refuses a bad one lists the accepted values in. *)
 let arch_names = Jide_jasmin.Adapter.arch_names
 let call_conv_names = [ "linux"; "windows" ]
 let quoted names = String.concat ", " names

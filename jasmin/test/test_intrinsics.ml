@@ -299,3 +299,37 @@ let check_signatures_are_the_librarys (arch : string)
                 description.Sopn.i_out))
     entries
 
+let () =
+  List.iter
+    (fun arch ->
+      let entries, _ = check_arch arch in
+      check_lookup arch entries;
+      check_rejects arch entries;
+      check_signatures_are_the_librarys arch entries)
+    Jide_jasmin.Intrinsics.arch_names;
+
+  (* An unknown architecture is an invalid argument, not an empty table. *)
+  (match Jide_jasmin.Intrinsics.all ~arch:"not-an-architecture" with
+  | _ -> check "unknown arch raises" false
+  | exception Invalid_argument _ -> ()
+  | exception _ -> check "unknown arch raises Invalid_argument" false);
+
+  (* The architecture names are the ones the compiler's own option table
+     lists: [-arch] is an [Arg.Symbol] whose list is the accepted set. *)
+  let from_options =
+    List.find_map
+      (fun (flag, spec, _) ->
+        if String.equal flag "-arch" then
+          match spec with Arg.Symbol (symbols, _) -> Some symbols | _ -> None
+        else None)
+      Jasmin.Glob_options.options
+  in
+  check "arch_names is the compiler's -arch list"
+    (match from_options with
+    | Some symbols -> symbols = Jide_jasmin.Intrinsics.arch_names
+    | None -> false);
+
+  if !failures = 0 then Printf.printf "intrinsics: all checks passed\n%!"
+  else (
+    Printf.printf "intrinsics: %d failure(s)\n%!" !failures;
+    exit 1)
