@@ -359,129 +359,38 @@ let test_a_missing_file () =
   check "missing: no diagnostic"
     (Jide_engine.Project.diagnostics ~uri:"file:///p" loaded = [])
 
-let test_a_minimal_file () =
-  let loaded = parse "{}" in
-  check "minimal: no problem" (loaded.problems = []);
-  check "minimal: nothing set" (loaded.project = Jide_engine.Project.empty);
-  let loaded = parse "{\"version\": 1}" in
-  check "minimal: a version alone is no problem" (loaded.problems = []);
-  check "minimal: and sets nothing" (loaded.project = Jide_engine.Project.empty)
-
-let test_an_unknown_field () =
-  let text = "{\"version\": 1, \"arch\": \"x86-64\", \"colours\": true}\n" in
-  let loaded = parse text in
-  check "unknown: one problem" (List.length (messages loaded) = 1);
-  check "unknown: the message names the field"
-    (contains (one_message loaded) "unknown field: colours");
-  check "unknown: the range is the field's name"
-    (one_span loaded = Option.get (span text "\"colours\""));
-  check "unknown: the known fields still apply"
-    ((loaded.project : Jide_engine.Project.t).arch = Some x86_64);
-  match
-    Jide_engine.Project.diagnostics ~uri:"file:///w/jasmin-project.json" loaded
-  with
-  | [ diagnostic ] ->
-      check "unknown: the diagnostic's code"
-        (diagnostic.Jide_lang.Diagnostic.code = Some "project");
-      check "unknown: it is an error"
-        (diagnostic.severity = Jide_lang.Diagnostic.Error);
-      check "unknown: it sits on the field"
-        (diagnostic.span = Option.get (span text "\"colours\""))
-  | other ->
-      check
-        (Printf.sprintf "unknown: one diagnostic, got %d" (List.length other))
-        false
-
-let test_a_bad_architecture () =
-  let text = "{\"arch\": \"mips\"}" in
-  let loaded = parse text in
-  check "bad arch: one problem" (List.length (messages loaded) = 1);
-  check "bad arch: the message names it and the accepted values"
-    (let message = one_message loaded in
-     contains message "unknown architecture: mips"
-     && contains message "x86-64" && contains message "riscv");
-  check "bad arch: the range is the value"
-    (one_span loaded = Option.get (span text "\"mips\""));
-  check "bad arch: no architecture is set"
-    ((loaded.project : Jide_engine.Project.t).arch = None)
-
-let test_a_bad_calling_convention () =
-  let text = "{\"call_conv\": \"plan9\"}" in
-  let loaded = parse text in
-  check "bad call conv: one problem" (List.length (messages loaded) = 1);
-  check "bad call conv: the message names the accepted values"
-    (let message = one_message loaded in
-     contains message "unknown calling convention: plan9"
-     && contains message "linux" && contains message "windows");
-  check "bad call conv: no calling convention is set"
-    ((loaded.project : Jide_engine.Project.t).call_conv = None)
-
-let test_a_bad_version () =
-  let text = "{\"version\": 2, \"arch\": \"x86-64\"}" in
-  let loaded = parse text in
-  check "bad version: one problem" (List.length (messages loaded) = 1);
-  check "bad version: the message names the version"
-    (contains (one_message loaded) "version 2");
-  check "bad version: the range is the value"
-    (one_span loaded = Option.get (span text "2"));
-  check "bad version: no field is read"
-    (loaded.project = Jide_engine.Project.empty);
-  let loaded = parse "{\"version\": \"one\"}" in
-  check "bad version: a string is refused" (List.length (messages loaded) = 1)
-
-let test_a_bom () =
-  let text = "\xEF\xBB\xBF{\"arch\": \"x86-64\"}" in
-  let loaded = parse text in
-  check "bom: no problem" (loaded.problems = []);
-  check "bom: three bytes removed" (loaded.bom = 3);
-  check "bom: the text has no mark" (loaded.text = "{\"arch\": \"x86-64\"}");
-  check "bom: the architecture is read"
-    ((loaded.project : Jide_engine.Project.t).arch = Some x86_64);
-  (* The diagnostic's span indexes the file, not the text the parser saw. *)
-  let text = "\xEF\xBB\xBF{\"colours\": true}" in
-  let loaded = parse text in
-  check "bom: an unknown field is three bytes further on"
-    (one_span loaded = Option.get (span text "\"colours\""))
-
-let test_not_json () =
-  let loaded = parse "this is not json" in
-  check "not json: one problem" (List.length (messages loaded) = 1);
-  check "not json: the message says so"
-    (contains (one_message loaded) "not valid JSON");
-  check "not json: the defaults apply"
-    (loaded.project = Jide_engine.Project.empty);
-  let loaded = parse "[]" in
-  check "not an object: one problem" (List.length (messages loaded) = 1);
-  check "not an object: the message says so"
-    (contains (one_message loaded) "one JSON object")
-
-let test_a_missing_file () =
-  let path = Filename.temp_file "jide-project" ".json" in
-  Sys.remove path;
-  let loaded = Jide_engine.Project.load path in
-  check "missing: no problem" (loaded.problems = []);
-  check "missing: no text" (loaded.text = "");
-  check "missing: no file" (loaded.path = None);
-  check "missing: the defaults apply"
-    (loaded.project = Jide_engine.Project.empty)
-
-(* A file that is there and cannot be read is not the same thing as a file
-   that is not there: the first is reported, the second is the ordinary case
-   the test above pins. *)
+(* A file that is there and cannot be read is not the same thing as a file that
+   is not there: the first is reported, the second is the ordinary case the
+   test above pins. A directory is the case no permission bit can make
+   readable. *)
 let test_an_unreadable_file () =
-  let directory = Filename.temp_file "jide-project" "" in
-  Sys.remove directory;
-  Sys.mkdir directory 0o700;
-  let path = Filename.concat directory Jide_engine.Project.file_name in
-  let channel = open_out_bin path in
-  output_string channel "{\"arch\": \"arm-m4\"}";
-  close_out channel;
-  (* Take every permission bit away. A process that may override the mode, or a
-     filesystem that does not enforce it, still reads the file; the directory
-     case below then carries the rule, and this one says it was skipped. *)
-  Unix.chmod path 0o000;
+  let root = make [ (file_name, None) ] in
+  let path = path_of root file_name in
+  let loaded = load path in
+  check "unreadable: one problem" (List.length (messages loaded) = 1);
+  check "unreadable: the message says it cannot be read"
+    (contains (one_message loaded) "cannot be read");
+  check "unreadable: the file it came from" (loaded.path = Some path);
+  check "unreadable: no text" (loaded.text = "");
+  check "unreadable: the defaults apply"
+    (loaded.project = Jide_engine.Project.empty);
+  check "unreadable: it reaches the reader as one error"
+    (match Jide_engine.Project.diagnostics ~uri:"file:///p" loaded with
+    | [ diagnostic ] ->
+        diagnostic.Jide_lang.Diagnostic.code = Some "project"
+        && diagnostic.Jide_lang.Diagnostic.severity = Jide_lang.Diagnostic.Error
+    | _ -> false);
+  (* A file whose permission bits are gone. A process that may override the
+     mode, or a filesystem that does not enforce it, still reads it; the
+     directory case above then carries the rule, and this one says it was
+     skipped. *)
+  let other =
+    make [ (file_name, Some (lines [ "[jasmin]"; "arch = arm-m4" ])) ]
+  in
+  let file = path_of other file_name in
+  Unix.chmod file 0o000;
   let readable =
-    match In_channel.with_open_bin path In_channel.input_all with
+    match In_channel.with_open_bin file In_channel.input_all with
     | _ -> true
     | exception Sys_error _ -> false
   in
