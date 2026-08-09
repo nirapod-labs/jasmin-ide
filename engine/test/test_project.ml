@@ -400,29 +400,238 @@ let test_an_unreadable_file () =
         still readable here\n\
         %!"
    else
-     let loaded = Jide_engine.Project.load path in
-     check "unreadable: one problem" (List.length (messages loaded) = 1);
-     check "unreadable: the message says it cannot be read"
-       (contains (one_message loaded) "cannot be read");
-     check "unreadable: the file it came from" (loaded.path = Some path);
-     check "unreadable: no text" (loaded.text = "");
-     check "unreadable: the defaults apply"
-       (loaded.project = Jide_engine.Project.empty);
-     check "unreadable: the diagnostic reaches the reader"
-       (match Jide_engine.Project.diagnostics ~uri:"file:///p" loaded with
-       | [ diagnostic ] -> diagnostic.Jide_lang.Diagnostic.code = Some "project"
-       | _ -> false));
-  Unix.chmod path 0o600;
-  (* A path that exists and cannot be read as a project file: a directory is
-     the case no permission bit can make readable. *)
-  let loaded = Jide_engine.Project.load directory in
-  check "unreadable: a directory is one problem"
-    (List.length (messages loaded) = 1);
-  check "unreadable: a directory names itself" (loaded.path = Some directory);
-  check "unreadable: a directory applies the defaults"
+     let loaded = load file in
+     check "unreadable by permission: one problem"
+       (List.length (messages loaded) = 1);
+     check "unreadable by permission: the file is remembered"
+       (loaded.path = Some file);
+     check "unreadable by permission: the defaults apply"
+       (loaded.project = Jide_engine.Project.empty));
+  Unix.chmod file 0o600
+
+let test_repeated_include_accumulates () =
+  let text =
+    lines
+      [
+        "[jasmin]";
+        "include = A = lib";
+        "";
+        "include = B = lib/b";
+        "include = C = lib";
+      ]
+  in
+  let root = make [ (file_name, Some text); ("lib", None); ("lib/b", None) ] in
+  let loaded = load (path_of root file_name) in
+  check "repeated include: no problem" (loaded.problems = []);
+  check "repeated include: every binding, in file order, resolved"
+    ((loaded.project : Jide_engine.Project.t).idirs
+    = [
+        ("A", path_of root "lib");
+        ("B", path_of root "lib/b");
+        ("C", path_of root "lib");
+      ])
+
+let test_a_repeated_entry_is_refused () =
+  let text = lines [ "[jasmin]"; "entry = a.jazz"; "entry = b.jazz" ] in
+  let root =
+    make [ (file_name, Some text); ("a.jazz", Some ""); ("b.jazz", Some "") ]
+  in
+  let loaded = load (path_of root file_name) in
+  check_problem "repeated entry" text loaded ~line:3 ~fragment:"entry"
+    ~message:"entry is given twice (line 2, then line 3)";
+  check "repeated entry: the first one stands"
+    ((loaded.project : Jide_engine.Project.t).entries
+    = [ path_of root "a.jazz" ])
+
+let test_a_repeated_architecture_is_refused () =
+  let text = lines [ "[jasmin]"; "arch = x86-64"; "arch = riscv" ] in
+  let loaded = parse text in
+  check_problem "repeated arch" text loaded ~line:3 ~fragment:"arch"
+    ~message:"arch is given twice (line 2, then line 3)";
+  check "repeated arch: the first one stands"
+    ((loaded.project : Jide_engine.Project.t).arch = Some x86_64)
+
+let test_comments_and_blank_lines () =
+  let text =
+    lines
+      [
+        "[jasmin]";
+        "";
+        "# arch = arm-m4";
+        "; call_conv = windows";
+        "";
+        "  \t";
+        "arch = x86-64";
+        "";
+      ]
+  in
+  let loaded = parse text in
+  check "comments: no problem" (loaded.problems = []);
+  let (project : Jide_engine.Project.t) = loaded.project in
+  check "comments: the comment is not a key" (project.arch = Some x86_64);
+  check "comments: a commented-out value is not read" (project.call_conv = None)
+
+(* A comment is a whole line, so a [#] inside a value is part of the value: a
+   path holding one stays usable, and there is no trailing comment to eat it. *)
+let test_a_hash_inside_a_value () =
+  let text = lines [ "[jasmin]"; "entry = a#b.jazz" ] in
+  let loaded = parse text in
+  check "hash in a value: no problem" (loaded.problems = []);
+  check "hash in a value: the whole value"
+    ((loaded.project : Jide_engine.Project.t).entries = [ "a#b.jazz" ])
+
+let test_a_bom () =
+  let text = "\xEF\xBB\xBF[jasmin]\narch = x86-64\n" in
+  let loaded = parse text in
+  check "bom: no problem" (loaded.problems = []);
+  check "bom: three bytes removed" (loaded.bom = 3);
+  check "bom: the text has no mark" (loaded.text = "[jasmin]\narch = x86-64\n");
+  check "bom: the architecture is read"
+    ((loaded.project : Jide_engine.Project.t).arch = Some x86_64);
+  (* The diagnostic's span indexes the file, not the text the parser saw. *)
+  let text = "\xEF\xBB\xBF[jasmin]\nnonsense = 1\n" in
+  let loaded = parse text in
+  check_messages "bom: the unknown key" loaded [ "unknown key: nonsense" ];
+  check "bom: the span is three bytes further on"
+    (one_span loaded = Option.get (span text "nonsense"))
+
+let test_a_line_that_is_not_a_key () =
+  let text = "this is not a project file\n" in
+  let loaded = parse text in
+  check_problem "not a key" text loaded ~line:1
+    ~fragment:"this is not a project file" ~message:"expected key = value";
+  check "not a key: the defaults apply"
+    (loaded.project = Jide_engine.Project.empty)
+
+let test_an_unknown_section () =
+  let text = lines [ "[editor]"; "arch = x86-64" ] in
+  let loaded = parse text in
+  check_problem "unknown section" text loaded ~line:1 ~fragment:"editor"
+    ~message:"unknown section: editor (only [jasmin] is read)";
+  check "unknown section: the key inside it is not read"
+    ((loaded.project : Jide_engine.Project.t).arch = None)
+
+(* The section is optional: the file carries one project's settings, and a key
+   written above the header belongs to it. *)
+let test_the_section_is_optional () =
+  let loaded = parse "arch = x86-64\n" in
+  check "no section: no problem" (loaded.problems = []);
+  check "no section: the key is read"
+    ((loaded.project : Jide_engine.Project.t).arch = Some x86_64)
+
+let test_crlf () =
+  let text = "[jasmin]\r\narch = x86-64\r\n\r\ncall_conv = windows\r\n" in
+  let loaded = parse text in
+  check "crlf: no problem" (loaded.problems = []);
+  let (project : Jide_engine.Project.t) = loaded.project in
+  check "crlf: the architecture" (project.arch = Some x86_64);
+  check "crlf: the calling convention" (project.call_conv = Some windows)
+
+(* Paths are relative to the directory holding the file, never to the
+   directory of the file being analysed: the project file here is two
+   directories above the document. *)
+let test_a_path_beside_a_nested_directory () =
+  let root =
+    make
+      [
+        (file_name, Some (lines [ "[jasmin]"; "include = SHARED = lib/shared" ]));
+        ("lib/shared", None);
+        ("src/deep", None);
+      ]
+  in
+  let loaded = load_above (path_of root "src/deep") in
+  check "nested: no problem" (loaded.problems = []);
+  check "nested: the file above it" (loaded.path = Some (path_of root file_name));
+  check "nested: the include path is the project file's own directory"
+    ((loaded.project : Jide_engine.Project.t).idirs
+    = [ ("SHARED", path_of root "lib/shared") ])
+
+let test_the_walk_finds_a_file_three_directories_up () =
+  let root =
+    make
+      [
+        (file_name, Some (lines [ "[jasmin]"; "arch = riscv" ])); ("a/b/c", None);
+      ]
+  in
+  let deep = path_of root "a/b/c" in
+  check "walk: the file three directories up"
+    (find_above deep = Some (path_of root file_name));
+  let loaded = load_above deep in
+  check "walk: its architecture, three directories up"
+    ((loaded.project : Jide_engine.Project.t).arch = Some riscv)
+
+let test_the_walk_stops_at_the_nearest () =
+  let root =
+    make
+      [
+        (file_name, Some (lines [ "[jasmin]"; "arch = arm-m4" ]));
+        ("a/jasmin.project", Some (lines [ "[jasmin]"; "arch = riscv" ]));
+        ("a/b/c", None);
+      ]
+  in
+  let deep = path_of root "a/b/c" in
+  check "nearest: the file in the directory above"
+    (find_above deep = Some (path_of root "a/jasmin.project"));
+  check "nearest: it stops at the nearest of the two"
+    (((load_above deep).project : Jide_engine.Project.t).arch = Some riscv);
+  check "nearest: the outer one is still there for its own tree"
+    (((load_above root).project : Jide_engine.Project.t).arch = Some arm_m4)
+
+(* A directory with no project file above it is the ordinary case. *)
+let test_no_project_file_above () =
+  let root = make [ ("lonely/deep", None) ] in
+  let deep = path_of root "lonely/deep" in
+  (match find_above deep with
+  | None -> ()
+  | Some path ->
+      incr failures;
+      Printf.printf "FAIL no file above: the walk found %s\n%!" path);
+  let loaded = load_above deep in
+  check "no file above: no problem" (loaded.problems = []);
+  check "no file above: no file" (loaded.path = None);
+  check "no file above: no text" (loaded.text = "");
+  check "no file above: the defaults apply"
     (loaded.project = Jide_engine.Project.empty);
-  Sys.remove path;
-  Sys.rmdir directory
+  check "no file above: no diagnostic"
+    (Jide_engine.Project.diagnostics ~uri:"file:///p" loaded = [])
+
+(* The engine, which is what a document is analysed under. *)
+
+let test_the_engine_reads_the_project () =
+  let root =
+    make
+      [
+        ( file_name,
+          Some
+            (lines
+               [
+                 "[jasmin]";
+                 "arch = arm-m4";
+                 "call_conv = windows";
+                 "include = A = lib";
+               ]) );
+        ("lib", None);
+      ]
+  in
+  let path = path_of root file_name in
+  let engine = Jide_engine.Engine.create () in
+  Jide_engine.Engine.set_root engine (Some root);
+  let settings = Jide_engine.Engine.settings engine in
+  check "engine: the architecture reaches the settings"
+    (settings.Jide_engine.Engine.arch = arm_m4);
+  check "engine: the calling convention reaches the settings"
+    (settings.call_conv = windows);
+  check "engine: the include path reaches the settings"
+    (settings.idirs = [ ("A", path_of root "lib") ]);
+  check "engine: no problem" (Jide_engine.Engine.project_diagnostics engine = []);
+  check "engine: the file is remembered"
+    (match Jide_engine.Engine.project engine with
+    | Some loaded -> loaded.Jide_engine.Project.path = Some path
+    | None -> false);
+  (* Without a root the defaults are back. *)
+  Jide_engine.Engine.set_root engine None;
+  check "engine: no root, the defaults"
+    (Jide_engine.Engine.settings engine = Jide_engine.Engine.default_settings)
 
 let test_the_engine_reports_an_unreadable_project () =
   let directory = Filename.temp_file "jide-project" "" in
