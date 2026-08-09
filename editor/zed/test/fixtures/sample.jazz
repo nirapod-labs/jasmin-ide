@@ -1,0 +1,50 @@
+// Sample input for the query job. MIT, see LICENSE.
+from CRYPTO require "crypto.jinc"
+
+type lane = u32;
+
+namespace CRYPTO {
+  param int ROUNDS = 10;
+  u64 mask = 0x0000_0000_0000_00ff;
+  u64 label = "crypto\n";
+  exec keep(0:64)
+
+  /* A block comment. */
+  #[returnaddress=stack]
+  export
+  fn mix(#[mmx] reg const ptr lane[4] source, reg u64 count) -> reg ptr lane[4] {
+    reg u64 acc;
+    reg bool done;
+
+    acc = 0;
+    acc = #set0();
+    acc = source[0];
+    acc = [#aligned :u64 source + 0];
+    acc += 3;
+    acc = (acc + count) * 2;
+    acc = (int) count;
+    acc = done ? 1 : 2;
+    done = acc <=u 4;
+    done = true;
+    done = !done;
+    _ = 0;
+    ArrayInit(source);
+
+    if (done) {
+      acc = #set1();
+    } else {
+      acc = acc + 1;
+    }
+
+    while (acc < 8) {
+      acc = acc + 2;
+    }
+
+    for i = 0 to 3 {
+      acc = acc + i;
+    }
+
+    check(ROUNDS > 0);
+    return source;
+  }
+}
