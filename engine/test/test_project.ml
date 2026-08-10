@@ -634,14 +634,10 @@ let test_the_engine_reads_the_project () =
     (Jide_engine.Engine.settings engine = Jide_engine.Engine.default_settings)
 
 let test_the_engine_reports_an_unreadable_project () =
-  let directory = Filename.temp_file "jide-project" "" in
-  Sys.remove directory;
-  Sys.mkdir directory 0o700;
-  (* The workspace holds a [jasmin-project.json] that cannot be read as one. *)
-  let path = Filename.concat directory Jide_engine.Project.file_name in
-  Sys.mkdir path 0o700;
+  let root = make [ (file_name, None) ] in
+  let path = path_of root file_name in
   let engine = Jide_engine.Engine.create () in
-  Jide_engine.Engine.set_root engine (Some directory);
+  Jide_engine.Engine.set_root engine (Some root);
   check "engine unreadable: one diagnostic"
     (List.length (Jide_engine.Engine.project_diagnostics engine) = 1);
   check "engine unreadable: the defaults apply"
@@ -655,40 +651,18 @@ let test_the_engine_reports_an_unreadable_project () =
        ~version:1 ~text:"fn f(reg u32 a) -> reg u32 { return a; }";
      match Jide_engine.Engine.check engine ~uri:"file:///tmp/c.jazz" with
      | Some analysis -> analysis.Jide_engine.Engine.diagnostics = []
-     | None -> false);
-  Sys.rmdir path;
-  Sys.rmdir directory
+     | None -> false)
 
-let test_a_file_on_disk () =
-  let directory = Filename.temp_file "jide-project" "" in
-  Sys.remove directory;
-  Sys.mkdir directory 0o700;
-  let path = Filename.concat directory Jide_engine.Project.file_name in
-  let channel = open_out_bin path in
-  output_string channel "{\"arch\": \"riscv\", \"include\": {\"A\": \"b\"}}";
-  close_out channel;
-  let loaded = Jide_engine.Project.load path in
-  check "disk: no problem" (loaded.problems = []);
-  check "disk: the file is remembered" (loaded.path = Some path);
-  check "disk: the architecture"
-    ((loaded.project : Jide_engine.Project.t).arch
-    = Some (Option.get (Jide_jasmin.Adapter.arch_of_string "riscv")));
-  check "disk: the include path is beside the file"
-    ((loaded.project : Jide_engine.Project.t).idirs
-    = [ ("A", Filename.concat directory "b") ]);
-  Sys.remove path;
-  Sys.rmdir directory
-
-let test_the_engine_reads_the_project () =
-  let directory = Filename.temp_file "jide-project" "" in
-  Sys.remove directory;
-  Sys.mkdir directory 0o700;
-  let path = Filename.concat directory Jide_engine.Project.file_name in
-  let channel = open_out_bin path in
-  output_string channel
-    "{\"arch\": \"arm-m4\", \"call_conv\": \"windows\", \"include\": {\"A\": \
-     \"lib\"}}";
-  close_out channel;
+(* An unknown name in the file must never reach the library's setters: the
+   defaults apply instead, and the check still runs. *)
+let test_an_unknown_architecture_never_reaches_the_settings () =
+  let root =
+    make
+      [
+        ( file_name,
+          Some (lines [ "[jasmin]"; "arch = mips"; "call_conv = plan9" ]) );
+      ]
+  in
   let engine = Jide_engine.Engine.create () in
   Jide_engine.Engine.set_root engine (Some directory);
   let settings = Jide_engine.Engine.settings engine in
