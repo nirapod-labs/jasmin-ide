@@ -1,0 +1,10 @@
+; The oracle script's contract, and the Makefile's reading of it. The tests
+; use stand-in compilers they write themselves, so they run on a host that
+; has no Jasmin compiler and never ask a real machine.
+;
+; Both files are dependencies: jasminc.sh is what the tests run, and the
+; Makefile is what turns the script's exit 2 into the `fail` line that keeps
+; a typo'd JASMINC from skipping the parity gate.
+
+(cram
+ (deps jasminc.sh ../../Makefile))

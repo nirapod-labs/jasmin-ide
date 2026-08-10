@@ -1,0 +1,9 @@
+; The contract of the test runner: a green test step must show that the cram
+; tests executed, and a test that was not meant to run must not be reported
+; as one that ran. The runner is a script rather than a library, so the test
+; runs it against a throw-away tree it writes itself, with a stand-in for the
+; dune command: no dune runs here, nothing is built, and every case stops at
+; the runner's own bookkeeping.
+
+(cram
+ (deps ../../scripts/runtest.sh))
