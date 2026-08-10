@@ -664,77 +664,179 @@ let test_an_unknown_architecture_never_reaches_the_settings () =
       ]
   in
   let engine = Jide_engine.Engine.create () in
-  Jide_engine.Engine.set_root engine (Some directory);
-  let settings = Jide_engine.Engine.settings engine in
-  check "engine: the architecture reaches the settings"
-    (settings.Jide_engine.Engine.arch = arm_m4);
-  check "engine: the calling convention reaches the settings"
-    (settings.call_conv = windows);
-  check "engine: the include path reaches the settings"
-    (settings.idirs = [ ("A", Filename.concat directory "lib") ]);
-  check "engine: no problem" (Jide_engine.Engine.project_diagnostics engine = []);
-  check "engine: the file is remembered"
-    (match Jide_engine.Engine.project engine with
-    | Some loaded -> loaded.Jide_engine.Project.path = Some path
-    | None -> false);
-  (* Without a root the defaults are back. *)
-  Jide_engine.Engine.set_root engine None;
-  check "engine: no root, the defaults"
-    (Jide_engine.Engine.settings engine = Jide_engine.Engine.default_settings);
-  Sys.remove path;
-  Sys.rmdir directory
-
-let test_an_unknown_architecture_never_reaches_the_settings () =
-  let directory = Filename.temp_file "jide-project" "" in
-  Sys.remove directory;
-  Sys.mkdir directory 0o700;
-  let path = Filename.concat directory Jide_engine.Project.file_name in
-  let channel = open_out_bin path in
-  output_string channel "{\"arch\": \"mips\", \"call_conv\": \"plan9\"}";
-  close_out channel;
-  let engine = Jide_engine.Engine.create () in
-  Jide_engine.Engine.set_root engine (Some directory);
+  Jide_engine.Engine.set_root engine (Some root);
   check "refused arch: the settings keep the default"
     (Jide_engine.Engine.settings engine = Jide_engine.Engine.default_settings);
   check "refused arch: two diagnostics"
     (List.length (Jide_engine.Engine.project_diagnostics engine) = 2);
-  (* The check still runs, on the default architecture: an unknown name in the
-     file must never reach the library's setters. *)
   Jide_engine.Engine.open_document engine ~uri:"file:///tmp/a.jazz" ~version:1
     ~text:"fn f(reg u32 a) -> reg u32 { return a; }";
   check "refused arch: a check still runs"
     (match Jide_engine.Engine.check engine ~uri:"file:///tmp/a.jazz" with
     | Some analysis -> analysis.Jide_engine.Engine.diagnostics = []
-    | None -> false);
-  Sys.remove path;
-  Sys.rmdir directory
+    | None -> false)
 
-let test_the_include_paths_reach_the_checker () =
-  let seen = ref [] in
-  let check_captures ~arch:_ ~call_conv:_ ~file:_ ~text:_ ~idirs =
-    seen := idirs;
+(* The project is the one above the document, so this document has to be under
+   the project file: a document elsewhere is under no project and gets the
+   defaults, which is the walk's whole point. The three values the file sets
+   are the three the adapter's own entry point takes, so the test captures all
+   three: a project file that reached the settings but not the check would be
+   a file that changes nothing. *)
+let test_the_settings_reach_the_checker () =
+  let seen = ref None in
+  let check_captures ~arch ~call_conv ~file:_ ~text:_ ~idirs =
+    seen := Some (arch, call_conv, idirs);
     {
       Jide_jasmin.Adapter.diagnostics = [];
       warnings = [];
       facts = Jide_jasmin.Facts.empty;
     }
   in
-  let directory = Filename.temp_file "jide-project" "" in
-  Sys.remove directory;
-  Sys.mkdir directory 0o700;
-  let path = Filename.concat directory Jide_engine.Project.file_name in
-  let channel = open_out_bin path in
-  output_string channel "{\"include\": {\"LIB\": \"src\"}}";
-  close_out channel;
+  let root =
+    make
+      [
+        ( file_name,
+          Some
+            (lines
+               [
+                 "[jasmin]";
+                 "arch = arm-m4";
+                 "call_conv = windows";
+                 "include = LIB = src";
+               ]) );
+        ("src", None);
+        ("src/b.jazz", Some "fn f() -> reg u32 { return 0; }\n");
+      ]
+  in
+  let file = path_of root "src/b.jazz" in
+  let uri = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path file) in
   let engine = Jide_engine.Engine.create ~check:check_captures () in
-  Jide_engine.Engine.set_root engine (Some directory);
-  Jide_engine.Engine.open_document engine ~uri:"file:///tmp/b.jazz" ~version:1
+  Jide_engine.Engine.set_root engine (Some root);
+  Jide_engine.Engine.open_document engine ~uri ~version:1
     ~text:"fn f() -> reg u32 { return 0; }";
-  ignore (Jide_engine.Engine.check engine ~uri:"file:///tmp/b.jazz");
-  check "include paths: they reach the checker"
-    (!seen = [ ("LIB", Filename.concat directory "src") ]);
-  Sys.remove path;
-  Sys.rmdir directory
+  ignore (Jide_engine.Engine.check engine ~uri);
+  check "the check: the project file's architecture"
+    (match !seen with Some (arch, _, _) -> arch = arm_m4 | None -> false);
+  check "the check: the project file's calling convention"
+    (match !seen with
+    | Some (_, call_conv, _) -> call_conv = windows
+    | None -> false);
+  check "the check: the project file's include paths"
+    (match !seen with
+    | Some (_, _, idirs) -> idirs = [ ("LIB", path_of root "src") ]
+    | None -> false)
+
+(* The include paths have to reach the compiler's own include option, not just
+   the engine's record: the compiler is what decides that
+   [from LIB require "x.jinc"] names [lib/x.jinc]. Both engines below check the
+   same text with the real adapter, and the only difference between them is
+   the project file above the document. *)
+let test_the_include_paths_reach_the_compiler () =
+  let source =
+    "from LIB require \"x.jinc\"\n\
+     fn f(reg u32 a) -> reg u32 {\n\
+    \  return a;\n\
+     }\n"
+  in
+  let files =
+    [
+      ("lib/x.jinc", Some "fn inc(reg u32 x) -> reg u32 {\n  return x;\n}\n");
+      ("src/b.jazz", Some source);
+    ]
+  in
+  let with_project =
+    make
+      ((file_name, Some (lines [ "[jasmin]"; "include = LIB = lib" ])) :: files)
+  in
+  let without_project = make files in
+  let diagnostics root =
+    let file = path_of root "src/b.jazz" in
+    let uri = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path file) in
+    let engine = Jide_engine.Engine.create () in
+    Jide_engine.Engine.set_root engine (Some root);
+    Jide_engine.Engine.open_document engine ~uri ~version:1 ~text:source;
+    match Jide_engine.Engine.check engine ~uri with
+    | Some analysis -> analysis.Jide_engine.Engine.diagnostics
+    | None -> []
+  in
+  let said diagnostics =
+    String.concat "; "
+      (List.map
+         (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+           diagnostic.Jide_lang.Diagnostic.message)
+         diagnostics)
+  in
+  let bound = said (diagnostics with_project) in
+  let unbound = said (diagnostics without_project) in
+  check
+    (Printf.sprintf
+       "include paths: the compiler reads the bound name (said: %s)" bound)
+    (bound = "");
+  check
+    (Printf.sprintf
+       "include paths: without the binding the name is refused (said: %s)"
+       unbound)
+    (contains unbound "LIB")
+
+(* A document is analysed under the nearest project file above it, so two
+   documents in one workspace may be under two different projects and the
+   document below the inner file never sees the outer one. *)
+let test_the_nearest_project_file_decides_for_a_document () =
+  let root =
+    make
+      [
+        (file_name, Some (lines [ "[jasmin]"; "arch = x86-64" ]));
+        ("inner/jasmin.project", Some (lines [ "[jasmin]"; "arch = arm-m4" ]));
+        ("inner/a.jazz", Some "");
+        ("b.jazz", Some "");
+      ]
+  in
+  let seen = ref [] in
+  let check_captures ~arch ~call_conv:_ ~file ~text:_ ~idirs:_ =
+    seen := (Filename.basename file, name_of_arch arch) :: !seen;
+    {
+      Jide_jasmin.Adapter.diagnostics = [];
+      warnings = [];
+      facts = Jide_jasmin.Facts.empty;
+    }
+  in
+  let engine = Jide_engine.Engine.create ~check:check_captures () in
+  Jide_engine.Engine.set_root engine (Some root);
+  let check_file name =
+    let file = path_of root name in
+    let uri = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path file) in
+    Jide_engine.Engine.open_document engine ~uri ~version:1
+      ~text:"fn f() -> reg u32 { return 0; }";
+    ignore (Jide_engine.Engine.check engine ~uri)
+  in
+  check_file "inner/a.jazz";
+  check_file "b.jazz";
+  check "nearest project: the inner document is under the inner file"
+    (List.assoc_opt "a.jazz" !seen = Some "arm-m4");
+  check "nearest project: the outer document is under the outer file"
+    (List.assoc_opt "b.jazz" !seen = Some "x86-64");
+  check "nearest project: the root reports its own file"
+    (match Jide_engine.Engine.project engine with
+    | Some loaded ->
+        loaded.Jide_engine.Project.path = Some (path_of root file_name)
+    | None -> false)
+
+(* A key followed by an equals and nothing else names a mistake the design's
+   table does not list: the value the key needs is missing, and the line is
+   where it is missing. *)
+let test_a_key_with_no_value () =
+  let text = lines [ "[jasmin]"; "arch =" ] in
+  let loaded = parse text in
+  check_problem "key with no value" text loaded ~line:2 ~fragment:"arch ="
+    ~message:"arch needs a value";
+  check "key with no value: nothing is set"
+    ((loaded.project : Jide_engine.Project.t).arch = None);
+  (* A line with no equals at all is the other shape of the same mistake, and
+     the design gives its message. *)
+  let text = lines [ "[jasmin]"; "call_conv" ] in
+  let loaded = parse text in
+  check_problem "line with no equals" text loaded ~line:2 ~fragment:"call_conv"
+    ~message:"expected key = value"
 
 let () =
   test_a_full_file ();
