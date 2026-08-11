@@ -58,8 +58,13 @@ let load parse path kind =
   | Error message -> Error (Printf.sprintf "%s %s: %s" kind path message)
 
 let finish ~timeout_ms transport steps =
-  let outcome = Jide_client.run ~out:stdout ~transport ~timeout_ms steps in
-  transport.Jide_client.shutdown ();
+  (* The server is ended on every path out of the session, an exception
+     included: the process the client started must not outlive it. *)
+  let outcome =
+    Fun.protect
+      ~finally:(fun () -> transport.Jide_client.shutdown ())
+      (fun () -> Jide_client.run ~out:stdout ~transport ~timeout_ms steps)
+  in
   match outcome with
   | Ok () -> Ok ()
   | Error failure ->
