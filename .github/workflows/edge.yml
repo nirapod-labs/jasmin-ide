@@ -1,0 +1,60 @@
+# The edge channel: upstream main, built into a Jasmin distribution, then this
+# server against it and the corpus of that same upstream commit.
+#
+# A job of its own rather than a cell of `build.yml`, for three reasons that all
+# point the same way:
+#
+#   - it costs a Rocq extraction and a proof build — tens of minutes cold —
+#     which no push or pull request should pay for, and a job of `build.yml`
+#     would either run on every push or be skipped on every push and so never
+#     be exercised;
+#   - it runs on a schedule and on demand, which is a different trigger from
+#     the one `build.yml` has;
+#   - the design already describes it as its own workflow.
+#
+# The last reason is the decisive one and it is first: a channel that can be
+# broken by upstream must not be able to turn the release channel's build red.
+# It cannot, because a red workflow here is a red workflow here.
+#
+# A failure here does not block a release (docs/edge.md). The run's own history
+# is the record of it: this workflow writes nothing, so it opens no issue and
+# publishes nothing.
+#
+# Nothing here has ever run. The project is private and has no remote, so this
+# file is written and checked by inspection only. `docs/edge.md` says what that
+# means, and `scripts/check-workflows.sh` is the check.
+
+name: edge
+
+on:
+  # Monday, 04:00 UTC. A weekly question — does this server still track main? —
+  # asked at a time nobody is waiting for an answer.
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Every action this workflow uses, with the version a reader recognises and the
+# commit its `uses:` line must name.
+#
+# GitHub runs no expression on a `uses:` line, so the value below cannot be
+# substituted into it: the pair is a record, and the `uses:` line carries the
+# same value literally. Each `<NAME>_SHA` is the string PIN until one fill-in
+# pass replaces it here and on the `uses:` lines in the same commit.
+# `scripts/check-workflows.sh` fails while any pin is PIN and fails when the
+# two places disagree, so a half-finished pass is caught rather than shipped.
+env:
+  CHECKOUT_ACTION: actions/checkout
+  CHECKOUT_VERSION: v4
+  CHECKOUT_SHA: PIN
+
+  SETUP_OCAML_ACTION: ocaml/setup-ocaml
+  SETUP_OCAML_VERSION: v3
+  SETUP_OCAML_SHA: PIN
+
+  CACHE_ACTION: actions/cache
+  CACHE_VERSION: v4
+  CACHE_SHA: PIN
+
