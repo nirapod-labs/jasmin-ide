@@ -1,0 +1,14 @@
+; The tree printer the parity harness compares with the compiler's own AST
+; printer. It needs a corpus and a compiler, neither of which this repository
+; carries, so `dune runtest` runs only its self-test and `make parity` is the
+; measurement.
+
+(executable
+ (name parity_tree)
+ (modules parity_tree)
+ (libraries jide_jasmin jide_lang jasmin))
+
+(rule
+ (alias runtest)
+ (action
+  (run %{exe:parity_tree.exe} --selftest)))

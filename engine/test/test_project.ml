@@ -839,21 +839,39 @@ let test_a_key_with_no_value () =
     ~message:"expected key = value"
 
 let () =
-  test_a_full_file ();
+  test_the_worked_example ();
   test_a_minimal_file ();
-  test_an_unknown_field ();
-  test_a_bad_architecture ();
+  test_the_two_values ();
+  test_an_unknown_architecture ();
   test_a_bad_calling_convention ();
-  test_a_bad_version ();
-  test_a_bom ();
-  test_not_json ();
+  test_an_include_without_an_inner_equal ();
+  test_an_unknown_key ();
+  test_a_missing_entry ();
+  test_an_include_that_is_not_a_directory ();
   test_a_missing_file ();
   test_an_unreadable_file ();
-  test_a_file_on_disk ();
+  test_repeated_include_accumulates ();
+  test_a_repeated_entry_is_refused ();
+  test_a_repeated_architecture_is_refused ();
+  test_comments_and_blank_lines ();
+  test_a_hash_inside_a_value ();
+  test_a_bom ();
+  test_a_line_that_is_not_a_key ();
+  test_a_key_with_no_value ();
+  test_an_unknown_section ();
+  test_the_section_is_optional ();
+  test_crlf ();
+  test_a_path_beside_a_nested_directory ();
+  test_the_walk_finds_a_file_three_directories_up ();
+  test_the_walk_stops_at_the_nearest ();
+  test_no_project_file_above ();
   test_the_engine_reads_the_project ();
   test_the_engine_reports_an_unreadable_project ();
   test_an_unknown_architecture_never_reaches_the_settings ();
-  test_the_include_paths_reach_the_checker ();
+  test_the_settings_reach_the_checker ();
+  test_the_include_paths_reach_the_compiler ();
+  test_the_nearest_project_file_decides_for_a_document ();
+  cleanup ();
   if !failures = 0 then print_endline "all project tests passed"
   else (
     Printf.printf "%d project test(s) failed\n" !failures;
