@@ -58,3 +58,128 @@ env:
   CACHE_VERSION: v4
   CACHE_SHA: PIN
 
+jobs:
+  edge:
+    name: upstream main
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@PIN
+
+      - name: Resolve the upstream commit this run is about
+        id: upstream
+        run: |
+          set -eu
+          upstream=https://github.com/jasmin-lang/jasmin.git
+          git clone --quiet --filter=blob:none --no-checkout \
+            --depth 1 --branch main "$upstream" "$RUNNER_TEMP/jasmin"
+          commit=$(git -C "$RUNNER_TEMP/jasmin" rev-parse HEAD)
+          printf 'commit=%s\n' "$commit" >>"$GITHUB_OUTPUT"
+          printf 'edge: upstream main is at %s\n' "$commit"
+
+      # The extraction is the expensive half, and its inputs are exactly the
+      # upstream commit plus the Rocq packages, so the tarball is cached per
+      # commit and a repeat run of the same week costs only the build.
+      # `restore-keys` matches nothing: a partial hit from another commit would
+      # be a different Jasmin under this commit's name.
+      - name: Restore the distribution tarball for this upstream commit
+        id: cache
+        uses: actions/cache@PIN
+        with:
+          path: ${{ runner.temp }}/edge
+          key: jasmin-dist-${{ steps.upstream.outputs.commit }}
+
+      - name: Set up OCaml
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: ocaml/setup-ocaml@PIN
+        with:
+          ocaml-compiler: "4.14"
+
+      # Rocq and the libraries the proofs need, through opam. The versions are
+      # the ones upstream's own package metadata names: Rocq 9.0, mathcomp 2.4
+      # (ssreflect and algebra), mathcomp-word 3.5, and the two libraries the
+      # extraction depends on. A version outside them is not a Jasmin that
+      # upstream says builds.
+      - name: Install Rocq and its libraries
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          opam repo add coq-released https://coq.inria.fr/opam/released || true
+          opam install -y \
+            'coq-core>=9.0' 'coq-core<9.3' \
+            coq-stdlib \
+            'coq-elpi>=2.5.1' \
+            'coq-mathcomp-ssreflect>=2.4' 'coq-mathcomp-ssreflect<2.7' \
+            coq-mathcomp-algebra \
+            'coq-mathcomp-word>=3.5' \
+            coq-paco \
+            coq-itree
+
+      # `make -C compiler CIL` fills compiler/src/CIL from the Rocq extraction:
+      # a git checkout of Jasmin has no such files, which is exactly why the
+      # release channel uses a tarball instead. `install` is GNU install here
+      # because the distribution script uses `install -t`, which BSD install
+      # does not have; on this runner it is coreutils and already present.
+      - name: Extract the CIL from the Rocq proofs
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: ${{ runner.temp }}/jasmin
+        run: |
+          set -eu
+          make -C compiler CIL
+          test -f compiler/src/CIL/expr.ml
+
+      # `make -C compiler dist` writes compiler/jasmin-compiler.tgz: the same
+      # shape as the release tarball, with the extracted CIL inside it. It is
+      # the third thing that has to exist before vendor/fetch.sh can use it.
+      - name: Build the distribution tarball
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: ${{ runner.temp }}/jasmin
+        run: |
+          set -eu
+          make -C compiler dist
+          mkdir -p "$RUNNER_TEMP/edge"
+          cp compiler/jasmin-compiler.tgz "$RUNNER_TEMP/edge/"
+          printf '%s\n' "${{ steps.upstream.outputs.commit }}" \
+            >"$RUNNER_TEMP/edge/upstream-commit"
+          sha256sum "$RUNNER_TEMP/edge/jasmin-compiler.tgz"
+
+      - name: Install the dependencies of the release channel
+        run: |
+          opam install --locked --deps-only -y ./jasmin-lsp.opam.locked
+          opam install --deps-only -y ./vendor/requirements.opam
+
+      # The tarball goes through the same door the release tarball does:
+      # vendor/fetch.sh, with the digest named on the command line instead of
+      # read from the lock file. Nothing about this channel is special-cased in
+      # the build.
+      - name: Vendor the edge Jasmin
+        run: |
+          set -eu
+          digest=$(sha256sum "$RUNNER_TEMP/edge/jasmin-compiler.tgz" | cut -d' ' -f1)
+          sh vendor/fetch.sh "$RUNNER_TEMP/edge/jasmin-compiler.tgz" "$digest"
+
+      - name: Build
+        run: make build
+
+      # The corpus of that same upstream commit, not of the release: the two
+      # Jasmin versions do not share a syntax, so the comparison is only
+      # meaningful against the tree the server was built from.
+      - name: Corpus parity against the edge corpus
+        run: |
+          set -eu
+          corpus=$RUNNER_TEMP/jasmin/compiler/tests
+          if [ ! -d "$corpus" ]; then
+            # The blobless clone above has no working tree; only the compiler
+            # tree is needed here, so fetch exactly that.
+            git -C "$RUNNER_TEMP/jasmin" sparse-checkout set compiler/tests
+            git -C "$RUNNER_TEMP/jasmin" checkout --quiet
+          fi
+          sh test/parity/parity.sh "$RUNNER_TEMP/jasmin" | tail -30
+
+      - name: Record what this run built
+        run: |
+          set -eu
+          printf 'edge: upstream %s\n' "${{ steps.upstream.outputs.commit }}"
+          printf 'edge: server %s\n' \
+            "$(./_build/install/default/bin/jasmin-lsp check --help >/dev/null 2>&1 && printf built)"
+          printf 'edge: the tarball of this commit is cached under jasmin-dist-%s\n' \
+            "${{ steps.upstream.outputs.commit }}"
