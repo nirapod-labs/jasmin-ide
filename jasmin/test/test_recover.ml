@@ -543,6 +543,92 @@ let test_guard_statement () =
   check "guard: the driver's statement set is the grammar's"
     (driver_names Jide_jasmin.Scan.statement_tokens = pinstr)
 
+(* A global is the one item whose first token does not name it: it begins
+   with a type, and a type is also a statement and an expression. The set the
+   driver searches for when the item after a hole can only be a global is the
+   grammar's FIRST set for [ptype], so it is pinned like the other two. *)
+let test_guard_type () =
+  let ptype = first_terminal_names Interpreter.N_ptype in
+  check "guard: the driver's type set is the grammar's"
+    (driver_names Jide_jasmin.Scan.type_tokens = ptype)
+
+(* The virtual brace is offered only where a statement cannot begin: the set
+   is the item set with the statement set taken out. The two tests above pin
+   both halves, so this one pins the difference. *)
+let test_guard_item_only () =
+  let statements = driver_names Jide_jasmin.Scan.statement_tokens in
+  let expected =
+    List.filter
+      (fun name -> not (List.mem name statements))
+      (driver_names Jide_jasmin.Scan.item_tokens)
+  in
+  check "guard: the brace set is the item set minus the statement set"
+    (driver_names Jide_jasmin.Scan.item_only_tokens = expected);
+  check "guard: no type begins the brace set"
+    (List.for_all
+       (fun name -> not (List.mem name (driver_names Jide_jasmin.Scan.type_tokens)))
+       (driver_names Jide_jasmin.Scan.item_only_tokens))
+
+(* A global begins with its type, so the item set cannot name it: a restart
+   that walks to the next keyword item swallows the globals in between and
+   they are in neither the tree nor the outline. The parser says whether an
+   item really begins at a type, so the globals after a hole are kept. *)
+let hole_then_globals =
+  {|fn broken(reg u32 a -> reg u32 {
+  reg u32 b;
+  b = a;
+  return b;
+}
+
+u64[1] g = { 1 };
+u64[1] h = { 2 };
+|}
+
+let test_global_after_a_hole () =
+  let parsed = parse hole_then_globals in
+  check "global after a hole: the globals are in the tree"
+    (item_names parsed = [ "g"; "h" ]);
+  check "global after a hole: one stub, for the broken function"
+    (dropped_names parsed = [ "broken" ]);
+  check "global after a hole: an item restart found them, not a rewrite"
+    (item_restarts parsed = 1 && byte_restarts parsed = 0);
+  check "global after a hole: the compiler's error and one marker"
+    (List.length (Jide_jasmin.Parse.diagnostics parsed) = 2)
+
+(* One hole is one stub. This function lost its [fn]: the recovery restarts
+   at a statement inside the body and then rewrites the rest of the item, so
+   the second attempt covers bytes the item restart already reported. The
+   local [r] of the broken function is not a global declaration, and the hole
+   must not be reported twice for it — one syntax error, one or few
+   diagnostics. *)
+let fn_less_item =
+  {|fn zero() -> reg u8 {
+  reg u8 r;
+  return r;
+}
+
+inline
+ one() -> reg u8 {
+  reg u8 r;
+  #[inline] r = test(-42);
+  return r;
+}
+|}
+
+let test_one_hole_one_stub () =
+  let parsed = parse fn_less_item in
+  check "one hole: one stub"
+    (List.length (Jide_jasmin.Parse.dropped parsed) = 1);
+  check "one hole: no global is invented out of a body statement"
+    (not
+       (List.exists
+          (function
+            | Jide_jasmin.Recover.Dropped { kind; _ } ->
+                kind = Jide_jasmin.Recover.Global)
+          (Jide_jasmin.Parse.dropped parsed)));
+  check "one hole: the compiler's error and one marker"
+    (List.length (Jide_jasmin.Parse.diagnostics parsed) = 2)
+
 (* A buffer over the policy's byte ceiling is refused with one diagnostic of
    its own kind: a refusal by policy is not a syntax error, and no consumer
    should offer a syntax fix for it. The ceiling is read from the module so

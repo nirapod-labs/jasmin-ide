@@ -713,30 +713,89 @@ let recover ~name ~text : t =
      are two stubs even when one of them is first seen as part of a wider
      restart, which is why the restart that follows one starts at the end of
      the stub already reported ([stubbed_upto]) rather than at the last
-     completed item. A restart that has nothing new to report (its span is
-     already inside a stub) adds nothing, and one that sees the same hole
-     again from further out replaces it. *)
+     completed item. A restart that has nothing new to report adds nothing,
+     and one that sees the same hole again from further out replaces it — the
+     same item, reported once, over all of its bytes. *)
   let note_dropped state ~from ~upto =
     let span =
       Scan.span state.scan
         ~start_byte:(Scan.start_byte state.scan from)
         ~end_byte:(hole_end state upto)
     in
-    let reported =
+    (* The bytes the stubs already reported, which are disjoint and in source
+       order: a hole that lies entirely inside them has nothing new to report,
+       however many of them it takes to cover it. That is what a rewrite of
+       the prefix sees: the holes it blanked are the stubs it was reported
+       as, and the restart that follows one of them reads the buffer from the
+       beginning again. Bytes between two reported holes are trivia — a line
+       break between two broken items — and they are reported as missing with
+       the holes they sit between. *)
+    let covered (span : Jide_lang.Span.t) =
+      let text = Scan.text state.scan in
+      let length = String.length text in
+      let blank start_byte end_byte =
+        let rec loop index =
+          index >= end_byte
+          ||
+          match text.[index] with
+          | ' ' | '\t' | '\r' | '\n' -> loop (index + 1)
+          | _ -> false
+        in
+        loop (max 0 start_byte)
+      in
+      let spans =
+        List.filter_map
+          (function Dropped { span; _ } -> Some span)
+          !dropped
+        |> List.sort (fun (a : Jide_lang.Span.t) (b : Jide_lang.Span.t) ->
+               compare a.Jide_lang.Span.start_byte b.Jide_lang.Span.start_byte)
+      in
+      let rec walk reach = function
+        | _ when reach >= span.Jide_lang.Span.end_byte -> true
+        | [] -> blank reach span.Jide_lang.Span.end_byte
+        | (earlier : Jide_lang.Span.t) :: rest ->
+            if earlier.Jide_lang.Span.start_byte > reach then
+              if blank reach earlier.Jide_lang.Span.start_byte then
+                walk (max reach earlier.Jide_lang.Span.end_byte) rest
+              else false
+            else walk (max reach earlier.Jide_lang.Span.end_byte) rest
+      in
+      walk (min length span.Jide_lang.Span.start_byte) spans
+    in
+    (* A hole whose first bytes belong to a stub already reported cannot be
+       stated as a span of its own without overlapping it. The bytes after it
+       are the rest of an item whose stub is there, and {!hole_start} keeps
+       that case out; anything left here would be a report of half a hole, so
+       it is not made. *)
+    let front_reported =
       List.exists
-        (function Dropped { span = earlier; _ } -> contains span earlier)
+        (function
+          | Dropped { span = earlier; _ } ->
+              earlier.Jide_lang.Span.start_byte < span.Jide_lang.Span.start_byte
+              && earlier.Jide_lang.Span.end_byte > span.Jide_lang.Span.start_byte)
         !dropped
     in
     if
       span.Jide_lang.Span.start_byte < span.Jide_lang.Span.end_byte
-      && not reported
+      && not (covered span || front_reported)
     then (
       (* The stub's span is the hole's, so the stub and the region the typing
          loop stays quiet about are the same bytes; {!dropped_of} reads the
-         name off the tokens and has no opinion about the extent. *)
+         name off the tokens and has no opinion about the extent. A hole that
+         grows over a stub already reported is the same item seen again, so
+         it keeps the name that stub was given: the wider range is read for
+         its span, not for a second guess at what the item was. *)
       let stub =
-        match dropped_of state.scan ~from ~upto with
-        | Dropped fields -> Dropped { fields with span }
+        match
+          List.find_opt
+            (function
+              | Dropped { span = earlier; _ } -> contains span earlier)
+            !dropped
+        with
+        | Some (Dropped fields) -> Dropped { fields with span }
+        | None -> (
+            match dropped_of state.scan ~from ~upto with
+            | Dropped fields -> Dropped { fields with span })
       in
       dropped :=
         stub
@@ -810,25 +869,34 @@ let recover ~name ~text : t =
                 run_from state ~depth ~start:target checkpoint)
           | None ->
               let target = target_of state ~failure in
-              let from = Scan.start_byte state.scan state.closed_item in
+              let start = hole_start state target in
+              let from = Scan.start_byte state.scan start in
               let upto = Scan.start_byte state.scan target in
               if upto <= from || depth >= max_byte_restarts then
                 finish state ~depth
               else (
                 counters.recoveries <- counters.recoveries + 1;
                 counters.byte_restarts <- counters.byte_restarts + 1;
-                (* The bytes before [stubbed_upto] are a hole already
-                   reported; only the region after it is a new one. The
-                   blanking still starts at [closed_item], because every
-                   broken byte has to leave the buffer. *)
-                note_dropped state
-                  ~from:(max state.closed_item state.stubbed_upto)
-                  ~upto:target;
+                (* The blanking covers every byte the stub stands for, from
+                   the beginning of the hole, so the text that is rewritten is
+                   exactly the text that is reported as missing. *)
+                note_dropped state ~from:start ~upto:target;
                 pass ~depth:(depth + 1)
                   (Scan.blank (Scan.text state.scan) ~from ~upto)))
   (* A block that was never closed is closed without a byte being rewritten.
      The attempt runs on a copy: a virtual brace that the rest of the file
-     cannot follow must leave the ordinary restarts as they were. *)
+     cannot follow must leave the ordinary restarts as they were.
+
+     Two things place the brace. The token decides whether one is tried at
+     all: only a token that can begin a top-level item and can never begin a
+     statement means the block was left open, because anything else could be
+     the next statement or the middle of this one ({!Scan.item_only_tokens}).
+     The position is the end of the last token the parser shifted, which is
+     where the missing brace would have been written: menhir starts the next
+     item where the last symbol ends, so a brace offered at the *following*
+     token instead would push that item's start past the trivia between them
+     and an outline would place it a few bytes late. A brace has no bytes of
+     its own, so its start and its end are that one position. *)
   and close_blocks_here state ~failure : Syntax.pprogram option =
     match state.input with
     | None -> None
@@ -839,15 +907,11 @@ let recover ~name ~text : t =
             Scan.open_depth state.scan
           else
             let entry = Scan.token state.scan failure in
-            if Scan.hard_keyword entry.token then entry.depth else 0
+            if Scan.item_only entry.token then entry.depth else 0
         in
         if missing <= 0 then None
         else
-          let position =
-            if failure >= Scan.count state.scan then
-              Scan.eof_position state.scan
-            else (Scan.token state.scan failure).start_pos
-          in
+          let position = position_before state.scan failure in
           let attempt = fork state in
           let checkpoint = I.input_needed environment in
           match close_blocks checkpoint ~position ~count:missing with

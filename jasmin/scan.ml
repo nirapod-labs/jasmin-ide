@@ -77,16 +77,25 @@ let item_tokens =
     Parser.SHARPLBRACKET;
   ]
 
-(** The keywords that occur in exactly one production and can never be an
-    identifier. Seeing one where a statement belongs means the block that
-    contains the statement was never closed, which is the one repair the
-    design makes without dropping anything: a virtual [}] closes the block
-    and the text read so far stays in the tree. [export], [inline] and [#[]
-    are not here: each is also an annotation label or a storage class, so
-    one of them can legitimately appear inside a body. *)
-let hard_keywords =
+(** Tokens that can begin a top-level item and can never begin a statement:
+    {!item_tokens} with the members of {!statement_tokens} taken out. Seeing
+    one of them where a statement belongs means the block that contains the
+    statement was never closed, which is the one repair the design makes
+    without dropping anything: a virtual [}] closes the block and the text
+    read so far stays in the tree.
+
+    Two kinds of token are left out. [inline] and [#[] are storage classes and
+    annotations, so a body legitimately contains them. [export] is an
+    annotation label as well, and it is here because it cannot begin a
+    statement: the places it can appear inside a body are all inside a [#[]
+    group, and a virtual [}] offered there breaks that group, so the attempt
+    is thrown away by the check that follows it (see [Recover.close_blocks]).
+    A name is left out for the same reason: it begins a statement as well as
+    a global. *)
+let item_only_tokens =
   [
     Parser.FN;
+    Parser.EXPORT;
     Parser.TYPE;
     Parser.PARAM;
     Parser.EXEC;
@@ -95,17 +104,31 @@ let hard_keywords =
     Parser.FROM;
   ]
 
+(** Tokens that can begin a type, which is how a global declaration begins.
+    The grammar's FIRST set for [ptype], which is the one FIRST set the item
+    set above leaves out; a test pins it. A token of this set that is where
+    an item belongs may begin a global, may begin a statement and may
+    continue an expression, so it is never a restart target on its own: the
+    driver asks the parser whether an item really begins there
+    ([Recover.item_begins]). *)
+let type_tokens =
+  [ Parser.T_BOOL; Parser.T_INT; Parser.T_W (U8, `Word (Some `Unsigned)); Parser.NID "" ]
+
 (** Two tokens are the same token when their constructors match. A token that
-    carries a value, which here is always a name, matches any value of its
-    constructor: the sets below name token kinds, and a restart point must be
-    found whatever the identifier at it happens to be spelled. Structural
-    equality alone would make the name in {!statement_tokens} the only name
-    that starts a statement. *)
+    carries a value matches any value of its constructor: the sets below name
+    token kinds, and a restart point must be found whatever the identifier at
+    it happens to be spelled, and whichever word size a type keyword carries.
+    Structural equality alone would make the name in {!statement_tokens} the
+    only name that starts a statement, and [u64] the only word type. *)
 let same_token (a : Parser.token) (b : Parser.token) =
-  match (a, b) with Parser.NID _, Parser.NID _ -> true | _ -> a = b
+  match (a, b) with
+  | Parser.NID _, Parser.NID _ -> true
+  | Parser.T_W _, Parser.T_W _ -> true
+  | _ -> a = b
 
 let item_start token = List.exists (same_token token) item_tokens
-let hard_keyword token = List.exists (same_token token) hard_keywords
+let item_only token = List.exists (same_token token) item_only_tokens
+let type_start token = List.exists (same_token token) type_tokens
 
 (** Tokens that can begin a statement inside a function body, as the
     grammar's FIRST set for [pinstr] has them. The guard test pins this set
@@ -401,6 +424,39 @@ let next_item_at_depth t ~from ~depth =
       else loop (index + 1)
   in
   loop (max 0 from)
+
+(** [type_candidates t ~from ~depth] are the token indices at or after
+    [from], in order, that could begin a global declaration at [depth]:
+    {!type_start} tokens at exactly that depth, or at the smallest depth the
+    rest of the buffer offers when [depth] is [None]. A global begins with its
+    type, which is also a statement and an expression, so an index from this
+    list is only a candidate: the caller has to ask the parser whether an
+    item really begins there. The list is in buffer order and each call
+    rescans, so a caller that rejects the first few candidates does not need
+    the list to be memoised. *)
+let type_candidates t ~from ~depth =
+  let length = count t in
+  let from = max 0 from in
+  if from >= length then []
+  else
+    let wanted =
+      match depth with
+      | Some depth -> depth
+      | None ->
+          let smallest = ref max_int in
+          for index = from to length - 1 do
+            if t.tokens.(index).depth < !smallest then
+              smallest := t.tokens.(index).depth
+          done;
+          !smallest
+    in
+    let found = ref [] in
+    for index = length - 1 downto from do
+      let entry = t.tokens.(index) in
+      if entry.depth = wanted && type_start entry.token then
+        found := index :: !found
+    done;
+    !found
 
 (** [item_root t index] is the token the top-level item containing [index]
     begins at: [index] itself when it is already at item level, and the
