@@ -104,6 +104,13 @@ type counters = {
   mutable statement_restarts : int;
   mutable brace_restarts : int;  (** Closings with a brace that was missing. *)
   mutable byte_restarts : int;
+  mutable moved_positions : int;
+      (** Restarts that moved the position the item after the hole begins
+          at, so that item covers the hole alone. *)
+  mutable refused_positions : int;
+      (** Restarts that could not move it and kept the position the
+          checkpoint carried. Expected to stay at zero: it is the defect the
+          move removes, and a run that shows it is a run to look at. *)
 }
 
 let no_counters () =
@@ -113,6 +120,8 @@ let no_counters () =
     statement_restarts = 0;
     brace_restarts = 0;
     byte_restarts = 0;
+    moved_positions = 0;
+    refused_positions = 0;
   }
 
 type t = {
@@ -240,6 +249,25 @@ let start_checkpoint ~name ~position =
 let initial_position =
   { Lexing.pos_fname = ""; pos_lnum = 1; pos_bol = 0; pos_cnum = 0 }
 
+(** Where an item begins: the end of the token before its first token.
+
+    The compiler places an item at the position the parser holds when the
+    item's production begins, and every item production but [param], [exec],
+    [namespace] and one behind a [#[]] annotation begins with a nullable
+    symbol ([annotations], or the optional [from?] of a [require]). Menhir
+    gives such an empty production the position the parser has reached —
+    [parser.mly], and the generated [let _startpos = _menhir_stack.endp] —
+    which is the end of the last token that was shifted. So a straight parse
+    starts each item where the item before it ends, and a restart has to
+    resume with that same position or the item it produces swallows the
+    bytes of the hole in front of it. The item's end needs no such care: it
+    comes from its own last token, and {!reposition} moves only the cells the
+    item that follows begins with, so the item before the hole keeps the end
+    its own tokens give it. *)
+let position_before scan target =
+  if target <= 0 then initial_position
+  else (Scan.token scan (target - 1)).end_pos
+
 let new_state counters scan =
   let initial =
     start_checkpoint ~name:(Scan.name scan) ~position:initial_position
@@ -289,6 +317,70 @@ let rec wait_for_input checkpoint =
       | next -> wait_for_input next
       | exception _ -> None)
   | I.HandlingError _ | I.Accepted _ | I.Rejected -> None
+
+(** [reposition ~counters checkpoint ~position ~lead] is [checkpoint] with
+    the parser left ready to read [lead], the token the restart resumes at,
+    and with [position] as the position the item that begins there starts at.
+
+    A checkpoint taken at an item boundary still owes the item before it its
+    reduction: menhir decides that reduction from the next token, so the item
+    has not been built yet and its end is still to be read off the top stack
+    cell. Writing [position] into that cell, which is what this function used
+    to do, therefore moved the end of the item before the hole to the end of
+    the hole. Instead the parser is offered [lead], the token the restart
+    reads anyway, which performs every reduction the item before the hole is
+    owed with the positions the item's own tokens carry; the shift is then
+    taken back off, so the token is read again by the driver. What is left to
+    move is the cells the item that follows begins with: a production that
+    starts with [annotations] or with the optional [from?] of a [require]
+    takes the item's start from the end of such an empty cell, and moving
+    those cells, and only those, is what puts the item at [position].
+
+    The stack that comes out holds the same cells in the same states as one
+    that never stopped, so the parse that continues is the one the checkpoint
+    describes; only where the empty productions say they are is different.
+    Nothing here can refuse: [lead] is an item boundary's token, which the
+    checkpoint accepted when it was recorded, and each cell that is fed back
+    was taken off the very state that put it there. A refusal is counted all
+    the same, because it would leave the position the checkpoint carries —
+    the defect this function exists to remove — in place. *)
+let reposition ~counters checkpoint ~position ~lead =
+  let refuse () =
+    counters.refused_positions <- counters.refused_positions + 1;
+    checkpoint
+  in
+  match checkpoint with
+  | I.InputNeeded environment -> (
+      match I.top environment with
+      | None -> refuse ()
+      | Some (I.Element (_, _, _, carried)) -> (
+          if carried = position then checkpoint
+          else
+            match
+              wait_for_input
+                (I.offer checkpoint
+                   (lead.Scan.token, lead.Scan.start_pos, lead.Scan.end_pos))
+            with
+            | None -> refuse ()
+            | Some (I.InputNeeded shifted) -> (
+                match I.pop shifted with
+                | None -> refuse ()
+                | Some below ->
+                    let rec move env =
+                      match I.top env with
+                      | Some (I.Element (state, value, start, stop))
+                        when start = carried && stop = carried -> (
+                          match I.pop env with
+                          | None -> env
+                          | Some under ->
+                              I.feed (I.incoming_symbol state) position value
+                                position (move under))
+                      | _ -> env
+                    in
+                    counters.moved_positions <- counters.moved_positions + 1;
+                    I.input_needed (move below))
+            | Some _ -> refuse ()))
+  | _ -> refuse ()
 
 (** [close_blocks checkpoint ~position ~count] offers [count] closing braces
     at [position]. [None] means the parser did not take them, which is how a
@@ -491,6 +583,17 @@ let recover ~name ~text : t =
     | Some target -> target
     | None -> Scan.count state.scan
   in
+  (* Where the bytes of a hole end: where the item that follows it begins,
+     which is the end of the last token in the hole. The two abut, as they do
+     in a parse that was never interrupted, so a stub never overlaps the item
+     after it — a typing diagnostic in that item is the program's own error
+     and must not be dropped with the hole's. A hole that runs off the end of
+     the buffer ends with the buffer. *)
+  let hole_end state upto =
+    if upto <= 0 then 0
+    else if upto >= Scan.count state.scan then Scan.start_byte state.scan upto
+    else (position_before state.scan upto).Lexing.pos_cnum
+  in
   (* One stub and one recovered region for the bytes of one hole. Two holes
      are two stubs even when one of them is first seen as part of a wider
      restart, which is why the restart that follows one starts at the end of
@@ -502,7 +605,7 @@ let recover ~name ~text : t =
     let span =
       Scan.span state.scan
         ~start_byte:(Scan.start_byte state.scan from)
-        ~end_byte:(Scan.start_byte state.scan upto)
+        ~end_byte:(hole_end state upto)
     in
     let reported =
       List.exists
@@ -513,7 +616,13 @@ let recover ~name ~text : t =
       span.Jide_lang.Span.start_byte < span.Jide_lang.Span.end_byte
       && not reported
     then (
-      let stub = dropped_of state.scan ~from ~upto in
+      (* The stub's span is the hole's, so the stub and the region the typing
+         loop stays quiet about are the same bytes; {!dropped_of} reads the
+         name off the tokens and has no opinion about the extent. *)
+      let stub =
+        match dropped_of state.scan ~from ~upto with
+        | Dropped fields -> Dropped { fields with span }
+      in
       dropped :=
         stub
         :: List.filter
@@ -566,16 +675,22 @@ let recover ~name ~text : t =
               else (
                 note_dropped state ~from:source ~upto:target;
                 state.closed_item <- source;
-                (* Restarting from the start state at a later token must also
-                   move the parser's idea of where it is: an item that begins
-                   with an empty production would otherwise be given the
-                   position of the start of the buffer, and an outline would
-                   place it at byte zero. *)
+                (* The item this restart produces must begin where the item
+                   before it ends, which is the end of the token before
+                   [target] and the position a parse that was never
+                   interrupted gives it. A checkpoint carries the position of
+                   the token before the *dropped* item instead, so it is
+                   moved; the start state, which holds no symbol and so has
+                   no position to move, is rebuilt at that position — it is
+                   only reachable while nothing has been reduced, so nothing
+                   is lost by starting it again. *)
+                let position = position_before state.scan target in
                 let checkpoint =
                   if source = 0 then
-                    start_checkpoint ~name:(Scan.name state.scan)
-                      ~position:(Scan.token state.scan target).start_pos
-                  else checkpoint
+                    start_checkpoint ~name:(Scan.name state.scan) ~position
+                  else
+                    reposition ~counters:state.counters checkpoint ~position
+                      ~lead:(Scan.token state.scan target)
                 in
                 run_from state ~depth ~start:target checkpoint)
           | None ->

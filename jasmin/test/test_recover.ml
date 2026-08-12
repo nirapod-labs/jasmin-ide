@@ -939,6 +939,126 @@ let test_restarted_items_keep_their_place () =
        places
        [ "fn second"; "fn third" ])
 
+(* A restart resumes the parser at the first token after the hole, and the
+   position it resumes at is the driver's to choose. The rule is the
+   compiler's own and needs no tuning: an item begins where the last token
+   before it ends, which is where a parse that was never interrupted puts it.
+   Two shapes pin it, because the item the restart produces is reached by two
+   different routes — a checkpoint taken at the item before the hole when the
+   hole is in the middle of a file, and the start state when the first item
+   is the broken one — and a position taken from either the checkpoint or the
+   item's own keyword moves an item the fault never touched.
+
+   The reference is the same text parsed with no fault at all, so the test
+   asks for the compiler's answer rather than for a number that would have to
+   be maintained. Each replacement below keeps the length of the text, so the
+   surviving items sit at the same bytes in both parses. *)
+
+let three_functions =
+  {|fn first(reg u32 a) -> reg u32 {
+  return a;
+}
+
+fn second(reg u32 a) -> reg u32 {
+  return a;
+}
+
+fn third(reg u32 a) -> reg u32 {
+  return a;
+}
+|}
+
+(** The item's name and the bytes it covers, in source order. *)
+let outline parsed =
+  List.map2
+    (fun name (item : Jasmin.Syntax.pitem Jasmin.Location.located) ->
+      ( name,
+        item.Jasmin.Location.pl_loc.Jasmin.Location.loc_bchar,
+        item.Jasmin.Location.pl_loc.Jasmin.Location.loc_echar ))
+    (item_names parsed)
+    (Jide_jasmin.Parse.items parsed)
+
+(** [replace_nth text needle replacement n] is [text] with its [n]th (from
+    zero) [needle] replaced. The replacement must be as long as the needle,
+    so that no byte after it moves and the two texts share their offsets. *)
+let replace_nth text ~needle ~replacement n =
+  let length = String.length text in
+  let rec find from n =
+    let at = index_of (String.sub text from (length - from)) needle in
+    if at < 0 then -1
+    else if n <= 0 then from + at
+    else find (from + at + String.length needle) (n - 1)
+  in
+  let at = find 0 n in
+  if at < 0 || String.length needle <> String.length replacement then text
+  else
+    String.sub text 0 at ^ replacement
+    ^ String.sub text
+        (at + String.length needle)
+        (length - at - String.length needle)
+
+let test_restart_position () =
+  let clean = outline (parse three_functions) in
+  let without name = List.filter (fun (kept, _, _) -> kept <> name) clean in
+  let broken_middle =
+    replace_nth three_functions ~needle:"->" ~replacement:"==" 1
+  in
+  check "restart: the fault in the middle breaks only the item it sits in"
+    (item_names (parse broken_middle) = [ "first"; "third" ]);
+  (* The items that begin at or after the hole are compared below, and the one
+     before it on its own: the position a restart moves is the one the item
+     after the hole begins at, while the item before it takes its end from its
+     own last token, so the move must leave that end where a parse that was
+     never interrupted puts it. *)
+  let entries_from byte entries =
+    List.filter (fun (_, start, _) -> start >= byte) entries
+  in
+  let hole_start =
+    match Jide_jasmin.Parse.dropped (parse broken_middle) with
+    | [ Jide_jasmin.Recover.Dropped { span; _ } ] ->
+        span.Jide_lang.Span.start_byte
+    | _ -> -1
+  in
+  check "restart: the items after a hole in the middle keep their place"
+    (entries_from hole_start (outline (parse broken_middle))
+    = entries_from hole_start (without "second"));
+  let end_of name entries =
+    List.filter_map
+      (fun (kept, _, stop) -> if kept = name then Some stop else None)
+      entries
+  in
+  check "restart: the item before a hole in the middle keeps its end"
+    (end_of "first" (outline (parse broken_middle)) = end_of "first" clean);
+  let broken_first =
+    replace_nth three_functions ~needle:"->" ~replacement:"==" 0
+  in
+  check "restart: a broken first item breaks only itself"
+    (item_names (parse broken_first) = [ "second"; "third" ]);
+  check "restart: the item after a broken first item keeps its place"
+    (outline (parse broken_first) = without "first");
+  (* And the hole ends where the item that follows it begins, so no item the
+     fault did not touch sits inside a region the typing loop keeps quiet. *)
+  List.iter
+    (fun (label, text) ->
+      let parsed = parse text in
+      let stub =
+        match Jide_jasmin.Parse.dropped parsed with
+        | [ Jide_jasmin.Recover.Dropped { span; _ } ] -> span
+        | _ -> Jide_lang.Span.make ~start_byte:(-1) ~end_byte:(-2)
+      in
+      check
+        (label ^ ": the first kept item begins where the stub ends")
+        (match
+           List.find_opt
+             (fun (_, start, _) -> start >= stub.Jide_lang.Span.start_byte)
+             (outline parsed)
+         with
+        | Some (_, start, _) ->
+            start = stub.Jide_lang.Span.end_byte
+            && stub.Jide_lang.Span.start_byte < stub.Jide_lang.Span.end_byte
+        | None -> false))
+    [ ("middle", broken_middle); ("first", broken_first) ]
+
 (* The stub is not a [Syntax.pitem] because that type is the compiler's, so
    the item stream a consumer walks is the merge of the kept items and the
    stubs, in source order. *)
@@ -1021,6 +1141,7 @@ let () =
   test_no_function_from_a_string ();
   test_blanked_bytes_are_reported ();
   test_restarted_items_keep_their_place ();
+  test_restart_position ();
   test_stubs_are_in_the_item_stream ();
   test_no_exception_escapes ();
   if !failures = 0 then print_endline "all recovery tests passed"
