@@ -185,3 +185,47 @@ let say_answer (answer : answer) =
   | Some difference -> Printf.eprintf "first-difference: %s\n" difference);
   flush stderr
 
+let print_tree (answer : answer) =
+  Format.printf "%a@." Jasmin.Latex_printer.pp_prog answer.items;
+  Format.pp_print_flush Format.std_formatter ()
+
+let read (path : string) = In_channel.with_open_bin path In_channel.input_all
+
+let status (answer : answer) =
+  match (answer.diagnostics, answer.same_tree, answer.same_recovery) with
+  | 0, Some true, Some true -> 0
+  | _ -> 1
+
+(** Two sources the self-test reads. The first is a program every Jasmin
+    accepts; the second differs from it in one item's name, so the tree
+    comparison and its first difference are exercised on a pair that really
+    differs. *)
+let valid =
+  String.concat "\n"
+    [
+      "export fn main(reg u64 p) -> reg u64 {";
+      "  reg u64 r;";
+      "  r = [:u64 p];";
+      "  r += [:u64 p - 8];";
+      "  return r;";
+      "}";
+      "";
+    ]
+
+let also_valid =
+  String.concat "\n"
+    [ "fn other(reg u64 x) -> reg u64 {"; "  return x;"; "}"; "" ]
+
+let different = String.map (fun c -> if c = 'm' then 'n' else c) valid
+let invalid = "fn broken( {\n"
+
+(** [contains ~needle haystack] is true when [needle] occurs in [haystack]. *)
+let contains ~(needle : string) (haystack : string) =
+  let n = String.length needle and h = String.length haystack in
+  let rec at i =
+    if i + n > h then false
+    else if String.sub haystack i n = needle then true
+    else at (i + 1)
+  in
+  n > 0 && at 0
+
