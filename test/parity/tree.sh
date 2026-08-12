@@ -20,8 +20,17 @@
 # tree to compare with. The file is then outside the positive corpus the gate
 # names, and the run counts it apart instead of passing it.
 #
-# A file passes only when the driver reports no diagnostic and both trees are
-# the compiler parser's own.
+# A file passes only when the driver reports no diagnostic, both trees are the
+# compiler parser's own, and — when JASMIN2TEX is named — the release's
+# parse-and-print produced a tree for it that prints the same.
+#
+# The two structural answers are true by construction, and the script says so
+# on every run: the driver's fast path is `Jasmin.Parseio.parse_program` on the
+# same bytes under the same name, returning that call's item list unchanged
+# (`jasmin/parse.ml`), so `same-tree` asks whether that list equals itself. It
+# is a regression guard on the driver, not a second observer. The only
+# external comparison here is the printing, and it is the one measured against
+# a separate binary.
 #
 # Normalisation: none. The comparison is the item lists themselves, compared
 # with `Marshal` and `No_sharing`, which writes every field of every node:
@@ -37,6 +46,15 @@
 # file's own directory with the file's own name, so a `require` beside the
 # file resolves, and the two see the same bytes under the same name.
 #
+# The oracle has to prove it answered. A file whose parse-and-print exited
+# non-zero (`refused`), or exited zero and wrote nothing (`silent`), was not
+# compared: it is left out of both the numerator and the denominator of the
+# printing count, it is named in the run's output, and it fails the run. A run
+# in which the parse-and-print produced a tree for none of the files is a
+# broken configuration and not a pass: it exits 2 after a line that says so. A
+# file the tree printer answered nothing for is counted as `unknown`, is not
+# agreement, and fails the run too.
+#
 # Environment:
 #   PARITY_TREE  the tree printer. Default: the `parity_tree` this tree
 #                builds.
@@ -46,10 +64,13 @@
 #   PARITY_JOBS  how many files are parsed at once, default 4.
 #   PARITY_TSV   a file to write one tab-separated line per file to.
 #
-# Exit status: 0 when every file the compiler parses passes, 1 when one does
-# not or when the corpus holds a file the compiler's parser rejects, 2 when
-# the script cannot run (bad arguments, no corpus, no printer, a named
-# parse-and-print that does not work).
+# Exit status: 0 when every file the compiler parses passes and every question
+# was answered, 1 when a file does not (a tree differs, a printing differs, the
+# driver reports a diagnostic, the compiler rejects a file the corpus calls
+# positive, the parse-and-print produced no tree for it, or the tree printer
+# answered nothing), 2 when the script cannot run (bad arguments, no corpus, no
+# printer, or a named parse-and-print or tree printer that answered nothing at
+# all).
 
 set -u
 
@@ -152,15 +173,26 @@ total=$(wc -l <"$list" | tr -d ' ')
 # Writes one result line to $work/result.<index>:
 #
 #   index relative diagnostics same-tree same-recovery printed status
+#   printer-exit [difference]
 #
-# `printed` is `yes`, `no`, `unprintable` (the release's parse-and-print
-# refused the file: it runs pretyping before it prints, so a file that fails
-# typing has no print) or `-` when no parse-and-print was named.
+# `printed` is `yes` (the parse-and-print wrote a tree and it is byte for byte
+# ours), `no` (it wrote a tree and the two differ), `refused` (it exited
+# non-zero, so it wrote no tree), `silent` (it exited zero and wrote nothing,
+# which is no tree either) or `-` when no parse-and-print was named. Only
+# `yes` and `no` are comparisons: `refused` and `silent` are files whose
+# printing was not measured, and the summary counts them apart.
+#
+# `printer-exit` is the tree printer's own exit status, so a run in which the
+# harness itself failed says so instead of being left to guess.
 #
 # status is `pass`, `rejected` (the compiler's parser rejects a file the
 # corpus calls positive), `error` (the driver reports a diagnostic on a file
-# the compiler parses), `tree` (a tree differs) or `print` (the trees agree
-# but the two printings do not, which points at the printer or the build).
+# the compiler parses), `tree` (a tree differs), `print` (the trees agree but
+# the two printings do not, which points at the printer or the build),
+# `unprinted` (the trees agree but the parse-and-print produced no tree for
+# the file, so its printing was not compared) or `noanswer` (the tree printer
+# answered nothing for the file: a `driver:`, `same-tree:` or `same-recovery:`
+# line is missing).
 parse_one() {
 	index=$1
 	path=$2
@@ -169,6 +201,7 @@ parse_one() {
 	base=$(basename "$path")
 	out=$work/t.$index
 	(cd "$directory" && "$printer" "$base") >"$out" 2>"$work/t.$index.err" </dev/null
+	printer_exit=$?
 	diagnostics=$(sed -n 's/^driver: \([0-9]*\) diagnostics$/\1/p' "$work/t.$index.err")
 	same_tree=$(sed -n 's/^same-tree: //p' "$work/t.$index.err")
 	same_recovery=$(sed -n 's/^same-recovery: //p' "$work/t.$index.err")
@@ -180,8 +213,11 @@ parse_one() {
 	if [ -n "$compiler" ]; then
 		(cd "$directory" && "$compiler" --arch "$(arch_for "$relative")" "$base") \
 			>"$work/c.$index" 2>"$work/c.$index.err" </dev/null
-		if [ $? -ne 0 ]; then
-			printed=unprintable
+		oracle_exit=$?
+		if [ "$oracle_exit" -ne 0 ]; then
+			printed=refused
+		elif [ ! -s "$work/c.$index" ]; then
+			printed=silent
 		elif cmp -s "$out" "$work/c.$index"; then
 			printed=yes
 		else
@@ -189,20 +225,27 @@ parse_one() {
 		fi
 	fi
 	status=tree
-	case $same_tree/$same_recovery in
-	n/a/n/a) status=rejected ;;
-	yes/yes)
-		if [ "$diagnostics" != 0 ]; then status=error
-		elif [ "$printed" = no ]; then status=print
-		else status=pass
-		fi
-		;;
-	*) status=tree ;;
-	esac
+	if [ "$diagnostics" = unknown ] || [ "$same_tree" = unknown ] ||
+		[ "$same_recovery" = unknown ]; then
+		status=noanswer
+	else
+		case $same_tree/$same_recovery in
+		n/a/n/a) status=rejected ;;
+		yes/yes)
+			if [ "$diagnostics" != 0 ]; then status=error
+			elif [ "$printed" = no ]; then status=print
+			elif [ "$printed" = refused ] || [ "$printed" = silent ]; then
+				status=unprinted
+			else status=pass
+			fi
+			;;
+		*) status=tree ;;
+		esac
+	fi
 	{
-		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
 			"$index" "$relative" "$diagnostics" "$same_tree" "$same_recovery" \
-			"$printed" "$status"
+			"$printed" "$status" "$printer_exit"
 		if [ -n "$difference" ]; then printf '\t%s' "$difference"; fi
 		printf '\n'
 	} >"$work/result.$index"
@@ -251,30 +294,48 @@ first_difference() {
 		/^\+/ && seen { print "compiler: " substr($0, 2); exit }'
 }
 
-passed=0
 rejected=0
 errored=0
 differing=0
 print_only=0
+unprinted=0
+noanswer=0
 clean=0
-tree_differs=0
-recovery_differs=0
+tree_yes=0
+tree_no=0
+tree_na=0
+tree_unknown=0
+recovery_yes=0
+recovery_no=0
+recovery_unknown=0
 printed_yes=0
 printed_no=0
-unprintable=0
+printed_refused=0
+printed_silent=0
 mismatches=$work/mismatches
 : >"$mismatches"
-while IFS=$tab read -r index relative diagnostics same_tree same_recovery printed status difference; do
+while IFS=$tab read -r index relative diagnostics same_tree same_recovery printed status printer_exit difference; do
 	if [ "$diagnostics" = 0 ]; then clean=$((clean + 1)); fi
-	if [ "$same_tree" = no ]; then tree_differs=$((tree_differs + 1)); fi
-	if [ "$same_recovery" = no ]; then recovery_differs=$((recovery_differs + 1)); fi
+	case $same_tree in
+	yes) tree_yes=$((tree_yes + 1)) ;;
+	no) tree_no=$((tree_no + 1)) ;;
+	n/a) tree_na=$((tree_na + 1)) ;;
+	*) tree_unknown=$((tree_unknown + 1)) ;;
+	esac
+	case $same_recovery in
+	yes) recovery_yes=$((recovery_yes + 1)) ;;
+	no) recovery_no=$((recovery_no + 1)) ;;
+	n/a) ;;
+	*) recovery_unknown=$((recovery_unknown + 1)) ;;
+	esac
 	case $printed in
 	yes) printed_yes=$((printed_yes + 1)) ;;
 	no) printed_no=$((printed_no + 1)) ;;
-	unprintable) unprintable=$((unprintable + 1)) ;;
+	refused) printed_refused=$((printed_refused + 1)) ;;
+	silent) printed_silent=$((printed_silent + 1)) ;;
 	esac
 	case $status in
-	pass) passed=$((passed + 1)) ;;
+	pass) ;;
 	rejected)
 		rejected=$((rejected + 1))
 		printf '%s\t%s\n' "$relative" \
@@ -297,17 +358,37 @@ while IFS=$tab read -r index relative diagnostics same_tree same_recovery printe
 		printf '%s\t%s\n' "$relative" "printing: ${detail:-the two printings differ}" \
 			>>"$mismatches"
 		;;
+	unprinted)
+		unprinted=$((unprinted + 1))
+		reason=$(sed -n '1p' "$work/c.$index.err" 2>/dev/null)
+		printf '%s\t%s\n' "$relative" \
+			"the parse-and-print produced no tree ($printed${reason:+: $reason}); the printing was not compared" \
+			>>"$mismatches"
+		;;
+	noanswer)
+		noanswer=$((noanswer + 1))
+		printf '%s\t%s\n' "$relative" \
+			"the tree printer's answer is incomplete (exit $printer_exit): a driver:, same-tree: or same-recovery: line is missing" \
+			>>"$mismatches"
+		;;
 	esac
 done <"$results"
 
-comparable=$((passed + errored + differing + print_only))
-say "$total files; the compiler's parser accepts $comparable, rejects $rejected"
+# The two structural questions are answered per file and counted where they
+# were answered. A file the tree printer said nothing about is neither
+# agreement nor disagreement: it is its own count, and it fails the run below.
+tree_answered=$((tree_yes + tree_no))
+recovery_answered=$((recovery_yes + recovery_no))
+say "$total files; the compiler's parser accepts $tree_answered, rejects $tree_na, and the tree printer did not answer for $tree_unknown"
 say "no error from the driver: $clean of $total"
-say "the same tree as the compiler: $((comparable - tree_differs)) of $comparable"
-say "the same recovery tree as the compiler: $((comparable - recovery_differs)) of $comparable"
+say "the same tree as the compiler, by construction: $tree_yes of $tree_answered answered; $tree_unknown no answer; $tree_na the compiler's parser rejects the file"
+say "the same recovery tree as the compiler, by construction: $recovery_yes of $recovery_answered answered; $recovery_unknown no answer"
 if [ -n "$compiler" ]; then
-	say "the same printing as the compiler: $printed_yes of $((printed_yes + printed_no)) compared; $unprintable the release's parse-and-print refuses"
+	printing_compared=$((printed_yes + printed_no))
+	printing_not=$((printed_refused + printed_silent))
+	say "the same printing as the compiler, external, byte for byte: $printed_yes of $printing_compared compared; $printing_not not compared ($printed_refused refused, $printed_silent answered nothing)"
 else
+	printing_compared=0
 	say "no JASMIN2TEX named: the printing was not compared"
 fi
 
@@ -317,7 +398,18 @@ if [ -s "$mismatches" ]; then
 	done <"$mismatches"
 fi
 
-if [ "$rejected" -eq 0 ] && [ "$errored" -eq 0 ] && [ "$differing" -eq 0 ] && [ "$print_only" -eq 0 ]; then
+# A run that answered nothing is not a pass, and it is not a corpus
+# disagreement either: it is the harness or the oracle failing to run.
+if [ "$tree_unknown" -gt 0 ] && [ "$tree_answered" -eq 0 ]; then
+	say "the tree printer answered with a tree for none of the $total files: $printer is not a working printer"
+	exit 2
+fi
+if [ -n "$compiler" ] && [ "$printing_compared" -eq 0 ] && [ "$rejected" -ne "$total" ]; then
+	say "the parse-and-print produced a tree for none of the $total files: JASMIN2TEX=$compiler is not a working oracle ($printed_refused refused, $printed_silent answered nothing)"
+	exit 2
+fi
+if [ "$rejected" -eq 0 ] && [ "$errored" -eq 0 ] && [ "$differing" -eq 0 ] &&
+	[ "$print_only" -eq 0 ] && [ "$unprinted" -eq 0 ] && [ "$noanswer" -eq 0 ]; then
 	say "every file the compiler parses passes"
 	exit 0
 fi

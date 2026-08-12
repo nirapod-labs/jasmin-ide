@@ -10,13 +10,25 @@
       The two are compared as values, field for field, sharing ignored: every
       location and every annotation counts, and nothing is stripped,
       reordered, renumbered or normalised on either side.
+
+      This answer is true by construction; it is not an external observation.
+      {!Jide_jasmin.Parse.parse} runs [Parseio.parse_program] on the same
+      bytes under the same name and returns that call's item list unchanged,
+      so on a file the compiler parses the comparison asks whether that list
+      equals itself. What it guards is the driver: it fails if the fast path
+      ever rebuilds, filters, reorders or normalises the list, or if the two
+      calls stop agreeing. The one external comparison in this harness is the
+      printing described below, which the caller (test/parity/tree.sh) makes
+      by running the release's own binary on the same bytes.
     - [same-recovery]: the same comparison for the tree the recovery engine
       itself returns ({!Jide_jasmin.Recover.recover}) when it is asked for
       the file directly, instead of being reached only through an error.
       That is the driver's own assembly of the item list, taken without the
       fast path, so a location moved or an item dropped by a checkpoint,
       a restart or a blanking shows up as a difference rather than being
-      assumed away.
+      assumed away. The parser on the other side is the same one, so this
+      answer is by construction as to the compiler too: what it tests is our
+      assembly, not an independent parser.
 
     Stdout carries the driver's tree, rendered by the compiler's own AST
     printer ([Latex_printer.pp_prog]), and nothing else, so a caller can
@@ -31,6 +43,11 @@
     does not use the printing, and why the printing is not the gate: it is
     the cross-check that our build of the release's printer, given our tree,
     produces the same bytes as the release's own binary given its own.
+
+    There is exactly one observer outside this program, and it is that
+    binary. Neither structural answer claims that two independent parsers
+    agree: both compare the one parser with itself, and the run says so in the
+    labels it prints.
 
     Usage:
 
@@ -257,6 +274,15 @@ let check_selftest () =
   let again = parse_text ~name:"valid.jazz" valid in
   check "reparsing the valid source is stable"
     (structural again.items good.items);
+  (* The structural comparison is a comparison and not a constant: the same
+     bytes read under another name carry another file name in every location,
+     and the answer changes. That is what lets it fail on a location, which is
+     the only thing it can add over the call it is compared with. *)
+  let renamed_file = parse_text ~name:"another-name.jazz" valid in
+  check "the same bytes under another name are a different tree"
+    (not (structural renamed_file.items good.items));
+  check "the same bytes under another name are still the compiler parser's own"
+    (renamed_file.same_tree = Some true);
   (* The comparison itself, on two trees that really differ. *)
   let mine = parse_text ~name:"a.jazz" valid
   and other = parse_text ~name:"b.jazz" also_valid in
