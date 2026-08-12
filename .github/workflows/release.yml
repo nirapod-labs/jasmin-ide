@@ -1,0 +1,69 @@
+# Build, attest and draft a release from a signed tag.
+#
+# Nothing here has ever run. The project is private and has no remote, so this
+# file is written and checked by inspection only: `docs/edge.md` says what that
+# means, and `scripts/check-workflows.sh` is the check.
+#
+# The gate is the `release` environment. It carries a protection rule whose
+# reviewer is the person who decides that a release happens, so no job below
+# runs until that approval lands. That the tag is signed is a repository tag
+# rule, not a line in this file.
+#
+# Permissions are read-only at the top of the file. Only the jobs that write
+# ask for more, and only for what they write:
+#
+#   contents: write      the draft release, which creates a draft and no
+#                        published release;
+#   attestations: write  the attestation job;
+#   id-token: write      the two publishing jobs and no others. It mints an
+#                        identity token, which is what a registry checks, so it
+#                        never leaves the publish stage.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+# Every action this workflow uses, with the version a reader recognises and the
+# commit its `uses:` line must name.
+#
+# GitHub runs no expression on a `uses:` line, so the value below cannot be
+# substituted into it: the pair is a record, and the `uses:` line carries the
+# same value literally. Each `<NAME>_SHA` is the string PIN until one fill-in
+# pass replaces it here and on the `uses:` lines in the same commit.
+# `scripts/check-workflows.sh` fails while any pin is PIN and fails when the
+# two places disagree, so a half-finished pass is caught rather than shipped.
+env:
+  CHECKOUT_ACTION: actions/checkout
+  CHECKOUT_VERSION: v4
+  CHECKOUT_SHA: PIN
+
+  SETUP_OCAML_ACTION: ocaml/setup-ocaml
+  SETUP_OCAML_VERSION: v3
+  SETUP_OCAML_SHA: PIN
+
+  SETUP_NODE_ACTION: actions/setup-node
+  SETUP_NODE_VERSION: v4
+  SETUP_NODE_SHA: PIN
+
+  PNPM_SETUP_ACTION: pnpm/action-setup
+  PNPM_SETUP_VERSION: v4
+  PNPM_SETUP_SHA: PIN
+
+  UPLOAD_ARTIFACT_ACTION: actions/upload-artifact
+  UPLOAD_ARTIFACT_VERSION: v4
+  UPLOAD_ARTIFACT_SHA: PIN
+
+  DOWNLOAD_ARTIFACT_ACTION: actions/download-artifact
+  DOWNLOAD_ARTIFACT_VERSION: v4
+  DOWNLOAD_ARTIFACT_SHA: PIN
+
+  ATTEST_ACTION: actions/attest-build-provenance
+  ATTEST_VERSION: v2
+  ATTEST_SHA: PIN
+
