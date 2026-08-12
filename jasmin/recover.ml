@@ -182,6 +182,58 @@ type state = {
 let accepts checkpoint (entry : Scan.token) =
   try I.acceptable checkpoint entry.token entry.start_pos with _ -> false
 
+(** [item_begins scan ~checkpoint ~target] is true when the parser, resumed
+    at [target] from [checkpoint], shifts the token there and reduces a
+    top-level item before it meets a token it cannot shift.
+
+    {!accepts} alone does not answer the question that matters here. A global
+    declaration begins with its type, and a type is also a statement and an
+    expression, so a name or a [u64] that the parser can shift where an item
+    belongs may be a global, may be a local declaration whose [reg] was lost,
+    or may be the middle of the expression above it. The grammar's FIRST set
+    cannot separate them and no lexical rule can. What can is the parser: run
+    the item from the candidate and see whether a [top] production comes out
+    of it. An item that is not really there fails inside the run, at the
+    token where the guess stops making sense, and the candidate is refused.
+
+    Only a [top] reduced after the candidate's own first token has been
+    shifted counts. Menhir defers the reduction of an item whose last symbol
+    has just been read until it knows the next token, so a checkpoint taken
+    at an item boundary still holds the item before it on the stack; the
+    first token offered then finishes *that* item and a [top] comes out of it
+    without the candidate having begun anything. A shift of the candidate is
+    what tells the two apart.
+
+    The run stops at the first [top] reduction, so it costs one item, and it
+    never touches [state]: the candidate may be wrong, and a wrong guess must
+    leave the parse that continues alone. *)
+let item_begins scan ~checkpoint ~target =
+  let rec loop ~shifted index checkpoint =
+    match checkpoint with
+    | I.InputNeeded environment -> (
+        let checkpoint = I.input_needed environment in
+        if index >= Scan.count scan then false
+        else
+          match I.offer checkpoint (Scan.triple scan index) with
+          | next -> loop ~shifted (index + 1) next
+          | exception _ -> false)
+    | I.AboutToReduce (_, production) -> (
+        match I.lhs production with
+        | I.X (I.N nonterminal)
+          when shifted && I.compare_nonterminals nonterminal I.N_top = 0 ->
+            true
+        | _ -> (
+            match I.resume checkpoint with
+            | next -> loop ~shifted index next
+            | exception _ -> false))
+    | I.Shifting _ -> (
+        match I.resume checkpoint with
+        | next -> loop ~shifted:true index next
+        | exception _ -> false)
+    | I.HandlingError _ | I.Accepted _ | I.Rejected -> false
+  in
+  loop ~shifted:false target checkpoint
+
 let record state ~index checkpoint =
   if index < Scan.count state.scan then (
     let entry = Scan.token state.scan index in
@@ -525,16 +577,41 @@ let next_attempt state ~failure =
   in
   let item () =
     let depth_of index = (Scan.token state.scan index).depth in
+    let fit (source, _) target =
+      source <= failure
+      && source >= state.closed_item
+      && target > source
+      && depth_of target >= depth_of source
+      && not (was_tried state (source, target))
+    in
+    let restart (source, checkpoint) target =
+      Some (Restart { source; target; checkpoint; statement = false })
+    in
     let choose (source, checkpoint) target =
       if
-        source <= failure
-        && source >= state.closed_item
-        && target > source
-        && depth_of target >= depth_of source
-        && (not (was_tried state (source, target)))
+        fit (source, checkpoint) target
         && accepts checkpoint (Scan.token state.scan target)
-      then Some (Restart { source; target; checkpoint; statement = false })
+      then restart (source, checkpoint) target
       else None
+    in
+    (* A token that begins a global is a restart target only when an item
+       really begins at it. {!accepts} cannot tell a global's type from a
+       name that continues the broken item, so the candidate is handed to the
+       parser first: the one that comes back with a [top] production is the
+       next item, and one that does not is simply the next candidate. The
+       keyword targets below are asked first and are unchanged; this search
+       reaches the items the item set cannot name. *)
+    let choose_verified (source, checkpoint) targets =
+      let rec loop = function
+        | [] -> None
+        | target :: rest -> (
+            match choose (source, checkpoint) target with
+            | Some _ as attempt ->
+                if item_begins state.scan ~checkpoint ~target then attempt
+                else loop rest
+            | None -> loop rest)
+      in
+      loop targets
     in
     (* Newest checkpoint first. From each, the nearest item at its own depth
        keeps the block the checkpoint is in (the items of a namespace whose
@@ -561,7 +638,29 @@ let next_attempt state ~failure =
                   | None -> pick rest)
               | None -> None))
     in
-    pick !(state.boundaries)
+    match pick !(state.boundaries) with
+    | Some _ as attempt -> attempt
+    | None -> (
+        (* No token that begins an item with a keyword of its own is left
+           ahead of the hole, so the item after it can only be a global. *)
+        let rec any = function
+          | [] -> None
+          | ((source, _) as boundary) :: rest -> (
+              match
+                choose_verified boundary
+                  (Scan.type_candidates state.scan ~from:failure
+                     ~depth:(Some (depth_of source)))
+              with
+              | Some _ as attempt -> attempt
+              | None -> (
+                  match
+                    choose_verified boundary
+                      (Scan.type_candidates state.scan ~from:failure ~depth:None)
+                  with
+                  | Some _ as attempt -> attempt
+                  | None -> any rest))
+        in
+        any !(state.boundaries))
   in
   match statement () with Some attempt -> Some attempt | None -> item ()
 
@@ -593,6 +692,22 @@ let recover ~name ~text : t =
     if upto <= 0 then 0
     else if upto >= Scan.count state.scan then Scan.start_byte state.scan upto
     else (position_before state.scan upto).Lexing.pos_cnum
+  in
+  (* Where the hole a byte restart covers begins, as a token index. Until the
+     restart has reported anything, that is the whole open item
+     ([closed_item]). Once it has, the bytes before [stubbed_upto] are a stub
+     already and the question is whether the bytes after it are the rest of
+     the same item or an item of their own: a token that can begin a top-level
+     item begins a new one, and anything else — a statement of the body the
+     item opens — is the tail of the item that is already reported. The tail
+     is reported from the item's own start, which replaces its stub with one
+     covering the whole item, instead of as a second item the file does not
+     have. *)
+  let hole_start state target =
+    let stubbed = state.stubbed_upto in
+    if stubbed <= state.closed_item || stubbed >= target then state.closed_item
+    else if Scan.item_only (Scan.token state.scan stubbed).token then stubbed
+    else state.closed_item
   in
   (* One stub and one recovered region for the bytes of one hole. Two holes
      are two stubs even when one of them is first seen as part of a wider

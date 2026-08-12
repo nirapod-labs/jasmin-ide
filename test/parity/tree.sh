@@ -2,12 +2,21 @@
 # The tree half of the parser parity gate: the tree our driver returns for a
 # file against the tree the compiler's own parser returns for the same bytes.
 #
-#   sh test/parity/tree.sh <corpus root>
+#   sh test/parity/tree.sh <corpus root> [<check list>]
 #
 # <corpus root> is the `compiler` directory of a Jasmin release (the one that
-# holds `tests/` and `examples/`) or its `tests` directory. Every `.jazz` file
-# under `tests/success` and, when the root has one, `examples` is parsed once
-# by `parity_tree`, which answers, on stderr:
+# holds `tests/` and `examples/`) or its `tests` directory. Without a check
+# list, every `.jazz` file under `tests/success` and, when the root has one,
+# `examples` is parsed once by `parity_tree`. With a check list the corpus is
+# that list instead: `<label> <path> <architecture>` per check, tab separated,
+# paths relative to <corpus root> — the same file `parity.sh` takes as its
+# second argument. That is how the two halves of the gate share one corpus:
+# the diagnostic run writes one line per check it counted positive, and this
+# one compares the tree of every file those checks name. A file the list names
+# once per architecture is one tree comparison, because the tree does not
+# depend on the target; the run reports the checks and the files apart.
+#
+# `parity_tree` answers, on stderr:
 #
 #   driver: <n> diagnostics   what the recovering driver reported for the file;
 #   same-tree: yes|no|n/a     whether the driver's item list is the compiler
@@ -17,8 +26,12 @@
 #                             engine returns when it is asked directly.
 #
 # `n/a` means the compiler's parser rejects the file, so there is no compiler
-# tree to compare with. The file is then outside the positive corpus the gate
-# names, and the run counts it apart instead of passing it.
+# tree to compare with: the file cannot be compared, and the run counts it
+# apart instead of passing it. Without a check list it fails the run, because
+# that walk calls every file it names positive. With one it fails the run too:
+# the list is the set the diagnostic half counted positive, so a file in it
+# the compiler cannot parse is a contradiction between the two halves, and it
+# is named as one.
 #
 # A file passes only when the driver reports no diagnostic, both trees are the
 # compiler parser's own, and — when JASMIN2TEX is named — the release's
@@ -86,10 +99,12 @@ die() {
 
 usage() {
 	cat >&2 <<'USAGE'
-usage: sh test/parity/tree.sh <corpus root>
+usage: sh test/parity/tree.sh <corpus root> [<check list>]
 
   <corpus root>   a Jasmin release's `compiler` directory (holding `tests`
                   and, usually, `examples`), or its `tests` directory
+  <check list>    optional; one "<label>\t<path>\t<architecture>" per check,
+                  paths relative to <corpus root>
 
 environment: PARITY_TREE (the tree printer), JASMIN2TEX (the release's
 parse-and-print; without it the printing is not compared), PARITY_JOBS
@@ -98,11 +113,16 @@ USAGE
 	exit 2
 }
 
-if [ $# -ne 1 ]; then usage; fi
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then usage; fi
 root=${1:-}
+checks=${2:-}
 [ -n "$root" ] || usage
 [ -d "$root" ] || die "no corpus directory: $root"
 root=$(cd -- "$root" && pwd)
+if [ -n "$checks" ]; then
+	[ -f "$checks" ] || die "no check list: $checks"
+	checks=$(cd -- "$(dirname -- "$checks")" && pwd)/$(basename -- "$checks")
+fi
 
 if [ -d "$root/tests/success" ]; then
 	tests=$root/tests
@@ -157,18 +177,43 @@ arch_for() {
 	printf '%s\n' "${deepest:-x86-64}"
 }
 
-# The files, one path relative to the corpus root per line, in the corpus's
-# own order: the release's positive folder first, then its examples.
+# The files, one `<path relative to the corpus root>\t<architecture>` per line.
+# Without a check list they are the release's positive folder and its examples,
+# in the corpus's own order, under the architecture the folder names. With one
+# they are its files, in its order, under the architecture its own line names:
+# the release's parse-and-print runs pretyping before it prints, so the check's
+# architecture is the one to print under.
 list=$work/files.tsv
 : >"$list"
-find "$tests/success" -type f -name '*.jazz' -print | LC_ALL=C sort >>"$list"
-if [ -n "$examples" ] && [ -d "$examples" ]; then
-	find "$examples" -type f -name '*.jazz' -print | LC_ALL=C sort >>"$list"
+checklist=$list
+checks_total=0
+if [ -n "$checks" ]; then
+	awk -F'\t' 'NF >= 2 && $2 != "" { printf "%s\t%s\n", $2, ($3 == "" ? "x86-64" : $3) }' \
+		"$checks" >"$work/checks.tsv"
+	checklist=$work/checks.tsv
+	checks_total=$(wc -l <"$checklist" | tr -d ' ')
+	[ "$checks_total" -gt 0 ] || die "no checks in $checks"
+	# One line per file: the tree is one comparison however many architectures
+	# the check list names for it, and the first is the one to print under.
+	awk -F'\t' '!seen[$1]++' "$checklist" >>"$list"
+else
+	for folder in "$tests/success" "$examples"; do
+		[ -n "$folder" ] && [ -d "$folder" ] || continue
+		find "$folder" -type f -name '*.jazz' -print | LC_ALL=C sort |
+			while IFS= read -r path; do
+				relative=${path#"$root"/}
+				printf '%s\t%s\n' "$relative" "$(arch_for "$relative")"
+			done >>"$list"
+	done
 fi
 total=$(wc -l <"$list" | tr -d ' ')
 [ "$total" -gt 0 ] || die "no files: the corpus holds no .jazz under its success folder"
+# A file the corpus does not hold is a fault of the caller, not an answer.
+while IFS=$tab read -r relative arch; do
+	[ -f "$root/$relative" ] || die "no such file under $root: $relative"
+done <"$list"
 
-# parse_one <index> <absolute path>
+# parse_one <index> <relative path> <architecture>
 #
 # Writes one result line to $work/result.<index>:
 #
@@ -195,8 +240,9 @@ total=$(wc -l <"$list" | tr -d ' ')
 # line is missing).
 parse_one() {
 	index=$1
-	path=$2
-	relative=${path#"$root"/}
+	relative=$2
+	arch=$3
+	path=$root/$relative
 	directory=$(dirname "$path")
 	base=$(basename "$path")
 	out=$work/t.$index
@@ -211,7 +257,7 @@ parse_one() {
 	[ -n "$same_recovery" ] || same_recovery=unknown
 	printed=-
 	if [ -n "$compiler" ]; then
-		(cd "$directory" && "$compiler" --arch "$(arch_for "$relative")" "$base") \
+		(cd "$directory" && "$compiler" --arch "$arch" "$base") \
 			>"$work/c.$index" 2>"$work/c.$index.err" </dev/null
 		oracle_exit=$?
 		if [ "$oracle_exit" -ne 0 ]; then
@@ -253,10 +299,10 @@ parse_one() {
 
 index=0
 running=0
-while IFS= read -r path; do
-	[ -n "$path" ] || continue
+while IFS=$tab read -r relative arch; do
+	[ -n "$relative" ] || continue
 	index=$((index + 1))
-	parse_one "$index" "$path" &
+	parse_one "$index" "$relative" "$arch" &
 	running=$((running + 1))
 	if [ "$running" -ge "$jobs" ]; then
 		wait
@@ -339,7 +385,7 @@ while IFS=$tab read -r index relative diagnostics same_tree same_recovery printe
 	rejected)
 		rejected=$((rejected + 1))
 		printf '%s\t%s\n' "$relative" \
-			"the compiler's parser rejects a file the corpus calls positive (driver diagnostics: $diagnostics)" \
+			"the compiler rejects it, so there is no compiler tree to compare with (driver diagnostics: $diagnostics)" \
 			>>"$mismatches"
 		;;
 	error)
@@ -374,11 +420,47 @@ while IFS=$tab read -r index relative diagnostics same_tree same_recovery printe
 	esac
 done <"$results"
 
+# The per-group tally: how many checks the corpus names, how many files they
+# sit on, how many the compiler's parser answered, how many it rejects (so
+# there is no tree to compare with) and how many trees differ. The check list
+# carries the checks and the results carry the answers, so one awk reads both.
+awk -F'\t' -v OFS='\t' -v checks_file="$checklist" '
+	function group(rel,   parts, n) {
+		sub(/^tests\//, "", rel)
+		n = split(rel, parts, "/")
+		if (n >= 3 && (parts[1] == "sct-checker" || parts[1] == "safety"))
+			return parts[1] "/" parts[2]
+		return parts[1]
+	}
+	FILENAME == checks_file {
+		g = group($1)
+		checks[g]++
+		if (!(g in seen)) { seen[g] = 1; order[++groups] = g }
+		next
+	}
+	{
+		g = group($2)
+		files[g]++
+		if ($4 == "yes" || $4 == "no") answered[g]++
+		else if ($4 == "n/a") notree[g]++
+		if ($4 == "no") unequal[g]++
+	}
+	END {
+		for (i = 1; i <= groups; i++) {
+			g = order[i]
+			printf "%s\t%d\t%d\t%d\t%d\t%d\n", g, checks[g], files[g],
+				answered[g], notree[g], unequal[g]
+		}
+	}' "$checklist" "$results" >"$work/groups.tsv"
+
 # The two structural questions are answered per file and counted where they
 # were answered. A file the tree printer said nothing about is neither
 # agreement nor disagreement: it is its own count, and it fails the run below.
 tree_answered=$((tree_yes + tree_no))
 recovery_answered=$((recovery_yes + recovery_no))
+if [ -n "$checks" ]; then
+	say "the check list names $checks_total checks over $total files; the tree does not depend on the target, so one comparison per file covers them"
+fi
 say "$total files; the compiler's parser accepts $tree_answered, rejects $tree_na, and the tree printer did not answer for $tree_unknown"
 say "no error from the driver: $clean of $total"
 say "the same tree as the compiler, by construction: $tree_yes of $tree_answered answered; $tree_unknown no answer; $tree_na the compiler's parser rejects the file"
@@ -390,6 +472,13 @@ if [ -n "$compiler" ]; then
 else
 	printing_compared=0
 	say "no JASMIN2TEX named: the printing was not compared"
+fi
+
+if [ -s "$work/groups.tsv" ]; then
+	say "by group: checks, files, the compiler's parser answered, no tree, a different tree"
+	while IFS=$tab read -r group group_checks group_files group_answered group_notree group_unequal; do
+		say "  $group: $group_checks checks, $group_files files, $group_answered answered, $group_notree no tree, $group_unequal unequal"
+	done <"$work/groups.tsv"
 fi
 
 if [ -s "$mismatches" ]; then
