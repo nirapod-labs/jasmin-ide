@@ -93,13 +93,17 @@ type comparison = {
 
 let unchanged = { away = 0; identity_ok = true; span_ok = true; detail = "" }
 
+(** The entries an edit leaves alone: those that end at or before its first
+    byte, or start at or after its last. An entry that covers the edit is in
+    neither list: it is the item the recovery works on, and it may change. *)
+let away_from entries ~edit_start ~edit_end =
+  List.filter
+    (fun entry -> entry.end_byte <= edit_start || entry.start_byte >= edit_end)
+    entries
+
 (** How many entries the mutation had to leave alone. *)
 let away_count entries ~edit_start ~edit_end =
-  List.length
-    (List.filter
-       (fun entry ->
-         entry.end_byte <= edit_start || entry.start_byte >= edit_end)
-       entries)
+  List.length (away_from entries ~edit_start ~edit_end)
 
 let rec take count items =
   if count <= 0 then []
@@ -112,13 +116,27 @@ let rec drop count items =
 
 let compare ~(original : entry list) ~(mutant : entry list) ~edit_start
     ~edit_end ~map_back =
+  let away_entries = away_from original ~edit_start ~edit_end in
   let before =
-    List.filter (fun entry -> entry.end_byte <= edit_start) original
+    List.filter (fun entry -> entry.end_byte <= edit_start) away_entries
   in
   let after =
-    List.filter (fun entry -> entry.start_byte >= edit_end) original
+    List.filter (fun entry -> entry.start_byte >= edit_end) away_entries
   in
   let away = List.length before + List.length after in
+  (* An item that covers the edit is in neither list, and the mutant still
+     holds it. Pairing the mutant by position would take that item for the
+     first one after the edit and shift every pair after it, so the mutant is
+     read in the original's coordinates and the same test splits it: an entry
+     that covers the edit, mapped back, is not an away item either. *)
+  let mutant =
+    List.filter
+      (fun entry ->
+        let start_byte = map_back entry.start_byte
+        and end_byte = map_back entry.end_byte in
+        end_byte <= edit_start || start_byte >= edit_end)
+      mutant
+  in
   if List.length mutant < away then
     {
       away;

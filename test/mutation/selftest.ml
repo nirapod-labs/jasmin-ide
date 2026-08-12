@@ -92,8 +92,16 @@ let test_comparison () =
     Outline.compare ~original ~mutant:shortened ~edit_start:30 ~edit_end:31
       ~map_back:(fun offset -> offset)
   in
-  check "a lost item before the end is caught"
-    ((not lost.Outline.identity_ok) && contains lost.Outline.detail "fn c");
+  check "a lost item before the end is caught" (not lost.Outline.identity_ok);
+  let replaced =
+    [ entry "fn" "a" 0 20; entry "fn" "b" 21 40; entry "fn" "d" 41 60 ]
+  in
+  let named =
+    Outline.compare ~original ~mutant:replaced ~edit_start:30 ~edit_end:31
+      ~map_back:(fun offset -> offset)
+  in
+  check "the first difference names the item after the edit"
+    ((not named.Outline.identity_ok) && contains named.Outline.detail "fn c");
   let moved =
     [ entry "fn" "a" 0 20; entry "fn" "b" 21 40; entry "fn" "c" 40 59 ]
   in
@@ -109,6 +117,44 @@ let test_comparison () =
   in
   check "a shifted item whose offsets map back is unchanged"
     (compensated.Outline.identity_ok && not compensated.Outline.span_ok);
+  (* An item that covers the edit is in neither list, and the mutant still
+     holds it. A namespace is that item for any edit inside its body: pairing
+     the mutant by position would take it for the first item after the edit
+     and every pair after it would compare the wrong two items. *)
+  let enclosing =
+    [
+      entry "namespace" "N" 0 100;
+      entry "fn" "a" 5 20;
+      entry "fn" "b" 21 40;
+      entry "fn" "c" 60 80;
+    ]
+  in
+  let contains =
+    Outline.compare ~original:enclosing
+      ~mutant:
+        [
+          entry "namespace" "M" 0 99;
+          entry "fn" "a" 5 20;
+          entry "fn" "b" 21 40;
+          entry "fn" "c" 59 79;
+        ]
+      ~edit_start:50 ~edit_end:51
+      ~map_back:(fun offset -> if offset < 50 then offset else offset + 1)
+  in
+  check "an item that contains the edit does not shift the pairs"
+    (contains.Outline.identity_ok && contains.Outline.span_ok
+   && contains.Outline.away = 3);
+  let lost_after =
+    Outline.compare ~original:enclosing
+      ~mutant:
+        [
+          entry "namespace" "N" 0 99; entry "fn" "a" 5 20; entry "fn" "b" 21 40;
+        ]
+      ~edit_start:50 ~edit_end:51
+      ~map_back:(fun offset -> if offset < 50 then offset else offset + 1)
+  in
+  check "an item after the edit is still compared when one contains it"
+    (not lost_after.Outline.identity_ok);
   let empty =
     Outline.compare ~original:[] ~mutant:[] ~edit_start:0 ~edit_end:1
       ~map_back:(fun o -> o)

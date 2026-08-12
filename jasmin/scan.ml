@@ -112,7 +112,12 @@ let item_only_tokens =
     driver asks the parser whether an item really begins there
     ([Recover.item_begins]). *)
 let type_tokens =
-  [ Parser.T_BOOL; Parser.T_INT; Parser.T_W (U8, `Word (Some `Unsigned)); Parser.NID "" ]
+  [
+    Parser.T_BOOL;
+    Parser.T_INT;
+    Parser.T_W (U8, `Word (Some `Unsigned));
+    Parser.NID "";
+  ]
 
 (** Two tokens are the same token when their constructors match. A token that
     carries a value matches any value of its constructor: the sets below name

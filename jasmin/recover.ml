@@ -24,7 +24,9 @@
     - the latest item checkpoint at or after the last closed item, so a
       broken item is dropped and the items after it are parsed from a state
       that already holds the ones before, including the items of a namespace
-      whose neighbour is broken;
+      whose neighbour is broken. A checkpoint is kept at the first token
+      after each closed top-level block as well as at each item keyword, so
+      stray tokens that begin no item are dropped without a rewrite;
     - the item-level byte restart measured by the recovery spike: the text
       up to the last closed item is kept, the broken item's bytes are
       blanked, and the rest is parsed again from the start. Blanking keeps
@@ -234,11 +236,27 @@ let item_begins scan ~checkpoint ~target =
   in
   loop ~shifted:false target checkpoint
 
+(** An item keyword at item level that follows the closing bracket of an
+    annotation, or the [export] or [inline] that begins its item, is not an
+    item boundary: the keyword belongs to the item that begins earlier, and a
+    checkpoint taken at it would resume inside that item's production. The
+    token that begins the item is the boundary. *)
+let annotated_keyword state index =
+  index > 0
+  && (Scan.token state.scan index).depth = 0
+  &&
+  match (Scan.token state.scan (index - 1)).token with
+  | Parser.RBRACKET | Parser.EXPORT | Parser.INLINE -> true
+  | _ -> false
+
 let record state ~index checkpoint =
   if index < Scan.count state.scan then (
     let entry = Scan.token state.scan index in
-    if Scan.item_start entry.token && accepts checkpoint entry then
-      state.boundaries := (index, checkpoint) :: !(state.boundaries);
+    if
+      Scan.item_start entry.token
+      && (not (annotated_keyword state index))
+      && accepts checkpoint entry
+    then state.boundaries := (index, checkpoint) :: !(state.boundaries);
     if Scan.statement_boundary state.scan index then
       state.statements := (index, checkpoint) :: !(state.statements))
 
@@ -256,6 +274,16 @@ let rec drive state ~index ~eof_sent checkpoint =
       state.input <- Some (index, environment);
       state.offered <- false;
       record state ~index checkpoint;
+      (* A token that follows the closing brace of a top-level block is a
+         restart point too: the item before it is complete, and this state
+         still owes that item its reduction, which {!reposition} performs. *)
+      if
+        index > 0
+        && index < Scan.count state.scan
+        && (let prev = Scan.token state.scan (index - 1) in
+            prev.token = Parser.RBRACE && prev.depth = 1)
+        && not (List.mem_assoc index !(state.boundaries))
+      then state.boundaries := (index, checkpoint) :: !(state.boundaries);
       if index < Scan.count state.scan then
         match I.offer checkpoint (Scan.triple state.scan index) with
         | next ->
@@ -541,6 +569,21 @@ let contains (outer : Jide_lang.Span.t) (inner : Jide_lang.Span.t) =
   outer.Jide_lang.Span.start_byte <= inner.Jide_lang.Span.start_byte
   && outer.Jide_lang.Span.end_byte >= inner.Jide_lang.Span.end_byte
 
+(** [crosses_item scan ~source ~target] is true when a token strictly between
+    [source] and [target] begins an item of a shallower block: the body the
+    statement belongs to has closed and another item starts before the
+    target. A statement restart that resumes there would parse the next
+    item's body with the state of this one, so it is not a restart point. *)
+let crosses_item scan ~source ~target =
+  let depth = (Scan.token scan source).depth in
+  let rec loop index =
+    index < target
+    && ((Scan.token scan index).depth < depth
+        && Scan.item_only (Scan.token scan index).token
+       || loop (index + 1))
+  in
+  loop (source + 1)
+
 let statement_before state index =
   List.find_opt
     (fun (at, _) -> at < index && at > state.closed_item)
@@ -571,7 +614,9 @@ let next_attempt state ~failure =
         let depth = (Scan.token state.scan source).depth in
         match Scan.next_statement state.scan ~from:failure ~depth with
         | Some target
-          when target > source && not (was_tried state (source, target)) ->
+          when target > source
+               && (not (was_tried state (source, target)))
+               && not (crosses_item state.scan ~source ~target) ->
             Some (Restart { source; target; checkpoint; statement = true })
         | _ -> None)
   in
@@ -640,7 +685,7 @@ let next_attempt state ~failure =
     in
     match pick !(state.boundaries) with
     | Some _ as attempt -> attempt
-    | None -> (
+    | None ->
         (* No token that begins an item with a keyword of its own is left
            ahead of the hole, so the item after it can only be a global. *)
         let rec any = function
@@ -660,7 +705,7 @@ let next_attempt state ~failure =
                   | Some _ as attempt -> attempt
                   | None -> any rest))
         in
-        any !(state.boundaries))
+        any !(state.boundaries)
   in
   match statement () with Some attempt -> Some attempt | None -> item ()
 
@@ -744,9 +789,7 @@ let recover ~name ~text : t =
         loop (max 0 start_byte)
       in
       let spans =
-        List.filter_map
-          (function Dropped { span; _ } -> Some span)
-          !dropped
+        List.filter_map (function Dropped { span; _ } -> Some span) !dropped
         |> List.sort (fun (a : Jide_lang.Span.t) (b : Jide_lang.Span.t) ->
                compare a.Jide_lang.Span.start_byte b.Jide_lang.Span.start_byte)
       in
@@ -772,7 +815,8 @@ let recover ~name ~text : t =
         (function
           | Dropped { span = earlier; _ } ->
               earlier.Jide_lang.Span.start_byte < span.Jide_lang.Span.start_byte
-              && earlier.Jide_lang.Span.end_byte > span.Jide_lang.Span.start_byte)
+              && earlier.Jide_lang.Span.end_byte
+                 > span.Jide_lang.Span.start_byte)
         !dropped
     in
     if
@@ -788,8 +832,7 @@ let recover ~name ~text : t =
       let stub =
         match
           List.find_opt
-            (function
-              | Dropped { span = earlier; _ } -> contains span earlier)
+            (function Dropped { span = earlier; _ } -> contains span earlier)
             !dropped
         with
         | Some (Dropped fields) -> Dropped { fields with span }

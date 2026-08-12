@@ -63,6 +63,15 @@ let dropped_names parsed =
     (function Jide_jasmin.Recover.Dropped { name; _ } -> name)
     (Jide_jasmin.Parse.dropped parsed)
 
+(** The bytes every item of the tree covers, so a test can pin where an item
+    starts and ends rather than only that it is there. *)
+let item_spans parsed =
+  List.map
+    (fun (item : Jasmin.Syntax.pitem Jasmin.Location.located) ->
+      let location = Jasmin.Location.loc item in
+      (location.Jasmin.Location.loc_bchar, location.Jasmin.Location.loc_echar))
+    (Jide_jasmin.Parse.items parsed)
+
 (** Every name the tree declares, namespaces walked into, so a test can say a
     name is nowhere in the tree rather than only at its top level. *)
 let rec names_of_item (item : Jasmin.Syntax.pitem Jasmin.Location.located) =
@@ -429,8 +438,15 @@ let test_missing_fn () =
     (item_names parsed = [ "first"; "third" ]);
   check "missing fn: the broken item is stubbed with its name"
     (dropped_names parsed = [ "second" ]);
-  check "missing fn: the item-level byte restart did the work"
-    (byte_restarts parsed >= 1)
+  check "missing fn: an item restart did the work, without a byte rewrite"
+    (item_restarts parsed >= 1 && byte_restarts parsed = 0);
+  (* The item after the broken one begins where the broken one ends: the end
+     of the [}] that closes [second]'s body, which is the byte before the
+     blank line and the keyword [fn third]. *)
+  check "missing fn: the item after the broken one begins where it ends"
+    (match item_spans parsed with
+    | [ _; (start, _) ] -> start = index_of missing_fn "fn third" - 2
+    | _ -> false)
 
 (* A fault inside a body keeps the function it is in: the statement is
    dropped, the rest of the body and the item after it are not. *)
@@ -566,7 +582,8 @@ let test_guard_item_only () =
     (driver_names Jide_jasmin.Scan.item_only_tokens = expected);
   check "guard: no type begins the brace set"
     (List.for_all
-       (fun name -> not (List.mem name (driver_names Jide_jasmin.Scan.type_tokens)))
+       (fun name ->
+         not (List.mem name (driver_names Jide_jasmin.Scan.type_tokens)))
        (driver_names Jide_jasmin.Scan.item_only_tokens))
 
 (* A global begins with its type, so the item set cannot name it: a restart
@@ -615,10 +632,46 @@ inline
 }
 |}
 
+(* Two holes are two stubs; the bytes between them are trivia only when they
+   are blank (space, tab, CR, LF). A blank line between two broken items
+   therefore gives one stub per item. A comment between the same two items is
+   not blank, so the wider report that follows replaces both stubs with one
+   span and the first hole keeps no report of its own. That is a known
+   limitation: the rule reads the bytes between two reports, not whether the
+   wider report is the same item as the first, and the two shapes cannot be
+   told apart by a wider notion of blank. The second check pins today's
+   behaviour so that changing the rule is a deliberate act with this text in
+   front of it. *)
+let two_holes =
+  {|fn broken(reg u32 x -> reg u32 {
+  return x;
+}
+
+fn broken2(reg u32 y -> reg u32 {
+  return y;
+}
+|}
+
+let two_holes_with_a_comment =
+  {|fn broken(reg u32 x -> reg u32 {
+  return x;
+}
+
+// a comment between the two holes
+fn broken2(reg u32 y -> reg u32 {
+  return y;
+}
+|}
+
+let test_two_holes () =
+  check "two holes: a blank line between them keeps two stubs"
+    (dropped_names (parse two_holes) = [ "broken"; "broken2" ]);
+  check "two holes: a comment between them merges them into one report"
+    (dropped_names (parse two_holes_with_a_comment) = [ "broken2" ])
+
 let test_one_hole_one_stub () =
   let parsed = parse fn_less_item in
-  check "one hole: one stub"
-    (List.length (Jide_jasmin.Parse.dropped parsed) = 1);
+  check "one hole: one stub" (List.length (Jide_jasmin.Parse.dropped parsed) = 1);
   check "one hole: no global is invented out of a body statement"
     (not
        (List.exists
@@ -799,8 +852,45 @@ let test_virtual_brace_keeps_the_function () =
   check "virtual brace: a brace restart did the work" (brace_restarts parsed = 1);
   check "virtual brace: no byte is rewritten"
     (Jide_jasmin.Parse.recovered parsed = [] && byte_restarts parsed = 0);
+  (* The brace has no bytes of its own, and where it goes is a rule: it is
+     written where the missing [}] would have been, at the end of the last
+     token the parser shifted. The last token here is the [;] at byte 42, so
+     the item ends at 43 and not at 44, the start of the next token. *)
+  check "virtual brace: the item ends at the end of its last token"
+    (item_spans parsed = [ (0, 43) ]);
   check "virtual brace: the compiler's error is kept"
     (keeps_the_compilers_error text parsed)
+
+(* A block that was never closed is closed by the brace only where the token
+   that follows can begin an item and can never begin a statement. [export]
+   is one of those tokens: the place it can appear inside a body is a [#[]]
+   group, which the attempt cannot follow, so it is a safe place to offer the
+   brace. This pins both halves at once: that [export] triggers the restart,
+   and that the brace lands at the end of the last token rather than at the
+   start of [export], so the item after it keeps its own first byte. *)
+let export_header = "fn first(reg u32 a) -> reg u32 {\n  return a;\n\n"
+
+let export_after_header =
+  "export fn second(reg u32 a) -> reg u32 {\n  return a;\n}\n"
+
+let export_text = export_header ^ export_after_header
+
+let test_virtual_brace_before_export () =
+  let parsed = parse export_text in
+  let export_at = String.length export_header in
+  check "export: both functions are in the tree"
+    (item_names parsed = [ "first"; "second" ]);
+  check "export: nothing is dropped" (Jide_jasmin.Parse.dropped parsed = []);
+  check "export: a brace restart did the work" (brace_restarts parsed = 1);
+  (* The brace stands at byte 44, the end of the last token the parser
+     shifted; the two newlines before [export] are trivia that the item after
+     it begins at, because menhir starts the next item where the last symbol
+     ended. A brace offered at [export] instead would start the second item at
+     46 and place it two bytes late. *)
+  let brace_at = export_at - 2 in
+  check "export: the brace ends the first item at its last token"
+    (item_spans parsed
+    = [ (0, brace_at); (brace_at, String.length export_text - 1) ])
 
 (* A namespace with one broken item and one whole one: the whole one parses,
    so it must reach the tree inside its namespace, and the broken one must be
@@ -1211,6 +1301,11 @@ let () =
   test_stub_span ();
   test_guard_top ();
   test_guard_statement ();
+  test_guard_type ();
+  test_guard_item_only ();
+  test_global_after_a_hole ();
+  test_one_hole_one_stub ();
+  test_two_holes ();
   test_size_policy ();
   test_token_cap ();
   test_token_cap_boundary ();
@@ -1219,6 +1314,7 @@ let () =
   test_recovery_bound ();
   test_unterminated_comment_keeps_the_prefix ();
   test_virtual_brace_keeps_the_function ();
+  test_virtual_brace_before_export ();
   test_namespace_keeps_the_whole_item ();
   test_namespace_and_the_items_after_it ();
   test_stub_names_the_item ();
