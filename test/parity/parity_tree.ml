@@ -229,3 +229,77 @@ let contains ~(needle : string) (haystack : string) =
   in
   n > 0 && at 0
 
+let check_selftest () =
+  let failures = ref 0 in
+  let check name condition =
+    if not condition then (
+      incr failures;
+      Printf.eprintf "selftest: %s: failed\n" name)
+  in
+  let good = parse_text ~name:"valid.jazz" valid in
+  check "valid: the driver reports no diagnostic" (good.diagnostics = 0);
+  check "valid: the tree is the compiler parser's own"
+    (good.same_tree = Some true);
+  check "valid: the recovery engine's tree is too"
+    (good.same_recovery = Some true);
+  check "valid: there is no first difference" (good.difference = None);
+  check "valid: the exit status is the passing one" (status good = 0);
+  let rendered = Format.asprintf "%a" Jasmin.Latex_printer.pp_prog good.items in
+  check "valid: one function is printed"
+    (contains ~needle:"\\jasminkw{fn}" rendered);
+  check "valid: the printer is the compiler's, banner included"
+    (contains ~needle:"The produced LATEX snippet" rendered);
+  let bad = parse_text ~name:"invalid.jazz" invalid in
+  check "invalid: the driver reports a diagnostic" (bad.diagnostics > 0);
+  check "invalid: there is no compiler tree to compare with"
+    (bad.same_tree = None && bad.same_recovery = None);
+  check "invalid: the exit status is the failing one" (status bad = 1);
+  let again = parse_text ~name:"valid.jazz" valid in
+  check "reparsing the valid source is stable"
+    (structural again.items good.items);
+  (* The comparison itself, on two trees that really differ. *)
+  let mine = parse_text ~name:"a.jazz" valid
+  and other = parse_text ~name:"b.jazz" also_valid in
+  check "two different sources have different trees"
+    (not (structural mine.items other.items));
+  (match first_difference ~index:0 mine.items other.items with
+  | difference ->
+      check
+        (Printf.sprintf "the first difference is at item zero (%s)" difference)
+        (contains ~needle:"item 0" difference);
+      check
+        (Printf.sprintf "the first difference names both sides (%s)" difference)
+        (contains ~needle:"main" difference
+        && contains ~needle:"other" difference)
+  | exception _ -> check "the first difference is computable" false);
+  let renamed = parse_text ~name:"c.jazz" different in
+  check "one renamed function is still the compiler's tree"
+    (renamed.same_tree = Some true);
+  check "one renamed function is not the first source's tree"
+    (not (structural renamed.items mine.items));
+  if !failures = 0 then print_endline "parity_tree: selftest ok"
+  else (
+    Printf.eprintf "parity_tree: %d selftest check(s) failed\n" !failures;
+    exit 1)
+
+let main () =
+  match Array.to_list Sys.argv with
+  | _ :: [ "--selftest" ] -> check_selftest ()
+  | _ :: [ "--help" ] | _ :: [ "-help" ] ->
+      print_endline usage;
+      exit 0
+  | _ :: [ path ] -> (
+      match read path with
+      | text ->
+          let answer = parse_text ~name:path text in
+          print_tree answer;
+          say_answer answer;
+          exit (status answer)
+      | exception Sys_error message ->
+          Printf.eprintf "parity_tree: cannot read %s: %s\n" path message;
+          exit 2)
+  | _ ->
+      prerr_endline usage;
+      exit 2
+
+let () = main ()
