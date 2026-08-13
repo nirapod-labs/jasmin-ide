@@ -284,6 +284,14 @@ let rec drive state ~index ~eof_sent checkpoint =
             prev.token = Parser.RBRACE && prev.depth = 1)
         && not (List.mem_assoc index !(state.boundaries))
       then state.boundaries := (index, checkpoint) :: !(state.boundaries);
+      (* The same holds for an item that ends in any other token, such as the
+         semicolon of a declaration: the parser reduced it before this token,
+         and the reduction set [closed_item] to this index. *)
+      if
+        index = state.closed_item
+        && index < Scan.count state.scan
+        && not (List.mem_assoc index !(state.boundaries))
+      then state.boundaries := (index, checkpoint) :: !(state.boundaries);
       if index < Scan.count state.scan then
         match I.offer checkpoint (Scan.triple state.scan index) with
         | next ->
@@ -310,7 +318,19 @@ let rec drive state ~index ~eof_sent checkpoint =
             if
               at >= Scan.count state.scan
               || (Scan.token state.scan at).depth = 0
-            then state.closed_item <- at
+            then (
+              state.closed_item <- at;
+              (* The checkpoint that waited for [at] is the one that still
+                 owes this item its reduction, so it is the restart point
+                 for the token after the item. *)
+              match state.input with
+              | Some (waiting, environment)
+                when waiting = at
+                     && at < Scan.count state.scan
+                     && not (List.mem_assoc at !(state.boundaries)) ->
+                  state.boundaries :=
+                    (at, I.input_needed environment) :: !(state.boundaries)
+              | _ -> ())
       | I.X (I.T _) -> ());
       match I.resume checkpoint with
       | next -> drive state ~index ~eof_sent next

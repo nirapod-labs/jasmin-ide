@@ -275,7 +275,8 @@ let run options =
                       ~mutant:result.Probe.outline
                       ~edit_start:mutation.Mutant.edit_start
                       ~edit_end:mutation.Mutant.edit_end
-                      ~map_back:mutation.Mutant.map_back
+                      ~map_start:mutation.Mutant.map_start
+                      ~map_end:mutation.Mutant.map_end
                 | _ ->
                     {
                       Outline.away =

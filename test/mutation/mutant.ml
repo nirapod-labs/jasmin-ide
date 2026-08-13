@@ -8,10 +8,14 @@
     - {!Truncate}: the text is cut at the start of a token, so every token
       from there on is gone.
 
-    A mutation records the byte range of the original text it touches and a
-    function from mutant offsets back to original ones. The outline
-    comparison needs both, because deleting a token moves every byte after
-    it and an outline entry that did not change still has new offsets.
+    A mutation records the byte range of the original text it touches and
+    two functions from mutant offsets back to original ones: one for where an
+    entry starts and one for where it ends. The outline comparison needs
+    both, because deleting a token moves every byte after it and an outline
+    entry that did not change still has new offsets. The two differ at the
+    edit's boundary: an offset there is the end of the text before the edit
+    and the start of the text after it, so a start and an end that meet at
+    the boundary map to different sides of it.
 
     Generation depends on nothing but the source and the token index, so two
     runs over the same corpus apply the same mutations in the same order. *)
@@ -37,8 +41,14 @@ type t = {
   text : string;  (** The mutated source. *)
   edit_start : int;  (** First byte of the touched range, in the original. *)
   edit_end : int;  (** One past its last byte, in the original. *)
-  map_back : int -> int;
-      (** A mutant byte offset, mapped back into the original text. *)
+  map_start : int -> int;
+      (** A mutant byte offset where an entry starts, mapped back into the
+          original text. At the boundary it maps to the side the text after
+          the edit is on. *)
+  map_end : int -> int;
+      (** A mutant byte offset where an entry ends, mapped back into the
+          original text. At the boundary it maps to the side the text before
+          the edit is on. *)
   label : string;  (** One line naming the mutation, for a report. *)
 }
 
@@ -57,8 +67,10 @@ let delete ~source (tokens : Token.t array) index =
     text = splice source start_byte end_byte "";
     edit_start = start_byte;
     edit_end = end_byte;
-    map_back =
+    map_start =
       (fun offset -> if offset < start_byte then offset else offset + removed);
+    map_end =
+      (fun offset -> if offset <= start_byte then offset else offset + removed);
     label = Printf.sprintf "delete token %d `%s`" index (Token.show token);
   }
 
@@ -72,8 +84,10 @@ let duplicate ~source (tokens : Token.t array) index =
     text = splice source end_byte end_byte token.text;
     edit_start = start_byte;
     edit_end = end_byte;
-    map_back =
+    map_start =
       (fun offset -> if offset < end_byte then offset else offset - copied);
+    map_end =
+      (fun offset -> if offset <= end_byte then offset else offset - copied);
     label = Printf.sprintf "duplicate token %d `%s`" index (Token.show token);
   }
 
@@ -86,7 +100,8 @@ let swap ~source (tokens : Token.t array) index =
     text = splice source token.start_byte token.end_byte replacement;
     edit_start = token.start_byte;
     edit_end = token.end_byte;
-    map_back = (fun offset -> offset);
+    map_start = (fun offset -> offset);
+    map_end = (fun offset -> offset);
     label =
       Printf.sprintf "swap token %d `%s` for `%s`" index (Token.show token)
         replacement;
@@ -100,7 +115,8 @@ let truncate ~source (tokens : Token.t array) index =
     text = String.sub source 0 token.start_byte;
     edit_start = token.start_byte;
     edit_end = String.length source;
-    map_back = (fun offset -> offset);
+    map_start = (fun offset -> offset);
+    map_end = (fun offset -> offset);
     label =
       Printf.sprintf "truncate at token %d of %d" index (Array.length tokens);
   }

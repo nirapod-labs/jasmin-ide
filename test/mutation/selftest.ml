@@ -57,10 +57,14 @@ let test_mutations () =
     (Mutant.truncate ~source tokens 2).text;
   let deletion = Mutant.delete ~source tokens 1 in
   check "a deletion maps the bytes after it back"
-    (deletion.map_back 3 = 4 && deletion.map_back 1 = 1);
+    (deletion.map_start 3 = 4 && deletion.map_start 1 = 1);
+  check "a deletion maps the end of the text before it to that text's end"
+    (deletion.map_end 1 = 1 && deletion.map_end 3 = 4);
   let copy = Mutant.duplicate ~source tokens 1 in
   check "a copy maps the bytes after it back"
-    (copy.map_back 5 = 4 && copy.map_back 1 = 1);
+    (copy.map_start 5 = 4 && copy.map_start 1 = 1);
+  check "a copy maps the end of the token it repeats to that token's end"
+    (copy.map_end 2 = 2 && copy.map_end 5 = 4);
   let sites = Mutant.sites ~every:2 tokens Mutant.Truncate in
   equal "truncation takes every second token" "0 2 4"
     (String.concat " " (List.map string_of_int sites));
@@ -82,7 +86,7 @@ let test_comparison () =
   in
   let identical =
     Outline.compare ~original ~mutant:original ~edit_start:30 ~edit_end:31
-      ~map_back:(fun offset -> offset)
+      ~map_start:(fun offset -> offset) ~map_end:(fun offset -> offset)
   in
   check "an untouched outline is unchanged"
     (identical.Outline.identity_ok && identical.Outline.span_ok
@@ -90,7 +94,7 @@ let test_comparison () =
   let shortened = [ List.nth original 0; List.nth original 1 ] in
   let lost =
     Outline.compare ~original ~mutant:shortened ~edit_start:30 ~edit_end:31
-      ~map_back:(fun offset -> offset)
+      ~map_start:(fun offset -> offset) ~map_end:(fun offset -> offset)
   in
   check "a lost item before the end is caught" (not lost.Outline.identity_ok);
   let replaced =
@@ -98,7 +102,7 @@ let test_comparison () =
   in
   let named =
     Outline.compare ~original ~mutant:replaced ~edit_start:30 ~edit_end:31
-      ~map_back:(fun offset -> offset)
+      ~map_start:(fun offset -> offset) ~map_end:(fun offset -> offset)
   in
   check "the first difference names the item after the edit"
     ((not named.Outline.identity_ok) && contains named.Outline.detail "fn c");
@@ -107,13 +111,13 @@ let test_comparison () =
   in
   let shifted =
     Outline.compare ~original ~mutant:moved ~edit_start:2 ~edit_end:3
-      ~map_back:(fun offset -> offset)
+      ~map_start:(fun offset -> offset) ~map_end:(fun offset -> offset)
   in
   check "a moved item is caught by the extent, not by its name"
     (shifted.Outline.identity_ok && not shifted.Outline.span_ok);
   let compensated =
     Outline.compare ~original ~mutant:original ~edit_start:2 ~edit_end:3
-      ~map_back:(fun offset -> offset + 1)
+      ~map_start:(fun offset -> offset + 1) ~map_end:(fun offset -> offset + 1)
   in
   check "a shifted item whose offsets map back is unchanged"
     (compensated.Outline.identity_ok && not compensated.Outline.span_ok);
@@ -139,7 +143,8 @@ let test_comparison () =
           entry "fn" "c" 59 79;
         ]
       ~edit_start:50 ~edit_end:51
-      ~map_back:(fun offset -> if offset < 50 then offset else offset + 1)
+      ~map_start:(fun offset -> if offset < 50 then offset else offset + 1)
+      ~map_end:(fun offset -> if offset < 50 then offset else offset + 1)
   in
   check "an item that contains the edit does not shift the pairs"
     (contains.Outline.identity_ok && contains.Outline.span_ok
@@ -151,16 +156,43 @@ let test_comparison () =
           entry "namespace" "N" 0 99; entry "fn" "a" 5 20; entry "fn" "b" 21 40;
         ]
       ~edit_start:50 ~edit_end:51
-      ~map_back:(fun offset -> if offset < 50 then offset else offset + 1)
+      ~map_start:(fun offset -> if offset < 50 then offset else offset + 1)
+      ~map_end:(fun offset -> if offset < 50 then offset else offset + 1)
   in
   check "an item after the edit is still compared when one contains it"
     (not lost_after.Outline.identity_ok);
   let empty =
     Outline.compare ~original:[] ~mutant:[] ~edit_start:0 ~edit_end:1
-      ~map_back:(fun o -> o)
+      ~map_start:(fun o -> o) ~map_end:(fun o -> o)
   in
   check "an empty outline is unchanged"
     (empty.Outline.identity_ok && empty.Outline.away = 0)
+
+(* The boundary of an edit. In "x;y" the [;] is deleted, leaving "xy": the
+   item [x] ends at byte 1, where the deletion starts, so it is before the
+   edit; the item [y] starts at byte 2 in the original and at byte 1 in the
+   mutant. The end of [x] has to map to byte 1. The mapping the harness used
+   before maps every offset at the boundary to the far side, so [x] ends at
+   byte 2, covers the edit, and is dropped from the mutant: the outline
+   comparison then reports a change the deletion did not make. *)
+let test_boundary () =
+  let source = "x;y" in
+  let tokens = Array.of_list (tokens_of source) in
+  let deletion = Mutant.delete ~source tokens 1 in
+  let original = [ entry "fn" "x" 0 1; entry "fn" "y" 2 3 ] in
+  let mutant = [ entry "fn" "x" 0 1; entry "fn" "y" 1 2 ] in
+  let compare map_start map_end =
+    Outline.compare ~original ~mutant ~edit_start:deletion.edit_start
+      ~edit_end:deletion.edit_end ~map_start ~map_end
+  in
+  let exact = compare deletion.map_start deletion.map_end in
+  check "a deletion at a boundary leaves the outline unchanged"
+    (exact.Outline.identity_ok && exact.Outline.span_ok
+   && exact.Outline.away = 2);
+  let before_end_fix offset = if offset < 1 then offset else offset + 1 in
+  let old = compare before_end_fix before_end_fix in
+  check "the mapping the harness used before lost the item before the edit"
+    (not old.Outline.identity_ok)
 
 let test_parse () =
   let program =
@@ -207,6 +239,7 @@ let run () =
   test_tokens ();
   test_mutations ();
   test_comparison ();
+  test_boundary ();
   test_parse ();
   test_isolation ();
   if !failures = 0 then (

@@ -115,7 +115,7 @@ let rec drop count items =
   else match items with [] -> [] | _ :: rest -> drop (count - 1) rest
 
 let compare ~(original : entry list) ~(mutant : entry list) ~edit_start
-    ~edit_end ~map_back =
+    ~edit_end ~map_start ~map_end =
   let away_entries = away_from original ~edit_start ~edit_end in
   let before =
     List.filter (fun entry -> entry.end_byte <= edit_start) away_entries
@@ -132,8 +132,8 @@ let compare ~(original : entry list) ~(mutant : entry list) ~edit_start
   let mutant =
     List.filter
       (fun entry ->
-        let start_byte = map_back entry.start_byte
-        and end_byte = map_back entry.end_byte in
+        let start_byte = map_start entry.start_byte
+        and end_byte = map_end entry.end_byte in
         end_byte <= edit_start || start_byte >= edit_end)
       mutant
   in
@@ -163,8 +163,8 @@ let compare ~(original : entry list) ~(mutant : entry list) ~edit_start
           (Printf.sprintf "%s the edit: expected %s %s, found %s %s" side
              expected.kind expected.name actual.kind actual.name))
       else
-        let start_byte = map_back actual.start_byte in
-        let end_byte = map_back actual.end_byte in
+        let start_byte = map_start actual.start_byte in
+        let end_byte = map_end actual.end_byte in
         if start_byte <> expected.start_byte || end_byte <> expected.end_byte
         then (
           span_ok := false;
