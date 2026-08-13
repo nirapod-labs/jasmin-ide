@@ -86,7 +86,8 @@ let test_comparison () =
   in
   let identical =
     Outline.compare ~original ~mutant:original ~edit_start:30 ~edit_end:31
-      ~map_start:(fun offset -> offset) ~map_end:(fun offset -> offset)
+      ~map_start:(fun offset -> offset)
+      ~map_end:(fun offset -> offset)
   in
   check "an untouched outline is unchanged"
     (identical.Outline.identity_ok && identical.Outline.span_ok
@@ -94,7 +95,8 @@ let test_comparison () =
   let shortened = [ List.nth original 0; List.nth original 1 ] in
   let lost =
     Outline.compare ~original ~mutant:shortened ~edit_start:30 ~edit_end:31
-      ~map_start:(fun offset -> offset) ~map_end:(fun offset -> offset)
+      ~map_start:(fun offset -> offset)
+      ~map_end:(fun offset -> offset)
   in
   check "a lost item before the end is caught" (not lost.Outline.identity_ok);
   let replaced =
@@ -102,7 +104,8 @@ let test_comparison () =
   in
   let named =
     Outline.compare ~original ~mutant:replaced ~edit_start:30 ~edit_end:31
-      ~map_start:(fun offset -> offset) ~map_end:(fun offset -> offset)
+      ~map_start:(fun offset -> offset)
+      ~map_end:(fun offset -> offset)
   in
   check "the first difference names the item after the edit"
     ((not named.Outline.identity_ok) && contains named.Outline.detail "fn c");
@@ -111,13 +114,15 @@ let test_comparison () =
   in
   let shifted =
     Outline.compare ~original ~mutant:moved ~edit_start:2 ~edit_end:3
-      ~map_start:(fun offset -> offset) ~map_end:(fun offset -> offset)
+      ~map_start:(fun offset -> offset)
+      ~map_end:(fun offset -> offset)
   in
   check "a moved item is caught by the extent, not by its name"
     (shifted.Outline.identity_ok && not shifted.Outline.span_ok);
   let compensated =
     Outline.compare ~original ~mutant:original ~edit_start:2 ~edit_end:3
-      ~map_start:(fun offset -> offset + 1) ~map_end:(fun offset -> offset + 1)
+      ~map_start:(fun offset -> offset + 1)
+      ~map_end:(fun offset -> offset + 1)
   in
   check "a shifted item whose offsets map back is unchanged"
     (compensated.Outline.identity_ok && not compensated.Outline.span_ok);
@@ -163,7 +168,8 @@ let test_comparison () =
     (not lost_after.Outline.identity_ok);
   let empty =
     Outline.compare ~original:[] ~mutant:[] ~edit_start:0 ~edit_end:1
-      ~map_start:(fun o -> o) ~map_end:(fun o -> o)
+      ~map_start:(fun o -> o)
+      ~map_end:(fun o -> o)
   in
   check "an empty outline is unchanged"
     (empty.Outline.identity_ok && empty.Outline.away = 0)

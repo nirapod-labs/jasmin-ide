@@ -31,35 +31,28 @@ let glob_call_conv = function
   | Linux -> Glob_options.Linux
   | Windows -> Glob_options.Windows
 
+(* The library's own module for one of our architectures and a call
+   convention. [Channel] is where the two channels spell their architectures
+   differently, and this is its only caller; every other module in this
+   directory reads the architecture table through this function. *)
+let module_of : t -> call_conv -> (module Arch_full.Arch) =
+ fun arch call_conv ->
+  match arch with
+  | X86_64 -> Channel.x86 (glob_call_conv call_conv)
+  | Arm_m4 -> Channel.arm_m4
+  | Arm_v8a -> Channel.arm_v8a
+  | Riscv -> Channel.riscv
+
 let check :
     ?resolve:(string -> string option) ->
+    context:string list ->
     t ->
     call_conv ->
     file:string ->
     text:string ->
     idirs:(string * string) list ->
     Check.result =
- fun ?(resolve = Check.read_file) arch call_conv ~file ~text ~idirs ->
-  match arch with
-  | X86_64 ->
-      let module C =
-        (val CoreArchFactory.core_arch_x86 (glob_call_conv call_conv))
-      in
-      let module A = Arch_full.Arch_from_Core_arch (C) in
-      let module K = Check.Make (A) in
-      K.check ~resolve ~file ~text ~idirs
-  | Arm_m4 ->
-      let module A =
-        Arch_full.Arch_from_Core_arch (CoreArchFactory.Core_arch_ARM) in
-      let module K = Check.Make (A) in
-      K.check ~resolve ~file ~text ~idirs
-  | Arm_v8a ->
-      let module A =
-        Arch_full.Arch_from_Core_arch (CoreArchFactory.Core_arch_ARMV8A) in
-      let module K = Check.Make (A) in
-      K.check ~resolve ~file ~text ~idirs
-  | Riscv ->
-      let module A =
-        Arch_full.Arch_from_Core_arch (CoreArchFactory.Core_arch_RISCV) in
-      let module K = Check.Make (A) in
-      K.check ~resolve ~file ~text ~idirs
+ fun ?(resolve = Check.read_file) ~context arch call_conv ~file ~text ~idirs ->
+  let module A = (val module_of arch call_conv) in
+  let module K = Check.Make (A) in
+  K.check ~resolve ~context ~file ~text ~idirs
