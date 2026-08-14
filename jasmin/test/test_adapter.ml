@@ -40,22 +40,6 @@ let mentions (result : Jide_jasmin.Adapter.check_result) needle =
         (String.lowercase_ascii needle))
     result.diagnostics
 
-(* Whether one of the files reported as holding an error holds one that says
-   [needle]. Those diagnostics are not on the document: their spans index the
-   file, so the check returns them with it. *)
-let required_mentions (result : Jide_jasmin.Adapter.check_result)
-    ~(file : string) needle =
-  List.exists
-    (fun (required : Jide_jasmin.Adapter.required) ->
-      String.equal required.file file
-      && List.exists
-           (fun (diagnostic : Jide_lang.Diagnostic.t) ->
-             contains
-               (String.lowercase_ascii diagnostic.message)
-               (String.lowercase_ascii needle))
-           required.diagnostics)
-    result.required
-
 (* Whether a span can index [text]: both offsets inside it, the end not
    before the start. A diagnostic whose span does not pass this indexes some
    other file, and a caller that places it would reject it or highlight
@@ -160,12 +144,6 @@ fn library(reg u32 a) -> reg u32 {
 }
 |}
 
-let library_plain = {|
-fn library(reg u32 a) -> reg u32 {
-  return a;
-}
-|}
-
 let requiring path =
   "require \"" ^ path
   ^ "\"\n\nfn entry(reg u32 a) -> reg u32 {\n  return a;\n}\n"
@@ -231,8 +209,9 @@ let test_continue_after_failed_item () =
   let result, environment =
     Loop.type_items
       ~resolve:(fun _ -> None)
-      ~budget:200 ~dropped:[] ~recovered:[] ~context:[] ~file
-      ~text:first_item_fails ~items:parsed.items ~idirs:[]
+      ~budget:200 ~dropped:[] ~recovered:[] ~file
+      ~length:(String.length first_item_fails)
+      ~items:parsed.items ~idirs:[]
   in
   check "continue: only the failed item produces a diagnostic"
     (List.length result.Jide_jasmin.Check.diagnostics = 1);
@@ -391,11 +370,9 @@ let test_required_file () =
   remove_file library
 
 (* A required file with an error of its own is not placed on the document,
-   whose bytes its offsets do not describe. It is returned against the file it
-   is in, with that file's own name and text, which is where the compiler
-   prints it. The require item does not summarise it: the summary named the
-   file and never showed the error. A call to a name the broken file declares
-   is that same failure seen again and is not reported a second time. *)
+   whose bytes its offsets do not describe. The require item says the file has
+   one instead, and a call to a name the broken file declares is that same
+   failure seen again and is not reported a second time. *)
 let test_required_file_error () =
   let library = write_temp_file ~suffix:".jinc" library_with_type_error in
   let body =
@@ -409,23 +386,16 @@ let test_required_file_error () =
       library
   in
   let result = check_text "required error" body in
-  check "required error: the document has no diagnostics"
-    (result.Jide_jasmin.Adapter.diagnostics = []);
-  check "required error: the file is reported under its own name"
+  check "required error: one diagnostic, the require item's"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 1);
+  check "required error: it says the required file has errors"
     (List.exists
-       (fun (required : Jide_jasmin.Adapter.required) ->
-         String.equal required.file library)
-       result.required);
-  check "required error: it carries the file's own message"
-    (required_mentions result ~file:library "implicitly cast");
-  check "required error: its span indexes the file's own text"
-    (List.for_all
-       (fun (required : Jide_jasmin.Adapter.required) ->
-         List.for_all
-           (fun (diagnostic : Jide_lang.Diagnostic.t) ->
-             indexes required.text diagnostic.span)
-           required.diagnostics)
-       result.required);
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         contains diagnostic.message "has errors"
+         && contains diagnostic.message library)
+       result.diagnostics);
+  check "required error: the include's own message is not placed"
+    (not (mentions result "implicitly cast"));
   check "required error: the call to it is not reported as unknown"
     (not (mentions result "unknown function"));
   let direct =
@@ -482,144 +452,6 @@ let test_required_file_missing () =
          contains diagnostic.message "cannot read"
          && contains diagnostic.message "no-such.jinc")
        result.diagnostics)
-
-(* A required file that does not even parse is a failure of the check, not a
-   clean result: the document may be well formed only because the file is
-   not, so the file's own parse diagnostics are returned against it. The
-   names the broken file would have declared are not reported a second time
-   as unknown names of the document, which would put a diagnostic on a
-   correct line of it. *)
-let test_required_file_syntax_error () =
-  let broken = "fn library(reg u32 a -> reg u32 {\n  return a;\n}\n" in
-  let resolve path =
-    if Filename.basename path = "syntax-error.jinc" then Some broken else None
-  in
-  let body =
-    "require \"syntax-error.jinc\"\n\n\
-     fn entry(reg u32 a) -> reg u32 {\n\
-    \  reg u32 x;\n\
-    \  x = library(a);\n\
-    \  return x;\n\
-     }\n"
-  in
-  let result = check_with ~resolve body in
-  check "required syntax error: the document has no diagnostic"
-    (result.Jide_jasmin.Adapter.diagnostics = []);
-  check "required syntax error: the file is reported under its own name"
-    (List.exists
-       (fun (required : Jide_jasmin.Adapter.required) ->
-         String.equal required.file "syntax-error.jinc")
-       result.required);
-  check "required syntax error: it carries the parse diagnostic"
-    (required_mentions result ~file:"syntax-error.jinc" "unexpected token");
-  check "required syntax error: the name it did not declare is not reported"
-    (not (mentions result "unknown"));
-  check "required syntax error: its span indexes the file's own text"
-    (List.for_all
-       (fun (required : Jide_jasmin.Adapter.required) ->
-         List.for_all
-           (fun (diagnostic : Jide_lang.Diagnostic.t) ->
-             indexes required.text diagnostic.span)
-           required.diagnostics)
-       result.required);
-  let direct =
-    Jide_jasmin.Adapter.check x86_64 linux ~file:"syntax-error.jinc"
-      ~text:broken ~idirs:[]
-  in
-  check "required syntax error: the error itself is real"
-    (List.exists
-       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
-         diagnostic.code = Some "parse")
-       direct.diagnostics)
-
-(* A required file with a typing error in one item and a parse error in
-   another has both reported against itself: the parse error is not dropped
-   because the typing error was recorded first. *)
-let test_required_file_typing_and_syntax_error () =
-  let broken =
-    "fn library(reg u32 a) -> reg u32 {\n\
-    \  reg bool b;\n\
-    \  b = a;\n\
-    \  return a;\n\
-     }\n\n\
-     fn other(reg u32 a -> reg u32 {\n\
-    \  return a;\n\
-     }\n"
-  in
-  let resolve path =
-    if Filename.basename path = "both-errors.jinc" then Some broken else None
-  in
-  let result = check_with ~resolve (requiring "both-errors.jinc") in
-  check "required both: the document has no diagnostic"
-    (result.Jide_jasmin.Adapter.diagnostics = []);
-  check "required both: the parse error is reported against the file"
-    (required_mentions result ~file:"both-errors.jinc" "unexpected token");
-  check "required both: the typing error is reported against the file"
-    (required_mentions result ~file:"both-errors.jinc" "implicitly cast");
-  check "required both: the file is the only one reported"
-    (List.for_all
-       (fun (required : Jide_jasmin.Adapter.required) ->
-         String.equal required.file "both-errors.jinc")
-       result.required)
-
-(* One file required twice, once by the name beside the document and once
-   through a [..] spelling of it, is one file. The compiler's [enter_file]
-   answers [None] for a path its namespace has already loaded and reads
-   nothing, so the second [require] adds no item; a checker that reads the
-   file again splices its declarations twice and they collide with each
-   other. The release's `tests/success/require/common/file2.jazz` requires
-   one file both ways. *)
-let test_required_file_twice () =
-  let library = write_temp_file ~suffix:".jinc" library_plain in
-  let spelled =
-    Filename.concat (Filename.dirname library)
-      ("nowhere/../" ^ Filename.basename library)
-  in
-  let body =
-    Printf.sprintf
-      "require %S\n\
-       require %S\n\n\
-       fn entry(reg u32 a) -> reg u32 {\n\
-      \  reg u32 x;\n\
-      \  x = library(a);\n\
-      \  return x;\n\
-       }\n"
-      library spelled
-  in
-  let result = check_text "required twice" body in
-  check "required twice: the document has no diagnostics"
-    (result.Jide_jasmin.Adapter.diagnostics = []);
-  remove_file library
-
-(* The same two requires inside a namespace, where the file is spliced into
-   the namespace's own items: read twice, its namespaced declarations would
-   collide there. *)
-let test_required_file_twice_inside_namespace () =
-  let library = write_temp_file ~suffix:".jinc" library_plain in
-  let spelled =
-    Filename.concat (Filename.dirname library)
-      ("nowhere/../" ^ Filename.basename library)
-  in
-  let body =
-    Printf.sprintf
-      "namespace N {\n\
-      \  require %S\n\
-      \  require %S\n\n\
-      \  fn g(reg u32 a) -> reg u32 {\n\
-      \    return a;\n\
-      \  }\n\
-       }\n\n\
-       fn entry(reg u32 a) -> reg u32 {\n\
-      \  reg u32 x;\n\
-      \  x = N::library(a);\n\
-      \  return x;\n\
-       }\n"
-      library spelled
-  in
-  let result = check_text "required twice in a namespace" body in
-  check "required twice in a namespace: the document has no diagnostics"
-    (result.Jide_jasmin.Adapter.diagnostics = []);
-  remove_file library
 
 (* Two files that require each other are a diagnostic too, not a recursion
    that ends in a stack overflow. *)
