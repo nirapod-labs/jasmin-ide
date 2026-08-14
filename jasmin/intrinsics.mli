@@ -11,8 +11,9 @@
     {!Arch.names}, and each table is read through [Arch.asmOp_sopn], the
     value [Main_compiler] hands to [Help.show_intrinsics] and the one
     [Arch.check] types intrinsics against. This is the reachable path, not a
-    fallback: [CoreArchFactory.get_arch_module] is exported and returns an
-    [Arch_full.Arch] whose [asmOp_sopn] is a public field. *)
+    fallback: the library exports the architecture table {!Arch.module_of}
+    reads, and it returns an [Arch_full.Arch] whose [asmOp_sopn] is a public
+    field. *)
 
 (** What a result or an argument of an intrinsic is. *)
 type ty =

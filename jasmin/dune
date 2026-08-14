@@ -1,3 +1,25 @@
 (library
  (name jide_jasmin)
- (libraries jide_lang jasmin menhirLib zarith))
+ (modules
+  (:standard \ channel_release channel_main))
+ (libraries jide_lang jasmin.jasmin menhirLib zarith))
+
+; The one module whose contents differ between the release channel and the
+; edge channel. It is generated, before anything is compiled, from the
+; implementation that matches the Jasmin library the tree is built against:
+; channel_release.ml for the release tarball, which is the default and the
+; build `make ci` runs, and channel_main.ml for upstream main, which the edge
+; channel vendors (`scripts/edge.sh`) and names with JIDE_JASMIN_CHANNEL=edge.
+;
+; Both candidate files are kept out of (modules), so only the copy is
+; compiled: the release build never reads main's API and the edge build never
+; reads the release's. A value other than `release` or `edge` fails the rule
+; rather than choosing one, because a misspelled channel must not silently
+; build against the other library.
+
+(rule
+ (target channel.ml)
+ (deps channel_release.ml channel_main.ml)
+ (action
+  (system
+   "case \"%{env:JIDE_JASMIN_CHANNEL=release}\" in release) cp %{dep:channel_release.ml} %{target} ;; edge) cp %{dep:channel_main.ml} %{target} ;; *) echo 'jasmin/channel.ml: JIDE_JASMIN_CHANNEL must be release (the default) or edge' >&2 ; exit 1 ;; esac")))

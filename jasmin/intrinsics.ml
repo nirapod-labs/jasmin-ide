@@ -38,19 +38,14 @@ type t = { name : string; suffixes : string list; signature : t_signature }
 (* -------------------------------------------------------------------- *)
 (* The architectures.                                                     *)
 
-(* [CoreArchFactory.get_arch_module] is the library's own architecture
-   table: [Main_compiler] uses it to pick the module whose [asmOp_sopn] it
-   prints for [-help-intrinsics], and [Arch.check] uses it to type
-   intrinsics. Reading [prim_string] from it therefore covers exactly the
-   architectures the linked compiler accepts. *)
-let library_arch_of = function
-  | Arch.X86_64 -> Utils.X86_64
-  | Arch.Arm_m4 -> Utils.ARM_M4
-  | Arch.Arm_v8a -> Utils.ARMv8A
-  | Arch.Riscv -> Utils.RISCV
-
+(* [Arch.module_of] is the library's own architecture table, resolved through
+   the module that holds the one difference between the two channels:
+   [Main_compiler] uses the same table to pick the module whose [asmOp_sopn] it
+   prints for [-help-intrinsics], and [Arch.check] uses it to type intrinsics.
+   Reading [prim_string] from it therefore covers exactly the architectures the
+   linked compiler accepts. *)
 let module_of_arch (arch : Arch.t) : (module Arch_full.Arch) =
-  CoreArchFactory.get_arch_module (library_arch_of arch) Glob_options.Linux
+  Arch.module_of arch Arch.Linux
 
 (* -------------------------------------------------------------------- *)
 (* Rendering a suffix the compiler's way.                                 *)
@@ -149,9 +144,22 @@ let first_op (constructor : 'op Sopn.prim_constructor) =
   | Sopn.PrimARM make -> (
       match make false false with Ok op -> Some op | Error _ -> None)
 
+(* The interface writes a suffix without the leading underscore, because a
+   caller writes [name], then ["_"], then [suffix], and the empty string is the
+   bare name; the ARM rows below are already in that spelling. The compiler's
+   own printer writes the underscore ([Pretyping.pp_suffix]), so it is dropped
+   here, in the one place the two spellings meet. *)
+let without_underscore (suffix : string) =
+  if String.length suffix > 0 && suffix.[0] = '_' then
+    String.sub suffix 1 (String.length suffix - 1)
+  else suffix
+
 let suffixes_of_constructor (constructor : 'op Sopn.prim_constructor) =
   match constructor with
-  | Sopn.PrimX86 (suffixes, _) -> List.map suffix_string suffixes
+  | Sopn.PrimX86 (suffixes, _) ->
+      List.map
+        (fun suffix -> without_underscore (suffix_string suffix))
+        suffixes
   | Sopn.PrimARM make -> arm_suffixes make
 
 let entries_of (module A : Arch_full.Arch) ~arch =
