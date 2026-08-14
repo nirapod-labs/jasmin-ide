@@ -28,8 +28,7 @@ let check_text text =
   Jide_jasmin.Adapter.check x86_64 linux ~file ~text ~idirs:[]
 
 module X86 =
-  (val Jasmin.CoreArchFactory.get_arch_module Jasmin.Utils.X86_64
-         Jasmin.Glob_options.Linux
+  (val Jide_jasmin.Arch.module_of Jide_jasmin.Arch.X86_64 Jide_jasmin.Arch.Linux
       : Jasmin.Arch_full.Arch)
 
 module Loop = Jide_jasmin.Check.Make (X86)
@@ -199,9 +198,8 @@ let test_recovered_region_suppresses () =
   let plain, _ =
     Loop.type_items
       ~resolve:(fun _ -> None)
-      ~budget:200 ~dropped:[] ~recovered:[] ~file
-      ~length:(String.length with_type_error)
-      ~items:parsed.items ~idirs:[]
+      ~budget:200 ~dropped:[] ~recovered:[] ~context:[] ~file
+      ~text:with_type_error ~items:parsed.items ~idirs:[]
   in
   check "region: the error is reported without a recovered region"
     (List.length plain.Jide_jasmin.Check.diagnostics = 1);
@@ -212,9 +210,7 @@ let test_recovered_region_suppresses () =
           ~resolve:(fun _ -> None)
           ~budget:200 ~dropped:[]
           ~recovered:[ diagnostic.Jide_lang.Diagnostic.span ]
-          ~file
-          ~length:(String.length with_type_error)
-          ~items:parsed.items ~idirs:[]
+          ~context:[] ~file ~text:with_type_error ~items:parsed.items ~idirs:[]
       in
       check "region: the error inside the recovered region is dropped"
         (suppressed.Jide_jasmin.Check.diagnostics = [])

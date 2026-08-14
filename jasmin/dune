@@ -2,7 +2,7 @@
  (name jide_jasmin)
  (modules
   (:standard \ channel_release channel_main))
- (libraries jide_lang jasmin.jasmin menhirLib zarith))
+ (libraries jide_lang jasmin menhirLib zarith))
 
 ; The one module whose contents differ between the release channel and the
 ; edge channel. It is generated, before anything is compiled, from the

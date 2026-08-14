@@ -703,6 +703,107 @@ let test_dot_prefixed_cycle () =
     (List.sort String.compare (List.map Filename.basename !asked)
     = [ "dot-a.jinc"; "dot-b.jinc" ])
 
+(* The context a document that is not an entry is checked in, written inline
+   as a three-file project: the entry requires the file that declares the
+   parameter, then the document, which uses the parameter and does not
+   require it. Alone the document does not resolve the name; in its entry's
+   context it does, which is the rule of design 8.4. The entry's items after
+   the require that names the document are not typed — the context stops
+   there — so the error in them is nobody's diagnostic. *)
+let test_context_chain_of_three_files () =
+  let entry =
+    "require \"parameter.jinc\"\n\
+     require \"uses.jinc\"\n\n\
+     fn probe(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = local(a);\n\
+    \  return x;\n\
+     }\n\n\
+     fn after(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = never_declared(a);\n\
+    \  return x;\n\
+     }\n"
+  in
+  let parameter = "fn shared(reg u32 a) -> reg u32 {\n  return a;\n}\n" in
+  let uses =
+    "fn local(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = shared(a);\n\
+    \  return x;\n\
+     }\n"
+  in
+  let resolve path =
+    match Filename.basename path with
+    | "parameter.jinc" -> Some parameter
+    | "uses.jinc" -> Some uses
+    | "entry.jazz" -> Some entry
+    | _ -> None
+  in
+  let check_document ~file ~text ~context =
+    Jide_jasmin.Adapter.check ~resolve ~context x86_64 linux ~file ~text
+      ~idirs:[]
+  in
+  let entry_check = check_document ~file:"entry.jazz" ~text:entry ~context:[] in
+  check
+    "three files: the entry reports only the error written after its requires"
+    (List.length entry_check.Jide_jasmin.Adapter.diagnostics = 1
+    && mentions entry_check "never_declared");
+  let alone_check = check_document ~file:"uses.jinc" ~text:uses ~context:[] in
+  check "three files: alone the document does not know the shared name"
+    (mentions alone_check "shared");
+  let in_context =
+    check_document ~file:"uses.jinc" ~text:uses ~context:[ "entry.jazz" ]
+  in
+  check "three files: in its entry's context the document is clean"
+    (in_context.Jide_jasmin.Adapter.diagnostics = []);
+  check "three files: the context stops at the document"
+    (in_context.Jide_jasmin.Adapter.required = [])
+
+(* A file reached through two chains: the entry requires the parameter file
+   itself and also the file that requires it, so the parameter file is the
+   second require's require. It is entered once — the [loaded] guard — and
+   its declaration is not reported as already declared. *)
+let test_diamond_of_three_files () =
+  let entry =
+    "require \"diamond-parameter.jinc\"\n\
+     require \"diamond-middle.jinc\"\n\n\
+     fn probe(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = middle(a);\n\
+    \  return x;\n\
+     }\n"
+  in
+  let parameter = "fn shared(reg u32 a) -> reg u32 {\n  return a;\n}\n" in
+  let middle =
+    "require \"diamond-parameter.jinc\"\n\n\
+     fn middle(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = shared(a);\n\
+    \  return x;\n\
+     }\n"
+  in
+  let asked = ref [] in
+  let resolve path =
+    let name = Filename.basename path in
+    asked := name :: !asked;
+    match name with
+    | "diamond-parameter.jinc" -> Some parameter
+    | "diamond-middle.jinc" -> Some middle
+    | _ -> None
+  in
+  let result =
+    Jide_jasmin.Adapter.check ~resolve x86_64 linux ~file:"entry.jazz"
+      ~text:entry ~idirs:[]
+  in
+  check "diamond: the entry is clean"
+    (result.Jide_jasmin.Adapter.diagnostics = []);
+  check "diamond: nothing is reported as already declared"
+    (result.Jide_jasmin.Adapter.required = []);
+  check "diamond: the shared file is read once"
+    (List.length (List.filter (String.equal "diamond-parameter.jinc") !asked)
+    = 1)
+
 (* A require inside a namespace goes through the same lookup a top-level one
    uses. The library's own include path reads the disk and cannot be reached
    from here, so the adapter reads the file through the lookup and types its
@@ -805,10 +906,11 @@ let test_require_inside_namespace_has_errors () =
     (not (mentions result "unknown function"))
 
 (* A namespaced include that was read and does not type. The error's offsets
-   index the required file, not the document, so it cannot be placed; the
-   require item is what says the file has errors, exactly as it does for a
-   top-level require of the same file. The call to a name the broken file
-   declares is that failure seen again, not a fabricated unknown function. *)
+   index the required file, not the document, and the namespace's items are
+   spliced into the namespace's one item, so that item is what says the file
+   has errors instead of the file being attributed on its own. The call to a
+   name the broken file declares is that failure seen again, not a fabricated
+   unknown function. *)
 let test_require_inside_namespace_type_error () =
   let file = "namespaced-typed-broken.jinc" in
   let resolve path =
@@ -853,8 +955,13 @@ let test_require_inside_namespace_type_error () =
          && diagnostic.span.Jide_lang.Span.end_byte
             > diagnostic.span.Jide_lang.Span.start_byte)
        result.diagnostics);
-  (* The same file at top level is the same answer, which is the parity this
-     test exists to keep. *)
+  (* The same file at top level is the same file: it too is reported against
+     the file, with the file's own message, which is the parity this test
+     exists to keep. The namespace path still summarises the failure on its
+     item instead, because the file's items are spliced into the namespace's
+     single item and their offsets reach the loop with nothing to map them to;
+     attributing that path is a separate change, and the two answers are
+     recorded apart here rather than pretending they agree. *)
   let top_level =
     check_with ~resolve
       (Printf.sprintf
@@ -866,10 +973,9 @@ let test_require_inside_namespace_type_error () =
           }\n"
          file)
   in
-  check "namespace type error: the top-level require agrees"
-    (List.length top_level.Jide_jasmin.Adapter.diagnostics = 1
-    && mentions top_level "has errors"
-    && mentions top_level file)
+  check "namespace type error: the top-level require attributes the file"
+    (top_level.Jide_jasmin.Adapter.diagnostics = []
+    && required_mentions top_level ~file "not_a_function")
 
 (* The suppression a namespace require installs is for the fabricated
    cascade: the unresolved names an unreadable file would have declared. It
@@ -921,11 +1027,12 @@ let test_require_inside_namespace_suppression_scope () =
 (* A namespaced require of a file that requires another one, and the file
    that one requires does not type. The failure is two levels down, so the
    error the namespace fails on names the deeper file, not the file the
-   document named. One diagnostic per require item of the chain has to say
-   what it read, the deeper file first, which is the answer the same two
-   files give when the document requires them at top level. Without the
-   deeper require's record reaching the site list, the error names a file no
-   require item was recorded as having read and the document is silent. *)
+   document named. The namespace's items are spliced into one item, so the
+   deeper file's offsets have nothing to map them to and the two require
+   items each say what they read, the deeper file first. The same two files
+   required from the top of the document take the attributed path instead:
+   the deeper file's error is returned against that file, and neither the
+   document nor the file that read it says anything of its own. *)
 let test_require_inside_namespace_two_levels () =
   let outer = "namespaced-outer.jinc" in
   let inner = "namespaced-inner.jinc" in
@@ -971,8 +1078,13 @@ let test_require_inside_namespace_two_levels () =
     (not (mentions result "unknown function"));
   check "two levels: every span indexes the document"
     (all_placed namespaced result);
-  (* The same two files required from the top of the document are the oracle:
-     they give one diagnostic per require item, the deeper file first. *)
+  (* The same two files required from the top of the document answer the
+     attributed way: the deeper file holds the error, so the document is
+     silent and `required` names that file once. The namespace path above
+     still summarises on the two require items, because its files' items are
+     spliced into one item and their offsets reach the loop with nothing to
+     map them to; that path is a separate change. The two answers are
+     recorded apart here rather than pretending they agree. *)
   let top_level =
     check_with ~resolve
       (Printf.sprintf
@@ -984,13 +1096,15 @@ let test_require_inside_namespace_two_levels () =
           }\n"
          outer)
   in
-  check "two levels: the top-level require agrees on the count"
-    (List.length top_level.Jide_jasmin.Adapter.diagnostics
-    = List.length result.Jide_jasmin.Adapter.diagnostics);
-  check "two levels: the top-level require agrees on the deeper file"
-    (names inner top_level);
-  check "two levels: the top-level require agrees on the file that read it"
-    (names outer top_level)
+  check "two levels: the top-level require leaves the document silent"
+    (top_level.Jide_jasmin.Adapter.diagnostics = []);
+  check "two levels: the top-level require attributes the deeper file"
+    (required_mentions top_level ~file:inner "not_a_function");
+  check "two levels: the file that read it holds no error of its own"
+    (List.for_all
+       (fun (required : Jide_jasmin.Adapter.required) ->
+         String.equal required.file inner)
+       top_level.required)
 
 (* A require written inside a namespaced include is an item of that include,
    so its offsets index the include and not the document. The failure is
@@ -1197,8 +1311,14 @@ let () =
   test_required_file_error ();
   test_required_file_from_a_lookup ();
   test_required_file_missing ();
+  test_required_file_syntax_error ();
+  test_required_file_typing_and_syntax_error ();
+  test_required_file_twice ();
+  test_required_file_twice_inside_namespace ();
   test_required_file_cycle ();
   test_dot_prefixed_cycle ();
+  test_context_chain_of_three_files ();
+  test_diamond_of_three_files ();
   test_require_inside_namespace ();
   test_require_inside_namespace_missing ();
   test_require_inside_namespace_has_errors ();

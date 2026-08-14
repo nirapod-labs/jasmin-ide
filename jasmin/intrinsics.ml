@@ -144,22 +144,9 @@ let first_op (constructor : 'op Sopn.prim_constructor) =
   | Sopn.PrimARM make -> (
       match make false false with Ok op -> Some op | Error _ -> None)
 
-(* The interface writes a suffix without the leading underscore, because a
-   caller writes [name], then ["_"], then [suffix], and the empty string is the
-   bare name; the ARM rows below are already in that spelling. The compiler's
-   own printer writes the underscore ([Pretyping.pp_suffix]), so it is dropped
-   here, in the one place the two spellings meet. *)
-let without_underscore (suffix : string) =
-  if String.length suffix > 0 && suffix.[0] = '_' then
-    String.sub suffix 1 (String.length suffix - 1)
-  else suffix
-
 let suffixes_of_constructor (constructor : 'op Sopn.prim_constructor) =
   match constructor with
-  | Sopn.PrimX86 (suffixes, _) ->
-      List.map
-        (fun suffix -> without_underscore (suffix_string suffix))
-        suffixes
+  | Sopn.PrimX86 (suffixes, _) -> List.map suffix_string suffixes
   | Sopn.PrimARM make -> arm_suffixes make
 
 let entries_of (module A : Arch_full.Arch) ~arch =

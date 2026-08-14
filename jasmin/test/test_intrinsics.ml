@@ -224,14 +224,9 @@ let check_rejects (arch : string) (entries : Jide_jasmin.Intrinsics.t list) =
 let check_signatures_are_the_librarys (arch : string)
     (entries : Jide_jasmin.Intrinsics.t list) =
   let (module A) =
-    CoreArchFactory.get_arch_module
-      (match arch with
-      | "x86-64" -> Utils.X86_64
-      | "arm-m4" -> Utils.ARM_M4
-      | "armv8a" -> Utils.ARMv8A
-      | "riscv" -> Utils.RISCV
-      | other -> failwith ("test: unknown arch " ^ other))
-      Glob_options.Linux
+    match Jide_jasmin.Arch.of_string arch with
+    | Some arch -> Jide_jasmin.Arch.module_of arch Jide_jasmin.Arch.Linux
+    | None -> failwith ("test: unknown arch " ^ arch)
   in
   let library_type (aty : Type.atype) =
     match aty with
