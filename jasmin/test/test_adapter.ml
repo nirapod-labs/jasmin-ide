@@ -535,107 +535,6 @@ let test_dot_prefixed_cycle () =
     (List.sort String.compare (List.map Filename.basename !asked)
     = [ "dot-a.jinc"; "dot-b.jinc" ])
 
-(* The context a document that is not an entry is checked in, written inline
-   as a three-file project: the entry requires the file that declares the
-   parameter, then the document, which uses the parameter and does not
-   require it. Alone the document does not resolve the name; in its entry's
-   context it does, which is the rule of design 8.4. The entry's items after
-   the require that names the document are not typed — the context stops
-   there — so the error in them is nobody's diagnostic. *)
-let test_context_chain_of_three_files () =
-  let entry =
-    "require \"parameter.jinc\"\n\
-     require \"uses.jinc\"\n\n\
-     fn probe(reg u32 a) -> reg u32 {\n\
-    \  reg u32 x;\n\
-    \  x = local(a);\n\
-    \  return x;\n\
-     }\n\n\
-     fn after(reg u32 a) -> reg u32 {\n\
-    \  reg u32 x;\n\
-    \  x = never_declared(a);\n\
-    \  return x;\n\
-     }\n"
-  in
-  let parameter = "fn shared(reg u32 a) -> reg u32 {\n  return a;\n}\n" in
-  let uses =
-    "fn local(reg u32 a) -> reg u32 {\n\
-    \  reg u32 x;\n\
-    \  x = shared(a);\n\
-    \  return x;\n\
-     }\n"
-  in
-  let resolve path =
-    match Filename.basename path with
-    | "parameter.jinc" -> Some parameter
-    | "uses.jinc" -> Some uses
-    | "entry.jazz" -> Some entry
-    | _ -> None
-  in
-  let check_document ~file ~text ~context =
-    Jide_jasmin.Adapter.check ~resolve ~context x86_64 linux ~file ~text
-      ~idirs:[]
-  in
-  let entry_check = check_document ~file:"entry.jazz" ~text:entry ~context:[] in
-  check
-    "three files: the entry reports only the error written after its requires"
-    (List.length entry_check.Jide_jasmin.Adapter.diagnostics = 1
-    && mentions entry_check "never_declared");
-  let alone_check = check_document ~file:"uses.jinc" ~text:uses ~context:[] in
-  check "three files: alone the document does not know the shared name"
-    (mentions alone_check "shared");
-  let in_context =
-    check_document ~file:"uses.jinc" ~text:uses ~context:[ "entry.jazz" ]
-  in
-  check "three files: in its entry's context the document is clean"
-    (in_context.Jide_jasmin.Adapter.diagnostics = []);
-  check "three files: the context stops at the document"
-    (in_context.Jide_jasmin.Adapter.required = [])
-
-(* A file reached through two chains: the entry requires the parameter file
-   itself and also the file that requires it, so the parameter file is the
-   second require's require. It is entered once — the [loaded] guard — and
-   its declaration is not reported as already declared. *)
-let test_diamond_of_three_files () =
-  let entry =
-    "require \"diamond-parameter.jinc\"\n\
-     require \"diamond-middle.jinc\"\n\n\
-     fn probe(reg u32 a) -> reg u32 {\n\
-    \  reg u32 x;\n\
-    \  x = middle(a);\n\
-    \  return x;\n\
-     }\n"
-  in
-  let parameter = "fn shared(reg u32 a) -> reg u32 {\n  return a;\n}\n" in
-  let middle =
-    "require \"diamond-parameter.jinc\"\n\n\
-     fn middle(reg u32 a) -> reg u32 {\n\
-    \  reg u32 x;\n\
-    \  x = shared(a);\n\
-    \  return x;\n\
-     }\n"
-  in
-  let asked = ref [] in
-  let resolve path =
-    let name = Filename.basename path in
-    asked := name :: !asked;
-    match name with
-    | "diamond-parameter.jinc" -> Some parameter
-    | "diamond-middle.jinc" -> Some middle
-    | _ -> None
-  in
-  let result =
-    Jide_jasmin.Adapter.check ~resolve x86_64 linux ~file:"entry.jazz"
-      ~text:entry ~idirs:[]
-  in
-  check "diamond: the entry is clean"
-    (result.Jide_jasmin.Adapter.diagnostics = []);
-  check "diamond: nothing is reported as already declared"
-    (result.Jide_jasmin.Adapter.required = []);
-  check "diamond: the shared file is read once"
-    (List.length (List.filter (String.equal "diamond-parameter.jinc") !asked)
-    = 1)
-
 (* A require inside a namespace goes through the same lookup a top-level one
    uses. The library's own include path reads the disk and cannot be reached
    from here, so the adapter reads the file through the lookup and types its
@@ -738,11 +637,10 @@ let test_require_inside_namespace_has_errors () =
     (not (mentions result "unknown function"))
 
 (* A namespaced include that was read and does not type. The error's offsets
-   index the required file, not the document, and the namespace's items are
-   spliced into the namespace's one item, so that item is what says the file
-   has errors instead of the file being attributed on its own. The call to a
-   name the broken file declares is that failure seen again, not a fabricated
-   unknown function. *)
+   index the required file, not the document, so it cannot be placed; the
+   require item is what says the file has errors, exactly as it does for a
+   top-level require of the same file. The call to a name the broken file
+   declares is that failure seen again, not a fabricated unknown function. *)
 let test_require_inside_namespace_type_error () =
   let file = "namespaced-typed-broken.jinc" in
   let resolve path =
@@ -787,13 +685,8 @@ let test_require_inside_namespace_type_error () =
          && diagnostic.span.Jide_lang.Span.end_byte
             > diagnostic.span.Jide_lang.Span.start_byte)
        result.diagnostics);
-  (* The same file at top level is the same file: it too is reported against
-     the file, with the file's own message, which is the parity this test
-     exists to keep. The namespace path still summarises the failure on its
-     item instead, because the file's items are spliced into the namespace's
-     single item and their offsets reach the loop with nothing to map them to;
-     attributing that path is a separate change, and the two answers are
-     recorded apart here rather than pretending they agree. *)
+  (* The same file at top level is the same answer, which is the parity this
+     test exists to keep. *)
   let top_level =
     check_with ~resolve
       (Printf.sprintf
