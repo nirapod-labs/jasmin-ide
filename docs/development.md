@@ -3,6 +3,25 @@
 How to build the tree, run its tests, and compare the server with the Jasmin
 compiler over a corpus. Every command runs from the repository root.
 
+## The edge channel
+
+The release channel builds against the tarball `vendor/jasmin.lock` pins. The
+edge channel builds against upstream `main`, which has no release tarball, so
+you make one from a checkout. That needs Rocq and the libraries the proofs
+use; `.github/workflows/edge.yml` installs the versions upstream names.
+
+```
+make -C <jasmin checkout>/compiler CIL dist
+sh vendor/fetch.sh <jasmin checkout>/compiler/jasmin-compiler.tgz <its sha256>
+JIDE_JASMIN_CHANNEL=edge dune build --root . @install
+```
+
+Don't use `make build` here: its vendor step puts the release tarball back.
+`JIDE_JASMIN_CHANNEL=edge` selects `jasmin/channel_main.ml`, the one place
+where the two Jasmin versions' interfaces differ. `jasmin-lsp --version` then
+says `built from vendored tarball sha256:<digest>`. Compare an edge build
+with the corpus of the same upstream commit, never with the release's.
+
 ## Layout
 
 ```
