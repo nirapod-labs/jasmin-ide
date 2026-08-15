@@ -49,6 +49,14 @@ let line ~file ~text (diagnostic : Diagnostic.t) =
 
 let lines ~file ~text diagnostics = List.map (line ~file ~text) diagnostics
 
+let required_lines (result : Jide_jasmin.Adapter.check_result) =
+  List.concat_map
+    (fun (required : Jide_jasmin.Adapter.required) ->
+      List.map
+        (line ~file:required.file ~text:required.text)
+        required.diagnostics)
+    result.Jide_jasmin.Adapter.required
+
 let summary ~file diagnostics =
   let errors =
     List.length

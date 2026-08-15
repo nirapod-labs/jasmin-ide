@@ -11,10 +11,17 @@ type parse_result = Parse.t
 
 let parse = Parse.parse
 
+type required = Check.required = {
+  file : string;
+  text : string;
+  diagnostics : Jide_lang.Diagnostic.t list;
+}
+
 type check_result = Check.result = {
   diagnostics : Jide_lang.Diagnostic.t list;
   warnings : Warnings.t list;
   facts : Facts.t;
+  required : required list;
 }
 
-let check = Arch.check
+let check ?resolve ?(context = []) = Arch.check ?resolve ~context

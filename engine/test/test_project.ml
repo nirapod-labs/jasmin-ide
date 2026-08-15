@@ -684,12 +684,13 @@ let test_an_unknown_architecture_never_reaches_the_settings () =
    a file that changes nothing. *)
 let test_the_settings_reach_the_checker () =
   let seen = ref None in
-  let check_captures ~arch ~call_conv ~file:_ ~text:_ ~idirs =
+  let check_captures ~context:_ ~arch ~call_conv ~file:_ ~text:_ ~idirs =
     seen := Some (arch, call_conv, idirs);
     {
       Jide_jasmin.Adapter.diagnostics = [];
       warnings = [];
       facts = Jide_jasmin.Facts.empty;
+      required = [];
     }
   in
   let root =
@@ -792,12 +793,13 @@ let test_the_nearest_project_file_decides_for_a_document () =
       ]
   in
   let seen = ref [] in
-  let check_captures ~arch ~call_conv:_ ~file ~text:_ ~idirs:_ =
+  let check_captures ~context:_ ~arch ~call_conv:_ ~file ~text:_ ~idirs:_ =
     seen := (Filename.basename file, name_of_arch arch) :: !seen;
     {
       Jide_jasmin.Adapter.diagnostics = [];
       warnings = [];
       facts = Jide_jasmin.Facts.empty;
+      required = [];
     }
   in
   let engine = Jide_engine.Engine.create ~check:check_captures () in

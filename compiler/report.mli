@@ -37,6 +37,12 @@ val lines :
   file:string -> text:string -> Jide_lang.Diagnostic.t list -> string list
 (** [lines ~file ~text diagnostics] is [line] for each diagnostic. *)
 
+val required_lines : Jide_jasmin.Adapter.check_result -> string list
+(** [required_lines result] is one output line per diagnostic the check found
+    in a file reached through a [require]. Each line names that file and its
+    column counts bytes of that file's own text, because the span indexes it
+    and not the document: this is where the compiler prints the error too. *)
+
 val summary : file:string -> Jide_lang.Diagnostic.t list -> string
 (** [summary ~file diagnostics] is ["<file>: ok"] when no diagnostic has
     error severity, and ["<file>: N error"] or ["<file>: N errors"]

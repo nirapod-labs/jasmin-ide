@@ -34,11 +34,31 @@ type parse_result = Parse.t
 
 val parse : name:string -> string -> parse_result
 
+type required = {
+  file : string;
+      (** The path the compiler prints for it, which is the one the [require]
+          resolved to and not a normalised copy: a document named
+          [entry.jazz] reaches [consts.jinc], not [/where/it/sits]. *)
+  text : string;  (** the bytes of [file], which [diagnostics] index *)
+  diagnostics : Jide_lang.Diagnostic.t list;
+      (** What the compiler reported in [file] itself, at the place it
+          reported it: an error in a file reached through a [require] is
+          never printed at the require item instead. *)
+}
+(** A file reached through a [require] that holds an error, and that error.
+    The caller prints each diagnostic against [text] and with [file] as its
+    name, which is where the compiler prints it.
+
+    A [require] written inside a namespace is not reported this way: its
+    file's items are spliced into the namespace's item, which the library
+    types as one item, so the file's offsets reach the loop with nothing to
+    map them to and the item says the file has errors instead. *)
+
 type check_result = {
   diagnostics : Jide_lang.Diagnostic.t list;
       (** Diagnostics whose span indexes [file]. An error the compiler
-          reports in a file reached through a [require] is not returned with
-          its own offsets: the require item says the file has one instead. *)
+          reports in a file reached through a [require] is not here: that
+          file and its diagnostic are in {!required} instead. *)
   warnings : Warnings.t list;
       (** Each warning names the file the compiler printed it for, or [file]
           when it printed no location, so the engine keeps the ones for the
@@ -49,21 +69,31 @@ type check_result = {
           names and ranges. Every range in it indexes [file] and every value
           is plain data, so the engine reads it without handling the
           compiler's program representation. *)
+  required : required list;
+      (** The files reached through a [require] that hold an error, in the
+          order their first error was found. *)
 }
 
 val check :
   ?resolve:(string -> string option) ->
+  ?context:string list ->
   arch ->
   call_conv ->
   file:string ->
   text:string ->
   idirs:(string * string) list ->
   check_result
-(** [check ~resolve arch call_conv ~file ~text ~idirs] parses and types
-    [text] as [file]. [resolve] answers with the bytes of a file a [require]
-    item names, or [None] when it has none; the engine passes its open
-    buffers first and falls back to disk, which is what the default does. A
-    [require] inside a namespace is read through [resolve] too: the adapter
+(** [check ~resolve ~context arch call_conv ~file ~text ~idirs] parses and
+    types [text] as [file]. [resolve] answers with the bytes of a file a
+    [require] item names, or [None] when it has none; the engine passes its
+    open buffers first and falls back to disk, which is what the default does.
+
+    [context] is the chain of files the compiler would enter before [file] when
+    it is not an entry, outermost first; the file is checked in the
+    environment the last of them builds up to the [require] that names it.
+    The empty list, the default, is a file checked on its own.
+
+    A [require] inside a namespace is read through [resolve] too: the adapter
     reads the file itself and types its items in the namespace, because the
     library's own include path reads the disk and cannot be reached from
     here. A missing file, a cycle and a file that does not type are
