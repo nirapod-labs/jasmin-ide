@@ -698,9 +698,10 @@ let test_require_inside_namespace_type_error () =
           }\n"
          file)
   in
-  check "namespace type error: the top-level require attributes the file"
-    (top_level.Jide_jasmin.Adapter.diagnostics = []
-    && required_mentions top_level ~file "not_a_function")
+  check "namespace type error: the top-level require agrees"
+    (List.length top_level.Jide_jasmin.Adapter.diagnostics = 1
+    && mentions top_level "has errors"
+    && mentions top_level file)
 
 (* The suppression a namespace require installs is for the fabricated
    cascade: the unresolved names an unreadable file would have declared. It
