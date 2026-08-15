@@ -1,0 +1,545 @@
+# Build, attest and draft a release from a signed tag.
+#
+# Nothing here has ever run. The project is private and has no remote, so this
+# file is written and checked by inspection only: `docs/edge.md` says what that
+# means, and `scripts/check-workflows.sh` is the check.
+#
+# The gate is the `release` environment. It carries a protection rule whose
+# reviewer is the person who decides that a release happens, so no job below
+# runs until that approval lands. That the tag is signed is a repository tag
+# rule, not a line in this file.
+#
+# Permissions are read-only at the top of the file. Only the jobs that write
+# ask for more, and only for what they write:
+#
+#   contents: write      the draft release, which creates a draft and no
+#                        published release;
+#   attestations: write  the attestation job;
+#   id-token: write      the two publishing jobs and no others. It mints an
+#                        identity token, which is what a registry checks, so it
+#                        never leaves the publish stage.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+# Every action this workflow uses, with the version a reader recognises and the
+# commit its `uses:` line must name.
+#
+# GitHub runs no expression on a `uses:` line, so the value below cannot be
+# substituted into it: the pair is a record, and the `uses:` line carries the
+# same value literally. Each `<NAME>_SHA` is the string PIN until one fill-in
+# pass replaces it here and on the `uses:` lines in the same commit.
+# `scripts/check-workflows.sh` fails while any pin is PIN and fails when the
+# two places disagree, so a half-finished pass is caught rather than shipped.
+env:
+  CHECKOUT_ACTION: actions/checkout
+  CHECKOUT_VERSION: v4
+  CHECKOUT_SHA: PIN
+
+  SETUP_OCAML_ACTION: ocaml/setup-ocaml
+  SETUP_OCAML_VERSION: v3
+  SETUP_OCAML_SHA: PIN
+
+  SETUP_NODE_ACTION: actions/setup-node
+  SETUP_NODE_VERSION: v4
+  SETUP_NODE_SHA: PIN
+
+  PNPM_SETUP_ACTION: pnpm/action-setup
+  PNPM_SETUP_VERSION: v4
+  PNPM_SETUP_SHA: PIN
+
+  UPLOAD_ARTIFACT_ACTION: actions/upload-artifact
+  UPLOAD_ARTIFACT_VERSION: v4
+  UPLOAD_ARTIFACT_SHA: PIN
+
+  DOWNLOAD_ARTIFACT_ACTION: actions/download-artifact
+  DOWNLOAD_ARTIFACT_VERSION: v4
+  DOWNLOAD_ARTIFACT_SHA: PIN
+
+  ATTEST_ACTION: actions/attest-build-provenance
+  ATTEST_VERSION: v2
+  ATTEST_SHA: PIN
+
+jobs:
+  # The two Linux architectures, each built inside an Alpine container.
+  # Alpine is the point: the release server is linked statically against musl,
+  # never against glibc, because the glibc build needs a newer libc than the
+  # oldest system the editors support.
+  #
+  # The container is started by the step rather than declared with
+  # `container:`. A job's actions are Node programs that the runner executes,
+  # and the runner's Node does not load on musl, so a container job could not
+  # use them.
+  #
+  # The binary is built twice from the same inputs with SOURCE_DATE_EPOCH set
+  # and the two digests are printed and compared. The release claims pinned
+  # inputs and an attested build; whether the bytes are identical is what this
+  # step measures, so it states which of the two it found.
+  static-linux:
+    name: static linux/${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Check out
+        uses: actions/checkout@PIN
+
+      - name: Build twice in an Alpine container and check what is linked
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/out"
+          docker run --rm \
+            -e SOURCE_DATE_EPOCH=1700000000 \
+            -v "$PWD:/src:ro" \
+            -v "$RUNNER_TEMP/out:/out" \
+            alpine:3.21 sh -eu -c '
+              apk add --no-cache build-base musl-dev gmp-static gmp-dev \
+                opam tar bzip2 curl git ca-certificates coreutils
+              cp -a /src /work
+              cd /work
+              opam init --bare --disable-sandboxing --no-setup
+              opam switch create jasmin-ide --packages=ocaml-base-compiler.4.14.4
+              opam install --switch jasmin-ide --locked --deps-only -y ./jasmin-lsp.opam.locked
+              opam install --switch jasmin-ide --deps-only -y ./vendor/requirements.opam
+              sh vendor/fetch.sh
+              printf "(env (_ (link_flags (-ccopt -static -ccopt -no-pie))))\n" >/tmp/dune-workspace
+              for pass in 1 2; do
+                opam exec --switch jasmin-ide -- dune build --root . --profile release \
+                  --build-dir "/tmp/build-$pass" --workspace /tmp/dune-workspace -j 4 \
+                  lsp-server/native/main.exe
+                cp "/tmp/build-$pass/default/lsp-server/native/main.exe" "/tmp/server-$pass"
+              done
+              chmod 755 /tmp/server-1 /tmp/server-2
+              one=$(sha256sum /tmp/server-1 | cut -d" " -f1)
+              two=$(sha256sum /tmp/server-2 | cut -d" " -f1)
+              printf "double build: %s %s\n" "$one" "$two"
+              if [ "$one" = "$two" ]; then
+                printf "double build: identical bytes\n"
+              else
+                printf "double build: bytes differ; the release states pinned inputs and an attested build, not identical bytes\n"
+              fi
+              printf "size: %s bytes\n" "$(wc -c </tmp/server-1 | tr -d " ")"
+              report=$(ldd /tmp/server-1 2>&1 || true)
+              printf "%s\n" "$report"
+              case $report in
+                *"not a dynamic executable"*|*"statically linked"*) ;;
+                *)
+                  printf "the build is not a static link; the release file must be musl static\n" >&2
+                  exit 1
+                  ;;
+              esac
+              cp /tmp/server-1 /out/server
+            '
+
+      - name: Name the asset, digest it and keep it
+        run: |
+          set -eu
+          asset=$RUNNER_TEMP/jasmin-lsp-${GITHUB_REF_NAME#v}-linux-${{ matrix.arch }}
+          cp "$RUNNER_TEMP/out/server" "$asset"
+          chmod 755 "$asset"
+          sha256sum "$asset" >"$asset.sha256"
+          cat "$asset.sha256"
+          mkdir -p "$RUNNER_TEMP/release"
+          mv "$asset" "$asset.sha256" "$RUNNER_TEMP/release/"
+
+      - name: Upload the asset
+        uses: actions/upload-artifact@PIN
+        with:
+          name: linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+
+  # macOS arm64: the static archive is linked explicitly, ahead of zarith's own
+  # search path, so `otool -L` shows libSystem and nothing else. A host with no
+  # archive is a refusal, never a dynamic link under a static name.
+  static-macos:
+    name: static macos-aarch64
+    runs-on: macos-15
+    environment: release
+    steps:
+      - name: Check out
+        uses: actions/checkout@PIN
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@PIN
+        with:
+          ocaml-compiler: "4.14"
+
+      - name: Install the dependencies the lock file names
+        run: |
+          opam install --locked --deps-only -y ./jasmin-lsp.opam.locked
+          opam install --deps-only -y ./vendor/requirements.opam
+
+      - name: Fetch the Jasmin release tarball
+        run: sh vendor/fetch.sh
+
+      - name: Build twice and compare the digests
+        env:
+          SOURCE_DATE_EPOCH: "1700000000"
+        run: |
+          set -eu
+          # A directory holding only libgmp.a, placed ahead of zarith's own
+          # -L/-lgmp, so the linker resolves -lgmp to the archive and
+          # libgmp.dylib is never recorded. A missing archive is a link error,
+          # not a silent dynamic link.
+          archive=$(find /opt/homebrew /usr/local -name libgmp.a 2>/dev/null | head -1)
+          if [ -z "$archive" ]; then
+            printf 'no libgmp.a on this host; the macOS release binary cannot be built here\n' >&2
+            exit 1
+          fi
+          printf 'static GMP: %s\n' "$archive"
+          mkdir -p "$RUNNER_TEMP/gmp"
+          cp "$archive" "$RUNNER_TEMP/gmp/libgmp.a"
+          printf '(env (_ (link_flags (-ccopt -L%s))))\n' "$RUNNER_TEMP/gmp" \
+            >"$RUNNER_TEMP/dune-workspace"
+          for pass in 1 2; do
+            dune build --root . --profile release \
+              --build-dir "$RUNNER_TEMP/build-$pass" \
+              --workspace "$RUNNER_TEMP/dune-workspace" \
+              -j 4 lsp-server/native/main.exe
+            cp "$RUNNER_TEMP/build-$pass/default/lsp-server/native/main.exe" \
+              "$RUNNER_TEMP/server-$pass"
+          done
+          one=$(shasum -a 256 "$RUNNER_TEMP/server-1" | cut -d' ' -f1)
+          two=$(shasum -a 256 "$RUNNER_TEMP/server-2" | cut -d' ' -f1)
+          printf 'double build: %s %s\n' "$one" "$two"
+          if [ "$one" = "$two" ]; then
+            printf 'double build: identical bytes\n'
+          else
+            printf 'double build: bytes differ; the release states pinned inputs and an attested build, not identical bytes\n'
+          fi
+
+      - name: Check the linked libraries
+        run: |
+          set -eu
+          binary=$RUNNER_TEMP/server-1
+          chmod 755 "$binary"
+          printf 'size: %s bytes\n' "$(wc -c <"$binary" | tr -d ' ')"
+          report=$(otool -L "$binary")
+          printf '%s\n' "$report"
+          unexpected=$(printf '%s\n' "$report" | tail -n +2 |
+            awk '{ print $1 }' | grep -v '^/usr/lib/libSystem\.B\.dylib$' || true)
+          if [ -n "$unexpected" ]; then
+            printf 'the release binary links libraries besides libSystem:\n%s\n' \
+              "$unexpected" >&2
+            exit 1
+          fi
+
+      - name: Name the asset, digest it and keep it
+        run: |
+          set -eu
+          asset=$RUNNER_TEMP/jasmin-lsp-${GITHUB_REF_NAME#v}-macos-aarch64
+          cp "$RUNNER_TEMP/server-1" "$asset"
+          chmod 755 "$asset"
+          shasum -a 256 "$asset" >"$asset.sha256"
+          cat "$asset.sha256"
+          mkdir -p "$RUNNER_TEMP/release"
+          mv "$asset" "$asset.sha256" "$RUNNER_TEMP/release/"
+
+      - name: Upload the asset
+        uses: actions/upload-artifact@PIN
+        with:
+          name: macos-aarch64
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+
+  # Each release binary runs the corpus of the release it was built against,
+  # through the harness this repository already has: every verdict must agree
+  # with the release's own record of what its compiler says. A binary runs only
+  # on its own platform, so this is a matrix too. The corpus is not in this
+  # repository and is never copied into it; it comes from the tag the lock file
+  # names.
+  smoke:
+    name: corpus smoke test, ${{ matrix.platform }}
+    needs: [static-linux, static-macos]
+    runs-on: ${{ matrix.runner }}
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - platform: macos-aarch64
+            runner: macos-15
+    steps:
+      - name: Check out
+        uses: actions/checkout@PIN
+
+      - name: Download this platform's binary
+        uses: actions/download-artifact@PIN
+        with:
+          name: ${{ matrix.platform }}
+          path: ${{ runner.temp }}/release
+
+      - name: Run the binary over the corpus of the release
+        run: |
+          set -eu
+          release=$(sed -n 's/^version *= *//p' vendor/jasmin.lock)
+          git clone --quiet --depth 1 --branch "v$release" \
+            https://github.com/jasmin-lang/jasmin.git "$RUNNER_TEMP/jasmin"
+          binary=$RUNNER_TEMP/release/jasmin-lsp-${GITHUB_REF_NAME#v}-${{ matrix.platform }}
+          chmod 755 "$binary"
+          JASMIN_LSP=$binary sh test/parity/parity.sh "$RUNNER_TEMP/jasmin"
+
+  # The packages: one VSIX per platform carrying that platform's server, one
+  # universal package with no server, the Zed extension's module and manifest,
+  # the source tarball, and SHA256SUMS over all of them.
+  packages:
+    name: packages and checksums
+    needs: [smoke]
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      - name: Check out
+        uses: actions/checkout@PIN
+
+      - name: Set up Node
+        uses: actions/setup-node@PIN
+        with:
+          node-version: "22"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@PIN
+        with:
+          package_json_file: editor/code/package.json
+          run_install: false
+
+      - name: Download every platform's binary
+        uses: actions/download-artifact@PIN
+        with:
+          path: ${{ runner.temp }}/assets
+
+      - name: Install and validate the VS Code extension
+        # The commands of `make editor-code`, written out: that step demands a
+        # Jasmin corpus and skips without one, and a runner has none.
+        working-directory: editor/code
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run validate
+
+      - name: Build the Zed extension and keep its module
+        run: |
+          set -eu
+          rustup target add wasm32-wasip2
+          make editor-zed
+          cp editor/zed/target/wasm32-wasip2/release/jasmin_ide_zed.wasm \
+            "$RUNNER_TEMP/jasmin-ide-zed-${GITHUB_REF_NAME#v}.wasm"
+
+      - name: Assemble the release files
+        run: |
+          set -eu
+          release=$RUNNER_TEMP/release
+          mkdir -p "$release"
+          version=${GITHUB_REF_NAME#v}
+          # The three servers, under the asset names the design fixes.
+          for directory in "$RUNNER_TEMP"/assets/*/; do
+            cp "$directory"jasmin-lsp-* "$release/"
+          done
+          # One VSIX per platform, each carrying the binary the smoke test
+          # above ran, so no package can carry a build nobody checked. The
+          # universal package carries no server and finds one on PATH.
+          node editor/code/scripts/package-vsix.mjs darwin-arm64 \
+            "$RUNNER_TEMP/assets/macos-aarch64/jasmin-lsp-$version-macos-aarch64"
+          node editor/code/scripts/package-vsix.mjs linux-x64 \
+            "$RUNNER_TEMP/assets/linux-x86_64/jasmin-lsp-$version-linux-x86_64"
+          node editor/code/scripts/package-vsix.mjs linux-arm64 \
+            "$RUNNER_TEMP/assets/linux-aarch64/jasmin-lsp-$version-linux-aarch64"
+          node editor/code/scripts/package-vsix.mjs universal
+          cp editor/code/.artifacts/*.vsix "$release/"
+          cp editor/zed/extension.toml "$release/extension.toml"
+          # The source tarball, so a user can build the server themselves.
+          git archive --format=tar.gz --prefix="jasmin-ide-$version/" \
+            -o "$release/jasmin-lsp-$version-src.tar.gz" HEAD
+          ls -l "$release"
+
+      - name: Write SHA256SUMS
+        run: |
+          set -eu
+          cd "$RUNNER_TEMP/release"
+          rm -f SHA256SUMS
+          for file in *; do
+            case $file in
+              SHA256SUMS | *.sha256) continue ;;
+            esac
+            sha256sum "$file" >>SHA256SUMS
+          done
+          sort -k2,2 -o SHA256SUMS SHA256SUMS
+          # Re-read the list against the files, so a truncated or mis-sorted
+          # write fails here rather than at a user's download.
+          sha256sum -c SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload the release files
+        uses: actions/upload-artifact@PIN
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+
+  # Provenance for every file: the attestation is what a user's
+  # `gh attestation verify` checks a download against, and the only reason a
+  # binary nobody rebuilt can be trusted.
+  #
+  # A recorded conflict, not an oversight. The attestation action signs with a
+  # certificate it obtains through the runner's identity token, so it needs
+  # `id-token: write` as well as `attestations: write`. This file follows the
+  # design's rule as written — `id-token: write` in the publishing jobs and
+  # nowhere else — rather than widening it in passing, so as it stands this is
+  # the one job that cannot complete. Widening that rule is a change to the
+  # design and not a detail of this file, so it is left as the rule states it.
+  attest:
+    name: attest the release files
+    needs: [packages]
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      attestations: write
+    steps:
+      - name: Download the release files
+        uses: actions/download-artifact@PIN
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/release
+
+      - name: Attest the build provenance of every file
+        uses: actions/attest-build-provenance@PIN
+        with:
+          subject-path: ${{ runner.temp }}/release/*
+
+  # The draft: every file, its checksums and generated notes. A draft is a work
+  # item, not a publication, so this is the last job that runs on the tag
+  # alone.
+  draft:
+    name: draft the release
+    needs: [attest]
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Download the release files
+        uses: actions/download-artifact@PIN
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/release
+
+      - name: Create the draft release with its files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          gh release create "$TAG" \
+            --draft \
+            --title "Jasmin IDE ${TAG#v}" \
+            --generate-notes \
+            --verify-tag \
+            "$RUNNER_TEMP"/release/*
+          gh release view "$TAG" --json assets --jq '.assets[].name'
+
+  # The two publishing jobs are separate from everything above and from each
+  # other, and they run only on a person's yes. Two switches, on purpose:
+  #
+  #   - the `publish` environment carries a protection rule with a required
+  #     reviewer, so a run waits for that person;
+  #   - the `PUBLISH_ENABLED` repository variable records that publishing this
+  #     version has been decided. It is unset, so these jobs do not run.
+  #
+  # They are the only jobs in this directory with `id-token: write`: both
+  # registries authenticate the workflow's identity token instead of a stored
+  # token, which is why the design allows it here and nowhere else.
+  publish-vscode:
+    name: publish to the VS Code Marketplace
+    needs: [draft]
+    if: vars.PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@PIN
+
+      - name: Set up Node
+        uses: actions/setup-node@PIN
+        with:
+          node-version: "22"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@PIN
+        with:
+          package_json_file: editor/code/package.json
+          run_install: false
+
+      - name: Download the release files
+        uses: actions/download-artifact@PIN
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/release
+
+      - name: Publish the packages
+        working-directory: editor/code
+        run: |
+          set -eu
+          pnpm install --frozen-lockfile
+          for package in "$RUNNER_TEMP"/release/*.vsix; do
+            pnpm exec vsce publish --oidc --packagePath "$package"
+          done
+
+  publish-openvsx:
+    name: publish to Open VSX
+    needs: [draft]
+    if: vars.PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@PIN
+
+      - name: Set up Node
+        uses: actions/setup-node@PIN
+        with:
+          node-version: "22"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@PIN
+        with:
+          package_json_file: editor/code/package.json
+          run_install: false
+
+      - name: Download the release files
+        uses: actions/download-artifact@PIN
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/release
+
+      - name: Publish the packages
+        working-directory: editor/code
+        run: |
+          set -eu
+          pnpm install --frozen-lockfile
+          for package in "$RUNNER_TEMP"/release/*.vsix; do
+            pnpm exec ovsx publish --trusted-publishing "$package"
+          done
