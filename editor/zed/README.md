@@ -17,6 +17,16 @@ installed. The pin only ever names an upstream commit, because Zed fetches it
 from the declared repository. Grammar fixes not yet upstream are tested with
 `JASMIN_GRAMMAR_DIR` pointing at a checkout that has them.
 
+## Highlighting
+
+Zed reads highlight, bracket, outline, indent and text-object rules from query
+files in the extension's own language directory, and never from the grammar's
+repository. They sit in `languages/jasmin/`, written against the grammar
+pinned here, and `test/queries.sh` checks them against that grammar.
+`highlights.local.scm` holds the patterns for two statements the pinned
+grammar doesn't have yet. Zed doesn't read it; the check runs it against a
+grammar that has both nodes.
+
 ## Finding the language server
 
 The extension starts `jasmin-lsp` and looks for it in four places, in this
