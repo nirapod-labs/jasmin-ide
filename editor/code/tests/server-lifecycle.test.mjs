@@ -214,3 +214,89 @@ test("the manifest's defaults resolve to the built server and an empty argument 
   assert.deepEqual(launch.initializationOptions.include, {});
 });
 
+test("the server the client starts completes initialize, initialized, shutdown and exit", {timeout: 60000}, async () => {
+  const resolution = resolveServerPath({
+    settingPath: settings.serverPath,
+    extensionPath: editorDirectory,
+    pathLookup: () => undefined,
+    isFile
+  });
+  assert.equal(
+    resolution.kind,
+    "found",
+    `no server executable at ${settings.serverPath}: build it (make build) or set JASMIN_LSP`
+  );
+
+  const launch = planServerLaunch(resolution.path, settings);
+  const child = spawn(launch.command, [...launch.args], {stdio: ["pipe", "pipe", "pipe"]});
+
+  const frames = frameReader(child.stdout);
+  let errors = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    errors += chunk;
+  });
+
+  const exited = new Promise((resolve) => {
+    // `close` rather than `exit`: every byte of output has been delivered by
+    // then, so the frame count below is the whole session.
+    child.on("close", (code, signal) => resolve({code, signal}));
+  });
+
+  try {
+    // `initialize`: the four values the plan builds, plus the fields every
+    // client sends. The capabilities are the editor's, not this extension's,
+    // so an empty set stands in for them here.
+    child.stdin.write(
+      frame({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          processId: process.pid,
+          clientInfo: {name: "Jasmin IDE", version: manifest.version},
+          rootUri: null,
+          capabilities: {},
+          initializationOptions: launch.initializationOptions
+        }
+      })
+    );
+
+    const initialized = await frames.next("the reply to initialize");
+    assert.equal(initialized.id, 1, "the reply to initialize does not carry its id");
+    assert.equal(initialized.error, undefined, `initialize failed: ${JSON.stringify(initialized.error)}`);
+    assert.ok(initialized.result, "the reply to initialize carries no result");
+    assert.equal(initialized.result.capabilities.textDocumentSync, 1, "the server does not offer full sync");
+    assert.ok(initialized.result.serverInfo, "the reply carries no serverInfo");
+    assert.equal(initialized.result.serverInfo.name, "jasmin-lsp");
+
+    // `initialized` is a notification: the server must answer nothing. The
+    // next frame this test reads is the reply to shutdown, and its id proves
+    // no reply to the notification slipped in before it.
+    child.stdin.write(frame({jsonrpc: "2.0", method: "initialized", params: {}}));
+
+    // `shutdown`: a request, answered with a null result.
+    child.stdin.write(frame({jsonrpc: "2.0", id: 2, method: "shutdown"}));
+
+    const shutdown = await frames.next("the reply to shutdown");
+    assert.equal(shutdown.id, 2, "the server answered a notification, or answered shutdown out of order");
+    assert.equal(shutdown.error, undefined, `shutdown failed: ${JSON.stringify(shutdown.error)}`);
+    assert.equal(shutdown.result, null, "a shutdown reply carries a null result");
+
+    // `exit`: a notification, after which the process ends with the code the
+    // protocol gives a server that was shut down properly.
+    child.stdin.write(frame({jsonrpc: "2.0", method: "exit"}));
+
+    const ending = await withTimeout(exited, 15000, "the server did not exit after exit");
+    assert.equal(ending.signal, null, `the server was killed by ${ending.signal}`);
+    assert.equal(ending.code, 0, `the server exited with ${ending.code}; stderr: ${errors}`);
+
+    assert.equal(frames.leftovers(), 0, "stdout carries bytes after the last frame");
+    assert.ok(
+      errors.includes("initialized"),
+      `the server logged no initialization; stderr: ${JSON.stringify(errors)}`
+    );
+  } finally {
+    child.kill("SIGKILL");
+  }
+});
