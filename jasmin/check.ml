@@ -897,6 +897,7 @@ module Make (A : Arch_full.Arch) = struct
           forget_names loop prefix;
           ([], [])
       | Some text ->
+          remember_loaded loop ~namespace:prefix path;
           let parsed = Parse.parse ~name:path text in
           let failed = Parse.failed parsed in
           if failed then (
@@ -915,15 +916,12 @@ module Make (A : Arch_full.Arch) = struct
               (Parse.items parsed);
             List.iter
               (fun dropped ->
-                match suppression_of_dropped dropped with
-                | Some (Name declaration) ->
+                Option.iter
+                  (fun suppression ->
                     loop.suppressions :=
-                      Name (qualify_declaration prefix declaration)
-                      :: !(loop.suppressions)
-                | Some (Namespace name) ->
-                    loop.suppressions :=
-                      Namespace (qualified prefix name) :: !(loop.suppressions)
-                | None -> ())
+                      qualify_suppression prefix suppression
+                      :: !(loop.suppressions))
+                  (suppression_of_dropped dropped))
               (Parse.dropped parsed);
             report (Printf.sprintf "the required file `%s' has errors" written));
           let items, spliced =
@@ -941,6 +939,25 @@ module Make (A : Arch_full.Arch) = struct
       falling back to the writer's directory would accept a program the
       compiler rejects.
 
+      A file already entered is not entered again, which is the compiler's
+      own rule: [Env.enter_file] answers [None] for a path in
+      [e_loader.loaded] and [tt_file] then reads and types nothing. A file
+      reached twice through two chains would otherwise have every declaration
+      it makes reported as already declared.
+
+      A file that did not type leaves the environment it found. The compiler
+      would not type the rest of the program at all, so there is no later
+      environment to copy; leaving the half a broken file typed behind would
+      put declarations in scope that the compiler never reaches, and the
+      error that follows from one of them would be the first error seen
+      again.
+
+      A file of the context chain — the head of [loop.awaiting] — is typed
+      with the rest of the chain below it, and the loop stops there, so the
+      document is checked in the environment the entry builds up to its
+      [require] and not in the one the items after it leave behind. The last
+      element of the chain is the document itself, which the caller types.
+
       The name is the item's own, so one refusal is the answer however many
       files the item lists; the empty list is how the loop reads nothing for
       it. *)
@@ -957,9 +974,17 @@ module Make (A : Arch_full.Arch) = struct
     in
     List.iter
       (fun (name : string Location.located) ->
-        if not !(loop.stopped) then
+        if (not !(loop.stopped)) && not loop.reached then
           let written = Location.unloc name in
           let path = normalise_path (include_path ~base ~from written) in
+          (* The path the compiler prints for the file: the same resolution,
+             spelled from the writer's own name, which is the document's as
+             the caller gave it or a require's path. A cycle compares the two
+             normalised paths instead; this one is only ever printed. *)
+          let printed =
+            lexical
+              (include_path ~base:(Filename.dirname loop.name) ~from written)
+          in
           (* A failure of the chain itself is the document's: its item names a
              file that cannot be read, whatever depth the failure was found
              at, so it is placed on the document's item and not counted as an
@@ -969,50 +994,124 @@ module Make (A : Arch_full.Arch) = struct
               (Error.make ~file:(Some loop.document) ~kind:Error.Typing
                  ~span:!(loop.origin) message)
           in
-          if List.mem path chain then
-            report
-              (Printf.sprintf "the required file `%s' requires itself" written)
-          else if List.length chain > max_include_depth then
-            report
-              (Printf.sprintf "the required file `%s' is nested too deeply"
-                 written)
-          else
-            match loop.resolve path with
-            | None ->
+          let awaited =
+            match loop.awaiting with
+            | next :: rest when String.equal next path -> Some rest
+            | _ -> None
+          in
+          match awaited with
+          | Some [] ->
+              (* The chain ends at the document: the caller types it, with its
+                 diagnostics placed on it. Nothing is read here, and this is
+                 not a cycle: the document is the file the chain was built
+                 for, not one it requires. *)
+              loop.reached <- true
+          | _ -> (
+              if List.mem path chain then
                 report
-                  (Printf.sprintf "cannot read the required file `%s'" written)
-            | Some text ->
-                let parsed = Parse.parse ~name:path text in
-                let before = !(loop.include_errors) in
-                let include_loop = { loop with file = path; place = false } in
-                type_sequence include_loop ~chain:(path :: chain)
-                  ~dropped:(Parse.dropped parsed)
-                  ~recovered:(Parse.recovered parsed)
-                  ~items:(Parse.items parsed);
-                if !(loop.include_errors) > before || Parse.failed parsed then (
-                  (* The file did not type, so its names are not in the
-                     environment and every later reference to one of them is
-                     this failure seen again. Its header is readable even
-                     when its bodies are not, which is where the names come
-                     from. *)
-                  List.iter
-                    (fun (item : Syntax.pitem Location.located) ->
+                  (Printf.sprintf "the required file `%s' requires itself"
+                     written)
+              else if List.length chain > max_include_depth then
+                report
+                  (Printf.sprintf "the required file `%s' is nested too deeply"
+                     written)
+              else if already_loaded loop ~namespace:"" path then (
+                if
+                  (* Entered before: nothing is read and nothing is typed, as
+                     [Env.enter_file] answers [None]. *)
+                  awaited <> None
+                then loop.reached <- true)
+              else
+                match loop.resolve path with
+                | None ->
+                    report
+                      (Printf.sprintf "cannot read the required file `%s'"
+                         written)
+                | Some text ->
+                    let parsed = Parse.parse ~name:path text in
+                    let before = !(loop.include_errors) in
+                    let recorded = List.length !(loop.required_diagnostics) in
+                    let environment = !(loop.environment) in
+                    remember_loaded loop ~namespace:"" path;
+                    let include_loop =
+                      {
+                        loop with
+                        file = path;
+                        name = printed;
+                        text;
+                        place = false;
+                        awaiting =
+                          (match awaited with Some rest -> rest | None -> []);
+                        reached = false;
+                      }
+                    in
+                    type_sequence include_loop ~chain:(path :: chain)
+                      ~dropped:(Parse.dropped parsed)
+                      ~recovered:(Parse.recovered parsed)
+                      ~items:(Parse.items parsed);
+                    if awaited <> None then loop.reached <- true;
+                    let failed =
+                      !(loop.include_errors) > before || Parse.failed parsed
+                    in
+                    if failed then (
+                      (* The file did not type, so its names are not in the
+                         environment and every later reference to one of them
+                         is this failure seen again. Its header is readable
+                         even when its bodies are not, which is where the
+                         names come from. *)
+                      loop.environment := environment;
                       List.iter
-                        (fun declaration ->
-                          loop.suppressions :=
-                            Name declaration :: !(loop.suppressions))
-                        (declarations_of_item item))
-                    (Parse.items parsed);
-                  List.iter
-                    (fun dropped ->
-                      Option.iter
-                        (fun suppression ->
-                          loop.suppressions :=
-                            suppression :: !(loop.suppressions))
-                        (suppression_of_dropped dropped))
-                    (Parse.dropped parsed);
-                  report
-                    (Printf.sprintf "the required file `%s' has errors" written)))
+                        (fun (item : Syntax.pitem Location.located) ->
+                          List.iter
+                            (fun declaration ->
+                              loop.suppressions :=
+                                Name declaration :: !(loop.suppressions))
+                            (declarations_of_item item))
+                        (Parse.items parsed);
+                      List.iter
+                        (fun dropped ->
+                          Option.iter
+                            (fun suppression ->
+                              loop.suppressions :=
+                                suppression :: !(loop.suppressions))
+                            (suppression_of_dropped dropped))
+                        (Parse.dropped parsed);
+                      (* A file that did not parse has no item list to read
+                         the names from: recovery drops the items it cannot
+                         repair, so a reference to a name one of them would
+                         have declared cannot be told from a use the file
+                         never declared. The compiler stops at the file's
+                         error and reports none of them, so every unresolved
+                         name is suppressed until the file parses. *)
+                      if Parse.failed parsed then
+                        loop.suppressions := Any_name :: !(loop.suppressions));
+                    (* A file that does not parse returns its own parse
+                       diagnostics against itself, whatever else was recorded
+                       for it or below it: the parse error never reaches
+                       {!keep}, and a file with a typing error in one item and
+                       a parse error in another has both. The compiler reports
+                       the failure at the file. A file that parses and failed
+                       with nothing recorded for it or below it, which happens
+                       when an error inside an item recovery rewrote is only
+                       counted, has no diagnostic to return, so the require
+                       item says the file has errors. An error recorded below
+                       the file is already attributed to the file that holds
+                       it, so the require item says nothing about it. A check
+                       that said nothing here would report a broken file
+                       clean. *)
+                    if Parse.failed parsed then
+                      List.iter
+                        (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+                          if not !(loop.stopped) then
+                            record_required loop ~file:printed ~text diagnostic)
+                        (Parse.diagnostics parsed)
+                    else if
+                      failed
+                      && List.length !(loop.required_diagnostics) = recorded
+                    then
+                      report
+                        (Printf.sprintf "the required file `%s' has errors"
+                           written)))
       names
 
   and keep loop ~(in_recovered_item : bool) (error : Error.t) =
