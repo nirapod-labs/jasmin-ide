@@ -91,10 +91,66 @@ let run ~out ~transport ~timeout_ms steps =
   in
   go steps
 
+(* How long a server gets to end by itself once its input has closed, and how
+   long it then gets to act on a signal. Both are short: a server asked to
+   shut down ends at once, and a server that reads its input to the end ends
+   when the end arrives. *)
+let grace_seconds = 2.0
+
+(* wait_for pid seconds: the child's exit status once it has ended, or None
+   while it is still running when the time is up. Only a wait reaps a child,
+   and until it is reaped the process is a zombie: still in the table, so
+   still something a test can see. *)
+let wait_for pid seconds =
+  let deadline = Unix.gettimeofday () +. seconds in
+  let rec loop () =
+    match Unix.waitpid [ Unix.WNOHANG ] pid with
+    | 0, _ ->
+        if Unix.gettimeofday () < deadline then (
+          Unix.sleepf 0.01;
+          loop ())
+        else None
+    | _, status -> Some status
+  in
+  loop ()
+
+(* end_server pid: do not return until the process the client started is
+   gone. The client ends no server, but it does not leave one running either:
+   a server still there after the session has ended did not end at the end of
+   its input, so it is asked to end, then told to, and only then does this
+   return. Without this the client exits first, the server is re-parented to
+   pid 1 and it keeps running with the pipes of a client that no longer
+   exists. *)
+let end_server pid =
+  match wait_for pid grace_seconds with
+  | Some status -> status
+  | None -> (
+      let signal signal =
+        try Unix.kill pid signal with Unix.Unix_error _ -> ()
+      in
+      signal Sys.sigterm;
+      match wait_for pid grace_seconds with
+      | Some status -> status
+      | None -> (
+          signal Sys.sigkill;
+          (* A killed process ends at once: this wait blocks only until the
+             kernel has done it, and it is the wait that reaps the child. *)
+          try snd (Unix.waitpid [] pid)
+          with Unix.Unix_error _ -> Unix.WSIGNALED Sys.sigkill))
+
 let spawn ~(server : string) : (transport, string) result =
   let to_server_read, to_server_write = Unix.pipe () in
   let from_server_read, from_server_write = Unix.pipe () in
   let close_noerr fd = try Unix.close fd with Unix.Unix_error _ -> () in
+  (* Every end of both pipes belongs to the client. A descriptor that is not
+     close-on-exec is inherited by the server, so the server would hold the
+     write end of its own standard input: the pipe keeps a writer after the
+     client has closed its half, the end of input never arrives, and the
+     server waits for input nobody will send. The three standard descriptors
+     are made from these when the process is created and a duplicate is not
+     close-on-exec, so the session itself still works. *)
+  List.iter Unix.set_close_on_exec
+    [ to_server_read; to_server_write; from_server_read; from_server_write ];
   match
     Unix.create_process server [| server |] to_server_read from_server_write
       Unix.stderr
@@ -119,11 +175,13 @@ let spawn ~(server : string) : (transport, string) result =
           close_input = (fun () -> close_out_noerr to_server);
           shutdown =
             (fun () ->
+              (* The closed input is the end of the session for the server:
+                 a server that follows the protocol ends on it. Then the
+                 process the client started is waited for, and the end of its
+                 output is closed last, once nothing is reading it. *)
               close_out_noerr to_server;
-              try ignore (Unix.waitpid [ Unix.WNOHANG ] pid)
-              with Unix.Unix_error _ ->
-                ();
-                close_noerr from_server_read);
+              ignore (end_server pid);
+              close_noerr from_server_read);
         }
       in
       Ok transport
