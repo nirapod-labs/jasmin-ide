@@ -1,12 +1,28 @@
 open Jasmin
 
+type required = {
+  file : string;
+  text : string;
+  diagnostics : Jide_lang.Diagnostic.t list;
+}
+(** The diagnostics of one file reached through a [require]. Every span in
+    [diagnostics] indexes [text], the bytes of [file], and not the document
+    the caller asked about: a caller that prints them names [file] with them,
+    which is the place the compiler itself reports them at. [file] is the path
+    the compiler prints, not the normalised one the loop compares with. *)
+
 type result = {
   diagnostics : Jide_lang.Diagnostic.t list;
   warnings : Warnings.t list;
   facts : Facts.t;
+  required : required list;
+      (** The files reached through a [require] that hold an error, in the
+          order their first error was found, each with the text its spans
+          index. A file that typed without error is not here. *)
 }
 
-let empty = { diagnostics = []; warnings = []; facts = Facts.empty }
+let empty =
+  { diagnostics = []; warnings = []; facts = Facts.empty; required = [] }
 
 (** The most diagnostics one check returns, syntax and typing together. *)
 let max_diagnostics = 200
@@ -71,21 +87,32 @@ let declaration_of_message (message : string) =
           | None -> None))
 
 (** A name this file can no longer resolve: a declaration an item failed to
-    make, or every name under a namespace whose contents recovery dropped. *)
-type suppression = Name of declaration | Namespace of string
+    make, every name under a namespace whose contents recovery dropped, or
+    every name at all when the file a [require] read did not parse, because
+    then the tree does not say which names it declared. *)
+type suppression = Name of declaration | Namespace of string | Any_name
 
 (** Whether [suppression] covers [declaration]. A namespace covers every name
     the compiler would print qualified with it, which is how a reference to
-    an item of a dropped namespace reads. *)
+    an item of a dropped namespace reads; [Any_name] covers everything. *)
 let covers (suppression : suppression) (declaration : declaration) =
   match suppression with
   | Name expected -> expected = declaration
+  | Any_name -> true
   | Namespace prefix ->
       let name = name_of_declaration declaration in
       let length = String.length prefix in
       String.length name > length + 2
       && String.sub name 0 length = prefix
       && String.sub name length 2 = "::"
+
+(** The same suppression, for a name declared inside the namespace [prefix].
+    [Any_name] is not a name the namespace changes: it covers every name
+    already. *)
+let qualify_suppression prefix = function
+  | Name declaration -> Name (qualify_declaration prefix declaration)
+  | Namespace name -> Namespace (qualified prefix name)
+  | Any_name -> Any_name
 
 (** Whether a diagnostic with this message is the same failure seen again. *)
 let suppressed (suppressions : suppression list) message =
@@ -168,17 +195,12 @@ let include_path ~(base : string) ~(from : string option) (name : string) :
   let base = match from with None -> base | Some directory -> directory in
   if Filename.is_relative name then Filename.concat base name else name
 
-(** [normalise_path path] is one spelling for one file: an absolute path
-    with no [.] and no [..] left in it. The fold is lexical, like the
-    engine's own resolution: nothing here asks the filesystem, so a symbolic
-    link is not resolved and two paths that name one file through different
-    links stay different. It is what makes a cycle compare equal to itself
-    however the require spelled the file. *)
-let normalise_path (path : string) : string =
-  let path =
-    if Filename.is_relative path then Filename.concat (Sys.getcwd ()) path
-    else path
-  in
+(** [lexical path] is one spelling for one path: no [.] and no [..] left in
+    it, absolute when [path] was and relative when it was. The fold is
+    lexical, like the engine's own resolution: nothing here asks the
+    filesystem, so a symbolic link is not resolved and two paths that name one
+    file through different links stay different. *)
+let lexical (path : string) : string =
   let absolute = String.length path > 0 && path.[0] = '/' in
   let parts = String.split_on_char '/' path in
   let rec fold stack = function
@@ -190,6 +212,15 @@ let normalise_path (path : string) : string =
   in
   let body = String.concat "/" (fold [] parts) in
   if absolute then "/" ^ body else if body = "" then "." else body
+
+(** [normalise_path path] is one spelling for one file: an absolute path with
+    no [.] and no [..] left in it, a relative [path] taken from the process's
+    directory. It is what makes a cycle compare equal to itself however the
+    require spelled the file, and what the [loaded] set is keyed by. *)
+let normalise_path (path : string) : string =
+  if Filename.is_relative path then
+    lexical (Filename.concat (Sys.getcwd ()) path)
+  else lexical path
 
 (** How many required files one document may nest. A cycle is caught by the
     chain before this, and this bounds a tree of distinct files. *)
@@ -273,6 +304,17 @@ module Make (A : Arch_full.Arch) = struct
 
   type loop = {
     file : string;
+        (** The one spelling every comparison uses: [normalise_path] of the
+            file, so a cycle and the [loaded] set compare equal however a
+            require spelled it. *)
+    name : string;
+        (** The path the compiler prints for [file]: the document's own as the
+            caller spelled it, and for a file reached through a [require] the
+            path that require resolved to, relative when the document was.
+            A diagnostic about the file is printed with it. *)
+    text : string;
+        (** The bytes of [file]. A diagnostic of a required file is printed
+            against the text its span indexes, which is that file's own. *)
     document : string;
         (** The file the caller asked about, which stays the same however deep
             a [require] chain goes. *)
@@ -299,16 +341,45 @@ module Make (A : Arch_full.Arch) = struct
             types. Only the document's loop collects them: the facts of an
             included file carry that file's offsets, which do not index the
             document the caller asked about. *)
+    required_diagnostics : (string * string * Jide_lang.Diagnostic.t) list ref;
+        (** The diagnostics of the files reached through a [require], newest
+            first, each with the name that file is printed by and the text its
+            span indexes. They are reported against the file they belong to,
+            never against the document. *)
+    awaiting : string list;
+        (** The rest of the context chain from the file this loop types: the
+            file it has to reach, then the ones below it, the document last.
+            Empty for the document and for a file a require pulled in on its
+            own, which are typed whole. *)
+    mutable reached : bool;
+        (** True once the head of [awaiting] has been typed. The loop stops
+            there: the file is checked in the environment the entry builds
+            up to its [require], and not in the one the items after it would
+            leave behind. *)
     kept : int ref;
     budget : int;
     stopped : bool ref;
     include_errors : int ref;
+    loaded : (string * string) list ref;
+        (** The files this check has read, as the namespace they were read
+            in and the normalised path they were read under. It is the
+            compiler's own record ([Pretyping.Env.e_loader.loaded], which
+            [enter_file] consults before it reads anything): a [require] of a
+            file its namespace has already loaded reads nothing and declares
+            nothing a second time. Without it a file that requires one file
+            under two spellings — `"file1.jazz"` and `"../common/file1.jazz"`
+            — splices that file's items twice and its declarations collide
+            with themselves, which the compiler never sees. The same record stops
+            a diamond, a file reached through two chains of requires, which
+            libjade's ML-KEM unit is full of, from being typed twice and every
+            declaration it makes reported as already declared. *)
   }
   (** Everything one pass over one item stream learns. A required file is
       typed by the same pass with its own [file] and its own recovered
       regions, and shares the environment, the suppressions and the budget.
       The diagnostics are the document's own: an error attributed to another
-      file is counted in [include_errors] instead of being placed. *)
+      file is counted in [include_errors] and recorded in
+      [required_diagnostics] instead of being placed. *)
 
   type spliced = {
     written : string;
@@ -356,9 +427,24 @@ module Make (A : Arch_full.Arch) = struct
     if not (String.equal prefix "") then
       loop.suppressions := Namespace prefix :: !(loop.suppressions)
 
-  (** [type_items ~file ~items ~idirs] types the items of one file one by one
-      and returns the diagnostics, plus the environment the loop leaves
-      behind when it started at all.
+  (** Whether [namespace] has already read [path]. It is the test the
+      compiler's [enter_file] makes against [e_loader.loaded] before it reads
+      anything, and its answer there is [None]: the file is not read and its
+      items are not typed again. *)
+  let already_loaded (loop : loop) ~(namespace : string) (path : string) =
+    List.mem (namespace, path) !(loop.loaded)
+
+  (** Record that [namespace] read [path], before the file's items are typed,
+      so a second [require] of the same path in the same namespace is the
+      compiler's skip whether the first read succeeded or not: a broken file
+      is read once and reported once. *)
+  let remember_loaded (loop : loop) ~(namespace : string) (path : string) =
+    if not (already_loaded loop ~namespace path) then
+      loop.loaded := (namespace, path) :: !(loop.loaded)
+
+  (** [type_items ~file ~text ~items ~idirs ~context] types the items of one
+      file one by one and returns the diagnostics, plus the environment the
+      loop leaves behind when it started at all.
 
       Before each item the environment is kept, and a failed item leaves the
       environment as it was, so the items after it still type. The names of
@@ -379,16 +465,25 @@ module Make (A : Arch_full.Arch) = struct
       user has open is used as it is and a missing file or a cycle is a
       diagnostic on the require item rather than an exception from inside
       the compiler. An error in a required file is not placed on this
-      document, whose bytes it does not describe: the require item says the
-      file has one instead.
+      document, whose bytes it does not describe: it is returned in
+      {!result.required}, against the file its span indexes, which is where
+      the compiler prints it.
+
+      [context] is the chain of files the compiler would enter before this
+      one, outermost first, when the file is not an entry: each is typed up
+      to the [require] that names the next, and the document is then typed in
+      the environment that leaves behind. The empty list is a file checked on
+      its own.
 
       At most {!budget} diagnostics are kept. Every call into the library
       this function makes is wrapped, and {!check}, the only entry point the
       engine uses, ends in a catch-all: no exception leaves the adapter. *)
   let rec type_items ~(resolve : lookup) ~(budget : int)
       ~(dropped : Recover.dropped list) ~(recovered : Jide_lang.Span.t list)
-      ~(file : string) ~(length : int) ~(items : Syntax.pprogram)
-      ~(idirs : (string * string) list) : result * environment option =
+      ~(context : string list) ~(file : string) ~(text : string)
+      ~(items : Syntax.pprogram) ~(idirs : (string * string) list) :
+      result * environment option =
+    let length = String.length text in
     let initial =
       match List.fold_left Pretyping.Env.add_from Pretyping.Env.empty idirs with
       | environment -> Ok environment
@@ -420,9 +515,12 @@ module Make (A : Arch_full.Arch) = struct
               },
               None )
         | Ok (Some (environment, _resolved)) ->
+            let document = normalise_path file in
             let loop =
               {
                 file;
+                name = file;
+                text;
                 document = file;
                 length;
                 resolve;
@@ -433,15 +531,19 @@ module Make (A : Arch_full.Arch) = struct
                 suppressions = ref [];
                 diagnostics = ref [];
                 facts = ref Facts.empty;
+                required_diagnostics = ref [];
+                awaiting = [];
+                reached = false;
                 kept = ref 0;
                 budget;
                 stopped = ref false;
                 include_errors = ref 0;
+                loaded = ref [ ("", document) ];
               }
             in
-            type_sequence loop
-              ~chain:[ normalise_path file ]
-              ~dropped ~recovered ~items;
+            type_context loop ~chain:[ document ] ~document
+              ~context:(List.map normalise_path context);
+            type_sequence loop ~chain:[ document ] ~dropped ~recovered ~items;
             let environment =
               match exit_file !(loop.environment) with
               | Ok environment -> Some environment
@@ -454,8 +556,81 @@ module Make (A : Arch_full.Arch) = struct
                 diagnostics =
                   List.rev_map Error.to_diagnostic !(loop.diagnostics);
                 facts = !(loop.facts);
+                required = required_of_errors !(loop.required_diagnostics);
               },
               environment ))
+
+  (** The files a [require] chain left errors in, one entry per file, in the
+      order the first error of each was found. A file named the same way by
+      two requires is one entry, because the caller prints one block of
+      diagnostics for it. The spans of each entry index that entry's own text,
+      and its [file] is the name the compiler prints it by. *)
+  and required_of_errors
+      (errors : (string * string * Jide_lang.Diagnostic.t) list) : required list
+      =
+    let errors = List.rev errors in
+    let files =
+      List.fold_left
+        (fun (files : (string * string) list) (file, text, _) ->
+          if List.exists (fun (held, _) -> String.equal held file) files then
+            files
+          else files @ [ (file, text) ])
+        [] errors
+    in
+    List.map
+      (fun (file, text) ->
+        let diagnostics =
+          List.filter_map
+            (fun (held, _, diagnostic) ->
+              if String.equal held file then Some diagnostic else None)
+            errors
+        in
+        { file; text; diagnostics })
+      files
+
+  (** Record one diagnostic of a file reached through a [require] against
+      that file, which is where the compiler prints it. It is counted against
+      the same budget as a diagnostic placed on the document, so a broken
+      include cannot return more lines than a broken document can. *)
+  and record_required loop ~(file : string) ~(text : string)
+      (diagnostic : Jide_lang.Diagnostic.t) =
+    loop.required_diagnostics :=
+      (file, text, diagnostic) :: !(loop.required_diagnostics);
+    incr loop.kept;
+    if !(loop.kept) >= loop.budget then loop.stopped := true
+
+  (** Type the chain of files a document that is not an entry is checked in.
+      [context] is the files the compiler enters before it, outermost first,
+      and [document] the normalised path of the document the caller asked
+      about, which the chain ends at and which the caller types itself. The
+      first file is typed up to the [require] that names the next; the walk
+      below it is {!type_require}, which hands the rest of the chain to the
+      file it reaches. A file the lookup cannot answer is not a context: the
+      document is then checked on its own, which is what the engine does for
+      a file no entry requires. *)
+  and type_context loop ~(chain : string list) ~(document : string)
+      ~(context : string list) =
+    match context with
+    | [] -> ()
+    | file :: rest -> (
+        match loop.resolve file with
+        | None -> ()
+        | Some text ->
+            let parsed = Parse.parse ~name:file text in
+            let child =
+              {
+                loop with
+                file;
+                name = file;
+                text;
+                place = false;
+                awaiting = rest @ [ document ];
+                reached = false;
+              }
+            in
+            type_sequence child ~chain:(file :: chain)
+              ~dropped:(Parse.dropped parsed)
+              ~recovered:(Parse.recovered parsed) ~items:(Parse.items parsed))
 
   and type_sequence loop ~(chain : string list)
       ~(dropped : Recover.dropped list) ~(recovered : Jide_lang.Span.t list)
@@ -469,7 +644,7 @@ module Make (A : Arch_full.Arch) = struct
       dropped;
     List.iter
       (fun item ->
-        if not !(loop.stopped) then (
+        if (not !(loop.stopped)) && not loop.reached then (
           let snapshot = !(loop.environment) in
           let item_span = span_of_item item in
           if loop.place then loop.origin := item_span;
@@ -558,8 +733,10 @@ module Make (A : Arch_full.Arch) = struct
       file, not the document, so {!keep} counted it instead of placing it and
       nothing else would ever say why the namespace is empty. Every [require]
       item between the document and that file says the file it read has
-      errors — the same diagnostic a top-level require of the same file gives,
-      one per file of the chain — and the names under the namespace stay
+      errors, one per file of the chain. A top-level require of the same
+      file takes the attributed path instead, because the file's own offsets
+      can be placed against its own text; a namespace's items are spliced
+      into one item, so they cannot. The names under the namespace stay
       suppressed, because a reference to one of them is this failure seen
       again.
 
@@ -703,6 +880,11 @@ module Make (A : Arch_full.Arch) = struct
       report (Printf.sprintf "the required file `%s' requires itself" written);
       forget_names loop prefix;
       ([], []))
+    else if already_loaded loop ~namespace:prefix path then
+      (* The compiler's [enter_file] answers [None] here: the file this
+         namespace already read is not read again, so nothing is spliced a
+         second time and nothing its first read reported is reported again. *)
+      ([], [])
     else if List.length chain > max_include_depth then (
       report
         (Printf.sprintf "the required file `%s' is nested too deeply" written);

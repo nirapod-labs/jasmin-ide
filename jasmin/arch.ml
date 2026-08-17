@@ -45,13 +45,14 @@ let module_of : t -> call_conv -> (module Arch_full.Arch) =
 
 let check :
     ?resolve:(string -> string option) ->
+    context:string list ->
     t ->
     call_conv ->
     file:string ->
     text:string ->
     idirs:(string * string) list ->
     Check.result =
- fun ?(resolve = Check.read_file) arch call_conv ~file ~text ~idirs ->
+ fun ?(resolve = Check.read_file) ~context arch call_conv ~file ~text ~idirs ->
   let module A = (val module_of arch call_conv) in
   let module K = Check.Make (A) in
-  K.check ~resolve ~file ~text ~idirs
+  K.check ~resolve ~context ~file ~text ~idirs
