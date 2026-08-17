@@ -5,7 +5,7 @@
 ; libraries, because every test runs the real binary.
 ;
 ; Every input of these tests is either a `.t` file, which dune adds to the
-; stanza itself, or one of the four entries below: the two helpers the tests
+; stanza itself, or one of the five entries below: the three helpers the tests
 ; run from the sandbox and the two executables they drive. A file a test
 ; reads that is not listed here would not invalidate its recorded result, so
 ; a fixture added later belongs in this list too.
@@ -27,5 +27,6 @@
  (deps
   frames.sh
   bounded.sh
+  record-pid.sh
   %{exe:../../client/jide_test_client.exe}
   %{exe:../../../lsp-server/native/main.exe}))

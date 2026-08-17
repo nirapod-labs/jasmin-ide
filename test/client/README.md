@@ -21,6 +21,21 @@ standard output. Both modes take exactly one session file: the session is
 what the client sends and the script is what the fake server answers with,
 so one file cannot stand for both. A usage error exits 2.
 
+## The server's lifetime
+
+The server is the client's to end. When the session is over the client closes
+the server's standard input, which is what ends a server that follows the
+protocol, and then waits for the process. A server that has not ended after a
+short grace period is asked to stop with SIGTERM and then killed with
+SIGKILL, and the wait reaps it either way, so the client never returns while
+the server it started is still running.
+
+That matters outside `dune runtest`: dune ends the process group of an action
+when the action is over, which hides a server nobody reaped, while a client
+run by hand has nothing behind it to do the same. The ends of both pipes are
+close-on-exec as well, so the server does not inherit a writer for its own
+input and does see the end of it.
+
 ## Session files
 
 Blocks are separated by one or more blank lines. A block whose first
