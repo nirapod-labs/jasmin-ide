@@ -217,6 +217,108 @@ let uses_of ~(item_span : Jide_lang.Span.t) (found : occurrences) :
          Stdlib.Int.compare left.Facts.u_span.Jide_lang.Span.start_byte
            right.Facts.u_span.Jide_lang.Span.start_byte)
 
+(* Every call a syntax body makes, as the range of the instruction that makes
+   it, the callee's name and the range of that name, in source order. A call
+   is a whole instruction in Jasmin: [s = add(s);] is an assignment, and
+   [reg u32 y = consume(x);] is a declaration with an initialiser. The typed
+   [Ccall] the compiler makes for either has the range of that instruction, so
+   the range pairs the two walks below. One declaration can hold more than one
+   initialiser, [reg u64 a = f(x), b = g(y);], and then its calls share a
+   range; [take] pairs those in the order they are written. A call inside an
+   [if], a [for] or a [while] is reached through that statement's block. *)
+let rec syntax_calls (body : S.pinstr list) :
+    (Jide_lang.Span.t * Jide_lang.Span.t) list =
+  let block (inner : S.pblock option) =
+    match inner with None -> [] | Some inner -> syntax_calls (L.unloc inner)
+  in
+  List.concat_map
+    (fun (instruction : S.pinstr) ->
+      let located = snd instruction in
+      let range = span (L.loc located) in
+      match L.unloc located with
+      | S.PIAssign (_, _, { L.pl_desc = S.PECall (callee, _); _ }, _) ->
+          [ (range, span (L.loc callee)) ]
+      | S.PIdeclinit (_, declarations) ->
+          List.filter_map
+            (fun declaration ->
+              match L.unloc declaration with
+              | _, { L.pl_desc = S.PECall (callee, _); _ } ->
+                  Some (range, span (L.loc callee))
+              | _, _ -> None)
+            declarations
+      | S.PIIf (_, when_true, when_false) ->
+          syntax_calls (L.unloc when_true) @ block when_false
+      | S.PIFor (_, _, inner) -> syntax_calls (L.unloc inner)
+      | S.PIWhile (before, _, after) -> block before @ block after
+      | S.PIArrayInit _ | S.PIAssert _ | S.PIdecl _ | S.PIAssign _ -> [])
+    body
+
+(* Every call a typed body makes, with the range of the instruction that makes
+   it, the compiler's own name for the callee, and the file that range indexes.
+   The file is the checked one unless the instruction came in through a
+   [require]: the parser splices a required file's items into the requiring
+   one, and their ranges stay in the required file's own bytes. *)
+let rec typed_calls (body : (unit, 'asm) P.pstmt) :
+    (Jide_lang.Span.t * string * string) list =
+  List.concat_map
+    (fun (instruction : (unit, 'asm) P.pinstr) ->
+      let nested =
+        match instruction.P.i_desc with
+        | P.Cif (_, when_true, when_false) ->
+            typed_calls when_true @ typed_calls when_false
+        | P.Cfor (_, _, inner) -> typed_calls inner
+        | P.Cwhile (_, before, _, _, after) ->
+            typed_calls before @ typed_calls after
+        | _ -> []
+      in
+      match instruction.P.i_desc with
+      | P.Ccall (_, callee, _) ->
+          ( span instruction.P.i_loc.base_loc,
+            callee.P.fn_name,
+            instruction.P.i_loc.base_loc.loc_fname )
+          :: nested
+      | _ -> nested)
+    body
+
+(* [take range written] is the name range of the first entry of [written]
+   whose instruction is [range], and the entries after it. The entries before
+   it stay in the list, so the next call with [range] finds its own. [None]
+   when no entry has [range], and then the list is unchanged. *)
+let rec take (range : Jide_lang.Span.t)
+    (written : (Jide_lang.Span.t * Jide_lang.Span.t) list) :
+    Jide_lang.Span.t option * (Jide_lang.Span.t * Jide_lang.Span.t) list =
+  match written with
+  | [] -> (None, [])
+  | ((instruction, name) as entry) :: rest ->
+      if Jide_lang.Span.compare instruction range = 0 then (Some name, rest)
+      else
+        let found, rest = take range rest in
+        (found, entry :: rest)
+
+(** [calls_of ~item_span ~syntax body] is the calls [body] makes, oldest
+    first: the instruction's range, the callee the compiler typed, the file
+    those ranges index, and the range the callee's name was written at. The
+    typed call keeps the function's name and not the range it was written at,
+    so the name's range is read from the syntax instruction with the same
+    range. A call that the syntax holds no name for keeps [None] there. It is
+    still reported: a call that is dropped is neither judged nor counted. *)
+let calls_of ~(item_span : Jide_lang.Span.t) ~(syntax : S.pinstr list)
+    (body : (unit, 'asm) P.pstmt) : Facts.call list =
+  let rec pair written = function
+    | [] -> []
+    | (range, callee, file) :: rest ->
+        let c_span, written = take range written in
+        {
+          Facts.c_span;
+          c_callee = callee;
+          c_item = item_span;
+          c_range = range;
+          c_file = file;
+        }
+        :: pair written rest
+  in
+  pair (syntax_calls syntax) (typed_calls body)
+
 let function_item ~(file : string) ~(env : 'asm Pretyping.Env.env)
     ~(item_span : Jide_lang.Span.t) ~(name_span : Jide_lang.Span.t)
     (func : (unit, 'asm) P.pfunc) : Facts.t =

@@ -1116,11 +1116,16 @@ module Make (A : Arch_full.Arch) = struct
 
   and keep loop ~(in_recovered_item : bool) (error : Error.t) =
     (* Only the document's own errors have spans the caller can place. With
-       [place] false every error is the included file's, whatever file it
-       names, and it is counted rather than placed. *)
+       [place] false an error of the file this loop types is the file's own:
+       it is reported against that file, with the text its span indexes, which
+       is where the compiler prints it too. *)
     let here = loop.place && Error.belongs_to ~file:loop.file error in
     if not here then incr loop.include_errors;
-    if here && not in_recovered_item then note loop error
+    if here then (if not in_recovered_item then note loop error)
+    else if (not in_recovered_item) && Error.belongs_to ~file:loop.file error
+    then
+      record_required loop ~file:loop.name ~text:loop.text
+        (Error.to_diagnostic error)
 
   and note loop (error : Error.t) =
     (* Everything [note] is given is placed on the document, so its span is
@@ -1139,14 +1144,16 @@ module Make (A : Arch_full.Arch) = struct
       incr loop.kept;
       if !(loop.kept) >= loop.budget then loop.stopped := true)
 
-  (** [check ~resolve ~file ~text ~idirs] parses and types one document. The
-      parser's formatter is redirected for the whole check, and everything
-      that follows it, the warning parse of the captured text included, is
-      inside a catch-all: an exception the library did not turn into a
-      diagnostic is reported as one, so nothing reaches the engine as a
-      raise. *)
+  (** [check ~resolve ~file ~text ~idirs ~context] parses and types one
+      document. [context] is the chain of files the compiler enters before it
+      when the file is not an entry, outermost first, and the empty list is a
+      file checked on its own. The parser's formatter is redirected for the
+      whole check, and everything that follows it, the warning parse of the
+      captured text included, is inside a catch-all: an exception the library
+      did not turn into a diagnostic is reported as one, so nothing reaches
+      the engine as a raise. *)
   let check ~(resolve : lookup) ~(file : string) ~(text : string)
-      ~(idirs : (string * string) list) : result =
+      ~(idirs : (string * string) list) ~(context : string list) : result =
     match
       Warnings.with_capture (fun () ->
           Options.apply ();
@@ -1157,8 +1164,8 @@ module Make (A : Arch_full.Arch) = struct
           in
           let typed, _environment =
             type_items ~resolve ~budget ~dropped:(Parse.dropped parsed)
-              ~recovered:(Parse.recovered parsed) ~file
-              ~length:(String.length text) ~items:(Parse.items parsed) ~idirs
+              ~recovered:(Parse.recovered parsed) ~context ~file ~text
+              ~items:(Parse.items parsed) ~idirs
           in
           { typed with diagnostics = parse_diagnostics @ typed.diagnostics })
     with
