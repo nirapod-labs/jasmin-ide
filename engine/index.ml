@@ -170,3 +170,103 @@ let storage_text (storage : Syntax.pstorage) =
 (* ------------------------------------------------------------------ *)
 (* The walk *)
 
+type state = {
+  file : string;
+  text : string;
+  occurrences : occurrence list ref;
+  declarations : declaration list ref;
+  requires : require list ref;
+}
+
+let add_occurrence state occurrence =
+  state.occurrences := occurrence :: !(state.occurrences)
+
+let occurrence_of_ident state ~(role : role) ~value
+    (ident : string Location.located) =
+  let span = span_of_ident ident in
+  let name = Location.unloc ident in
+  {
+    span;
+    last = last_segment state.text span name;
+    name;
+    role;
+    value;
+  }
+
+let use_ident state role ident =
+  add_occurrence state (occurrence_of_ident state ~role ~value:None ident)
+
+let add_declaration state ~(kind : kind) ?detail
+    (ident : string Location.located) ~item_span =
+  let name_span = span_of_ident ident in
+  let name = Location.unloc ident in
+  let declaration =
+    { kind; name; file = state.file; name_span; item_span; detail }
+  in
+  state.declarations := declaration :: !(state.declarations);
+  add_occurrence state
+    {
+      span = name_span;
+      last = name_span;
+      name;
+      role = Declared kind;
+      value = None;
+    };
+  declaration
+
+let type_text state (ty : Syntax.ptype) =
+  collapse (text_of_span state.text (span_of_location (Location.loc ty)))
+
+let stotype_text state (storage, ty : Syntax.pstotype) =
+  collapse (storage_text storage ^ " " ^ type_text state ty)
+
+(* The parts of a function's signature, rendered from its own type ranges.
+   The typed program would give a real [fun_sig]; until that is exposed the
+   syntax holds the same words, and hover shows them as the user wrote
+   them. *)
+let signature_text state (pf : Syntax.pfundef) =
+  let argument (_, (stotype, names)) =
+    stotype_text state stotype
+    ^ " " ^ String.concat ", " (List.map Location.unloc names)
+  in
+  let arguments = List.map argument pf.pdf_args in
+  let returns =
+    match pf.pdf_rty with
+    | None -> ""
+    | Some returns ->
+        let one (_, stotype) = stotype_text state stotype in
+        " -> " ^ String.concat ", " (List.map one returns)
+  in
+  collapse
+    (Printf.sprintf "fn %s(%s)%s" (Location.unloc pf.pdf_name)
+       (String.concat ", " arguments) returns)
+
+let rec expression state (pe : Syntax.pexpr) =
+  match Location.unloc pe with
+  | Syntax.PEParens inner -> expression state inner
+  | PEVar ident -> use_ident state Var ident
+  | PEGet (_aligned, _access, _size, ident, index, length) ->
+      use_ident state Var ident;
+      expression state index;
+      Option.iter (expression state) length
+  | PEFetch (_aligned, _size, address) -> expression state address
+  | PEpack (_size, elements) -> List.iter (expression state) elements
+  | PEstring _ | PEBool _ | PEInt _ -> ()
+  | PECall (callee, arguments) ->
+      use_ident state Call callee;
+      List.iter (expression state) arguments
+  | PECombF (callee, arguments) ->
+      use_ident state Call callee;
+      List.iter (expression state) arguments
+  | PEPrim (intrinsic, arguments) ->
+      use_ident state Prim intrinsic;
+      List.iter (expression state) arguments
+  | PEOp1 (_operation, operand) -> expression state operand
+  | PEOp2 (_operation, (left, right)) ->
+      expression state left;
+      expression state right
+  | PEIf (condition, when_true, when_false) ->
+      expression state condition;
+      expression state when_true;
+      expression state when_false
+
