@@ -41,6 +41,14 @@ type use = {
   u_dfile : string;
 }
 
+type call = {
+  c_span : Jide_lang.Span.t option;
+  c_callee : string;
+  c_item : Jide_lang.Span.t;
+  c_range : Jide_lang.Span.t;
+  c_file : string;
+}
+
 type item_kind = Function | Param | Global
 
 type item = {
@@ -53,9 +61,13 @@ type item = {
   i_vars : var list;
 }
 
-type t = { items : item list; uses : use list }
+type t = { items : item list; uses : use list; calls : call list }
 
-let empty = { items = []; uses = [] }
+let empty = { items = []; uses = []; calls = [] }
 
 let merge (earlier : t) (later : t) =
-  { items = earlier.items @ later.items; uses = earlier.uses @ later.uses }
+  {
+    items = earlier.items @ later.items;
+    uses = earlier.uses @ later.uses;
+    calls = earlier.calls @ later.calls;
+  }

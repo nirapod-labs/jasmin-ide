@@ -321,7 +321,7 @@ let calls_of ~(item_span : Jide_lang.Span.t) ~(syntax : S.pinstr list)
 
 let function_item ~(file : string) ~(env : 'asm Pretyping.Env.env)
     ~(item_span : Jide_lang.Span.t) ~(name_span : Jide_lang.Span.t)
-    (func : (unit, 'asm) P.pfunc) : Facts.t =
+    ~(syntax : S.pinstr list) (func : (unit, 'asm) P.pfunc) : Facts.t =
   let body = stmt_vars no_occurrence func.P.f_body in
   (* A function's results are the variables [return] names, and the compiler
      keeps the range of each name there, so a result is an occurrence at its
@@ -361,6 +361,7 @@ let function_item ~(file : string) ~(env : 'asm Pretyping.Env.env)
         };
       ];
     uses = uses_of ~item_span returned;
+    calls = calls_of ~item_span ~syntax func.P.f_body;
   }
 
 let variable_item (kind : Facts.item_kind) ~(item_span : Jide_lang.Span.t)
@@ -379,6 +380,7 @@ let variable_item (kind : Facts.item_kind) ~(item_span : Jide_lang.Span.t)
         };
       ];
     uses = [];
+    calls = [];
   }
 
 (** [leaves item] is [item] with namespaces flattened: the items a fact can
@@ -417,7 +419,7 @@ let item_of_leaf ~(file : string) ~(env : 'asm Pretyping.Env.env)
       | Some (P.MIfun func) ->
           function_item ~file ~env ~item_span
             ~name_span:(span (L.loc definition.S.pdf_name))
-            func
+            ~syntax:definition.S.pdf_body.S.pdb_instr func
       | _ -> Facts.empty)
   | S.PParam definition -> (
       match find () with
