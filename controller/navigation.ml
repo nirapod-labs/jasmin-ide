@@ -77,3 +77,83 @@ let reference json =
       in
       Ok { target; include_declaration }
 
+let document json =
+  let* fields = object_of ~path:"params" json in
+  text_document_of_fields fields
+
+(* The writing. A range is two positions, and Json_conv already writes one the
+   way the protocol spells it. *)
+
+let range_json (range : Jide_engine.Locate.range) =
+  `Assoc
+    [
+      ("start", Json_conv.position_json range.start_);
+      ("end", Json_conv.position_json range.end_);
+    ]
+
+let location_json (location : Jide_engine.Locate.location) =
+  `Assoc [ ("uri", `String location.uri); ("range", range_json location.range) ]
+
+let locations_json locations = `List (List.map location_json locations)
+
+let definition_json = function
+  | [] -> `Null
+  | locations -> locations_json locations
+
+let references_json locations = locations_json locations
+
+let markdown_json (markdown : Jide_engine.Types.markdown) =
+  `Assoc [ ("kind", `String "markdown"); ("value", `String markdown.value) ]
+
+let hover_json = function
+  | None -> `Null
+  | Some (hover : Jide_engine.Locate.hover) ->
+      let fields = [ ("contents", markdown_json hover.contents) ] in
+      let fields =
+        match hover.range with
+        | Some range -> fields @ [ ("range", range_json range) ]
+        | None -> fields
+      in
+      `Assoc fields
+
+(* The protocol's SymbolKind numbers. The four the compiler cannot tell apart
+   are [Variable]: a parameter, a local, a global and an unknown name are all
+   a name that holds a value. A type alias is a [Struct], the protocol having
+   no kind for an alias, and an [exec] is a [Function] because that is what it
+   declares. *)
+let symbol_kind_number (kind : Jide_engine.Types.symbol_kind) =
+  match kind with
+  | Function -> 12
+  | Parameter -> 13
+  | Variable -> 13
+  | Global -> 13
+  | Namespace -> 3
+  | Type_alias -> 23
+  | Require -> 2
+  | Exec -> 12
+  | File -> 1
+  | Unknown -> 13
+
+let rec symbol_json (symbol : Jide_engine.Locate.symbol) =
+  let fields =
+    [
+      ("name", `String symbol.name);
+      ("kind", `Int (symbol_kind_number symbol.kind));
+      ("range", range_json symbol.range);
+      ("selectionRange", range_json symbol.selection_range);
+    ]
+  in
+  let fields =
+    match symbol.detail with
+    | Some detail -> fields @ [ ("detail", `String detail) ]
+    | None -> fields
+  in
+  let fields =
+    match symbol.children with
+    | [] -> fields
+    | children ->
+        fields @ [ ("children", `List (List.map symbol_json children)) ]
+  in
+  `Assoc fields
+
+let symbols_json symbols = `List (List.map symbol_json symbols)
