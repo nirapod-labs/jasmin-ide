@@ -522,3 +522,82 @@ let rec item state (located : Syntax.pitem Location.located) : item =
 (* ------------------------------------------------------------------ *)
 (* Ordering and identity *)
 
+let role_rank = function
+  | Declared _ -> 0
+  | Call -> 1
+  | Var -> 2
+  | Type -> 3
+  | Prim -> 4
+  | Annot -> 5
+  | Include_path -> 6
+
+let compare_occurrence left right =
+  match
+    Jide_lang.Span.compare left.span right.span
+  with
+  | 0 -> (
+      match String.compare left.name right.name with
+      | 0 -> Stdlib.compare (role_rank left.role) (role_rank right.role)
+      | order -> order)
+  | order -> order
+
+let compare_declaration left right =
+  match Jide_lang.Span.compare left.name_span right.name_span with
+  | 0 -> String.compare left.name right.name
+  | order -> order
+
+let unique compare elements =
+  let sorted = List.sort compare elements in
+  let rec loop previous acc = function
+    | [] -> List.rev acc
+    | element :: rest ->
+        if
+          match previous with
+          | Some previous -> compare previous element = 0
+          | None -> false
+        then loop previous acc rest
+        else loop (Some element) (element :: acc) rest
+  in
+  loop None [] sorted
+
+let compare_require left right =
+  Jide_lang.Span.compare left.written_span right.written_span
+
+(* ------------------------------------------------------------------ *)
+
+let with_bom (text : string) =
+  let length = String.length text in
+  if
+    length >= 3
+    && Char.code text.[0] = 0xEF
+    && Char.code text.[1] = 0xBB
+    && Char.code text.[2] = 0xBF
+  then (3, String.sub text 3 (length - 3))
+  else (0, text)
+
+let shift_span (span : Jide_lang.Span.t) delta =
+  if delta = 0 then span else Jide_lang.Span.shift span delta
+
+let shift_diagnostic (diagnostic : Jide_lang.Diagnostic.t) delta =
+  if delta = 0 then diagnostic
+  else
+    {
+      diagnostic with
+      Jide_lang.Diagnostic.span =
+        shift_span diagnostic.Jide_lang.Diagnostic.span delta;
+    }
+
+let shift_occurrence (occurrence : occurrence) delta =
+  {
+    occurrence with
+    span = shift_span occurrence.span delta;
+    last = shift_span occurrence.last delta;
+  }
+
+let shift_declaration (declaration : declaration) delta =
+  {
+    declaration with
+    name_span = shift_span declaration.name_span delta;
+    item_span = shift_span declaration.item_span delta;
+  }
+
