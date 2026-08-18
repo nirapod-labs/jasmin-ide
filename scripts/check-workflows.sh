@@ -160,3 +160,100 @@ for key, value in pairs(root):
 PYTHON
 }
 
+extract_structural() {
+	awk '
+	function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+	function indent_of(s) { match(s, /^[ ]*/); return RLENGTH }
+	function key_of(s) { sub(/:.*/, "", s); return trim(s) }
+	function value_of(s, field) {
+		sub("^" field ":[ ]*", "", s)
+		if (s ~ /^["\x27]/) s = substr(s, 2)
+		if (s ~ /["\x27]$/) s = substr(s, 1, length(s) - 1)
+		return s
+	}
+	{
+		line = $0
+		sub(/\r$/, "", line)
+		if (trim(line) == "" || trim(line) ~ /^#/) next
+		ind = indent_of(line)
+		text = trim(line)
+
+		if (in_run) {
+			if (ind > run_indent) { print "runline\t" FILENAME "\t" NR "\t" text; next }
+			in_run = 0
+		}
+
+		keyed = key_of(text)
+		value = text
+		sub(/^[^:]*:[ ]*/, "", value)
+		head = substr(value, 1, 1)
+		followed = 0
+		if (keyed == "permissions" || keyed == "env" || keyed == "jobs") followed = 1
+		if (keyed == "steps" || keyed == "environment") followed = 1
+		flow = 0
+		if (followed && (head == "{" || head == "[")) flow = 1
+		tail = substr(text, 3, 1)
+		item = substr(text, 1, 2) == "- "
+		if (item && (tail == "{" || tail == "[")) flow = 1
+		anchored = index(text, ": &") > 0 || index(text, ": *") > 0
+		if (item && (tail == "&" || tail == "*")) anchored = 1
+		if (flow || anchored) {
+			print "unchecked\t" FILENAME "\tflow style, an anchor or an alias, which this reader does not follow"
+			next
+		}
+
+		if (ind == 0) {
+			in_env = 0; in_permissions = 0; in_jobs = 0; job = ""; job_perm = 0
+			top = key_of(text)
+			if (top == "permissions") in_permissions = 1
+			else if (top == "env") in_env = 1
+			else if (top == "jobs") in_jobs = 1
+			next
+		}
+
+		if (in_permissions && ind == 2 && key_of(text) == "contents") {
+			print "topperm\t" FILENAME "\t" value_of(text, "contents")
+			next
+		}
+		if (in_env && ind == 2) {
+			print "env\t" FILENAME "\t" key_of(text) "\t" value_of(text, key_of(text))
+			next
+		}
+		if (!in_jobs) next
+
+		if (ind == 2) {
+			job = key_of(text)
+			print "job\t" FILENAME "\t" job
+			job_perm = 0
+			next
+		}
+		if (job == "") next
+
+		if (job_perm) {
+			if (ind > job_perm) {
+				key = key_of(text)
+				print "jobperm\t" FILENAME "\t" job "\t" key "\t" value_of(text, key)
+				next
+			}
+			job_perm = 0
+		}
+		if (ind == 4 && key_of(text) == "permissions") { job_perm = ind; next }
+		if (ind == 4 && key_of(text) == "environment") {
+			value = value_of(text, "environment")
+			print "jobenv\t" FILENAME "\t" job "\t" (value == "" ? "nokey" : value)
+			next
+		}
+		if (text ~ /^uses:/) {
+			print "uses\t" FILENAME "\t" NR "\t" value_of(text, "uses")
+			next
+		}
+		if (text ~ /^run:/) {
+			value = value_of(text, "run")
+			if (value ~ /^[|>]/) { in_run = 1; run_indent = ind }
+			else print "runline\t" FILENAME "\t" NR "\t" value
+			next
+		}
+	}
+	' "$1"
+}
+
