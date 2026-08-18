@@ -5,6 +5,7 @@ import { LanguageClient, State, TransportKind } from "vscode-languageclient/node
 import type { LanguageClientOptions, ServerOptions } from "vscode-languageclient/node";
 import { resolveServerPath } from "./server-lookup.js";
 import type { ServerSource } from "./server-lookup.js";
+import { planServerLaunch } from "./server-start.js";
 import { configurationSection, readSettings } from "./settings.js";
 
 const languageId = "jasmin-crypto";
@@ -14,6 +15,9 @@ const outputChannelName = "Jasmin IDE";
 
 const restartCommand = "jasminIde.restartServer";
 const showLogCommand = "jasminIde.showServerLog";
+
+// The transports the launch plan can name, by the name the plan gives them.
+const transports = {stdio: TransportKind.stdio} as const;
 
 let client: LanguageClient | undefined;
 let channel: vscode.LogOutputChannel | undefined;
@@ -87,25 +91,23 @@ async function startServer(
     return;
   }
 
+  const launch = planServerLaunch(resolution.path, settings);
+
   output.info(
-    `Starting the Jasmin language server at ${resolution.path} (${describeSource(resolution.source)}).`
+    `Starting the Jasmin language server at ${launch.command} (${describeSource(resolution.source)}).`
   );
 
   const serverOptions: ServerOptions = {
-    command: resolution.path,
-    args: [...settings.serverArgs],
-    transport: TransportKind.stdio
+    command: launch.command,
+    args: [...launch.args],
+    transport: transports[launch.transport]
   };
 
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{language: languageId}],
     outputChannel: output,
     synchronize: {configurationSection},
-    initializationOptions: {
-      diagnosticsDelay: settings.diagnosticsDelay,
-      arch: settings.arch,
-      include: settings.include
-    }
+    initializationOptions: launch.initializationOptions
   };
 
   const started = new LanguageClient(clientId, clientName, serverOptions, clientOptions);

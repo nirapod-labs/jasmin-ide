@@ -1,5 +1,6 @@
 .artifacts/**
 .vscode/**
+.vscode-test/**
 .gitignore
 fixtures/**
 node_modules/**

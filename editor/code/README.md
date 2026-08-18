@@ -85,6 +85,44 @@ extension does not highlight your files, add an association:
 "files.associations": { "*.jazz": "jasmin-crypto" }
 ```
 
+## Development
+
+The tests import the TypeScript sources directly, using Node's built-in type
+stripping, so development needs Node 22.18 or newer.
+
+From this directory:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm run validate
+```
+
+`validate` runs the manifest and grammar checks, the unit tests on Node's test
+runner, `tsc --noEmit`, the esbuild bundle and a packaging check that lists the
+files `vsce` would ship and then builds a `.vsix` under `.artifacts/`.
+
+One of the unit tests starts the language server and completes the protocol's
+lifecycle with it, so it needs the server built in the repository that holds
+this extension. `make build` at the repository root produces it, and the test
+looks in `_build/default/lsp-server/native/main.exe`; `JASMIN_LSP` names an
+executable elsewhere.
+
+`pnpm run test:vscode` is the editor's own check and is not part of `validate`:
+it starts a real VS Code window, so it needs a desktop session, and the first
+run downloads a VS Code build into `.vscode-test/`. That window activates the
+extension, opens a `.jazz` fixture, and checks that the language client
+completes the protocol lifecycle: initialize, initialized, shutdown and exit,
+including the restart command's clean stop and second start. Its editing-help
+checks — completion, and rename once the server advertises one — are recorded
+with the capability each needed, and a check that skips has to be named in the
+runner's allowlist or the run fails. The extension's output channel is the
+evidence; the runner reads it back after the window has closed. `make
+editor-vscode` runs the same check in the local CI; a host that cannot download
+VS Code gets a printed skip only when the caller allows that skip by name
+(`make editor-vscode JASMIN_ALLOWED_SKIPS=editor-vscode`), and without it the
+step fails, so a gate log cannot claim the editor half was measured when it was
+not.
+
 ## Licence
 
 MIT. The grammar is derived from `dsprenkels/vscode-jasmin`, copyright Daan
