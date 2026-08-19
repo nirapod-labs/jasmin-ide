@@ -144,7 +144,16 @@ let declarations_of_item item = declarations_of_item ~prefix:"" item
 
 (** What a stub stands for. A dropped namespace takes every name under it
     with it, which is why it is remembered by prefix rather than by name. *)
-let suppression_of_dropped = function
+let suppression_of_dropped stub =
+  let qualify =
+    match stub with
+    | Recover.Dropped { namespace = Some prefix; _ } ->
+        qualify_suppression prefix
+    | Recover.Dropped { namespace = None; _ } -> Fun.id
+  in
+  Option.map qualify
+  @@
+  match stub with
   | Recover.Dropped { kind = Recover.Function; name = Some name; _ } ->
       Some (Name (Function name))
   | Recover.Dropped { kind = Recover.Parameter; name = Some name; _ }

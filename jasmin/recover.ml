@@ -3,40 +3,49 @@
     The compiler's parser gives up at the first syntax error: its one [error]
     production is only reachable from the start state, so a broken item
     unwinds the whole parse. This module drives the same parser through
-    Menhir's incremental API, keeps the checkpoints it reaches at item and
-    statement boundaries, and on an error resumes from the last one of them
-    instead of from the beginning of the file.
+    Menhir's incremental API, item by item, and on an error decides two
+    things apart: where the broken item ends, and how much of it to keep.
 
-    The error the compiler raised is not lost: the caller keeps it as the
-    first diagnostic, and the driver only decides which items survive. Every
-    item the driver could not keep is reported too, one diagnostic at the
-    stub's own span, so a hole in the tree is a hole in the diagnostics as
-    well.
+    {b Where the broken item ends.} A broken item begins at the last item
+    boundary the parse reached, a state where the parser waits for the first
+    token of an item (it accepts [param], which nothing but an item can
+    begin with). It ends at the first token after that boundary from which a
+    whole item really parses: the parser is started in the boundary's own
+    state at that token, and the candidate counts only if a complete item
+    comes out of it, with its braces balanced, before any error. Inside a
+    namespace, the [}] that closes the namespace ends the broken item too.
 
-    Four restarts are tried, in order:
+    That end is a fence. Every item the fault did not touch is a whole item in
+    the text, so it parses from the boundary's state wherever it stands, and
+    the fence is at or before it. Nothing done to the broken item may cross
+    the fence, so no repair of the broken item can swallow a later item, and
+    no later item depends on what the fault did to the brace depth of the
+    text in between. The test is the parser's, not a token class or a depth:
+    a [u64] that a statement left behind does not begin a global unless a
+    global really parses from it.
 
-    - a virtual [}] when the file ends, or a keyword that can never be an
-      identifier appears, inside a block: the block is closed without a byte
-      of the file being rewritten and the text read so far stays in the
-      tree, which is the only repair that loses nothing;
-    - the last statement checkpoint, when the failure is inside a body, so a
-      broken statement is dropped and its function still reaches the tree;
-    - the latest item checkpoint at or after the last closed item, so a
-      broken item is dropped and the items after it are parsed from a state
-      that already holds the ones before, including the items of a namespace
-      whose neighbour is broken. A checkpoint is kept at the first token
-      after each closed top-level block as well as at each item keyword, so
-      stray tokens that begin no item are dropped without a rewrite;
-    - the item-level byte restart measured by the recovery spike: the text
-      up to the last closed item is kept, the broken item's bytes are
-      blanked, and the rest is parsed again from the start. Blanking keeps
-      the buffer length, so no offset moves.
+    Two lexical facts keep the search exact where the parser alone cannot
+    decide. A type right after a storage class ([reg], [stack], [inline],
+    [global], [ptr], [mut], [const]) or after [::] is the middle of a
+    declaration or a name, never the start of an item, because no item ends
+    with those tokens; without this, [reg u64 x = 0;] inside a broken body
+    would offer the global [u64 x = 0;]. And a [}] closes the namespace only
+    if the braces after it balance to the namespace's own depth: the text
+    after the fault is the text as it was, so counting from the end of the
+    buffer gives the true depth there, whatever the fault did to the braces
+    before it.
 
-    When the recovery bound is reached, the prefix that is already complete
-    is kept: the bytes of the item that is still broken, and of everything
-    after it, are blanked and the prefix is parsed on its own, so a file with
-    more faults than the bound still returns every item before the first
-    unrepaired one.
+    {b How much of the broken item to keep.} Inside the fence the driver
+    tries, in order: virtual [}] tokens where the parser has reached the
+    fence, or a keyword that can never begin a statement, inside an open
+    body, so the header and the body read so far stay in the tree; a
+    statement restart from the last statement checkpoint, so a broken
+    statement is dropped and its function is kept; deleting the token that
+    failed, or writing [;] for [}] and [}] for [;], when the three tokens
+    after it then parse. When none of these brings the parser to a boundary
+    at the fence, the item is dropped: a [Dropped] stub stands for it, the
+    parser resumes at the fence in the boundary's state, and the item there
+    begins where the token before it ends, as in an uninterrupted parse.
 
     A dropped item leaves a [Dropped] stub carrying its name, so an outline
     can still list it. The stub is not a [Syntax.pitem]: that type belongs to
