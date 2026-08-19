@@ -200,28 +200,49 @@ let rec settle (checkpoint : checkpoint) =
   | I.Accepted items -> `Accepted items
   | I.HandlingError _ | I.Rejected -> `Error
 
-(** A copy of [state] with its own checkpoint lists and its own counters, so
-    an attempt that fails leaves nothing of an imaginary parse behind. *)
-let fork state =
-  {
-    scan = state.scan;
-    initial = state.initial;
-    boundaries = ref !(state.boundaries);
-    statements = ref !(state.statements);
-    tried = ref !(state.tried);
-    closed_item = state.closed_item;
-    stubbed_upto = state.stubbed_upto;
-    input = state.input;
-    offered = state.offered;
-    counters = no_counters ();
-  }
+let offer (checkpoint : checkpoint) triple =
+  match I.offer checkpoint triple with
+  | next -> settle next
+  | exception _ -> `Error
 
-let commit state attempt =
-  state.boundaries := !(attempt.boundaries);
-  state.statements := !(attempt.statements);
-  state.tried := !(attempt.tried);
-  state.closed_item <- attempt.closed_item;
-  state.stubbed_upto <- attempt.stubbed_upto
+(** [at_boundary checkpoint] is true when the parser waits for the first
+    token of an item: [param] begins no annotation, no statement and no
+    expression, so a state that accepts it is between two items, whatever
+    the item before it still owes in reductions. *)
+let at_boundary (checkpoint : checkpoint) =
+  try I.acceptable checkpoint Parser.PARAM Lexing.dummy_pos with _ -> false
+
+(** The state of a boundary with the item before it reduced: [param] is
+    offered, which performs every reduction the item before it is owed with
+    the positions its own tokens carry, and taken back off. The state that is
+    left is the one every item at this level begins from. *)
+let normalise (checkpoint : checkpoint) =
+  match offer checkpoint (Parser.PARAM, Lexing.dummy_pos, Lexing.dummy_pos) with
+  | `Need (I.InputNeeded environment) -> I.pop environment
+  | _ -> None
+
+(** Whether a token can be the last token of an item: each item ends with a
+    [}], a [;], the [)] of an [exec], or a string of a [require]. *)
+let ends_item = function
+  | Parser.RBRACE | Parser.SEMICOLON | Parser.RPAREN | Parser.STRING _ -> true
+  | _ -> false
+
+(** Whether a boundary can follow a token: after the last token of an item,
+    or after the [{] that opens a namespace, where its first item begins. *)
+let may_precede_item = function
+  | Parser.LBRACE -> true
+  | token -> ends_item token
+
+let brace_delta = function Parser.LBRACE -> 1 | Parser.RBRACE -> -1 | _ -> 0
+
+(** Tokens after which a type is the middle of a declaration or of a name:
+    a storage class, a pointer qualifier, or [::]. No item ends with one of
+    them, so a type that follows one never begins an item. *)
+let continues_a_type = function
+  | Parser.REG | Parser.STACK | Parser.INLINE | Parser.GLOBAL | Parser.POINTER
+  | Parser.CONSTANT | Parser.MUTABLE | Parser.COLONCOLON ->
+      true
+  | _ -> false
 
 (** Where the parser can be handed a token. *)
 let rec wait_for_input checkpoint =
@@ -237,28 +258,25 @@ let rec wait_for_input checkpoint =
     the parser left ready to read [lead], the token the restart resumes at,
     and with [position] as the position the item that begins there starts at.
 
-    A checkpoint taken at an item boundary still owes the item before it its
-    reduction: menhir decides that reduction from the next token, so the item
-    has not been built yet and its end is still to be read off the top stack
-    cell. Writing [position] into that cell, which is what this function used
-    to do, therefore moved the end of the item before the hole to the end of
-    the hole. Instead the parser is offered [lead], the token the restart
-    reads anyway, which performs every reduction the item before the hole is
-    owed with the positions the item's own tokens carry; the shift is then
-    taken back off, so the token is read again by the driver. What is left to
-    move is the cells the item that follows begins with: a production that
-    starts with [annotations] or with the optional [from?] of a [require]
-    takes the item's start from the end of such an empty cell, and moving
-    those cells, and only those, is what puts the item at [position].
+    A boundary state may still owe the item before it its reduction: menhir
+    decides that reduction from the next token, so the item has not been
+    built yet and its end is still to be read off the top stack cell, which
+    must therefore not be written. Instead the parser is offered [lead],
+    which performs every reduction the item before the hole is owed with the
+    positions the item's own tokens carry; the shift is then taken back off,
+    so the token is read again by the driver. What is left to move is the
+    cells the item that follows begins with: a production that starts with
+    [annotations] or with the optional [from?] of a [require] takes the
+    item's start from the end of such an empty cell, and moving those cells,
+    and only those, is what puts the item at [position].
 
     The stack that comes out holds the same cells in the same states as one
     that never stopped, so the parse that continues is the one the checkpoint
     describes; only where the empty productions say they are is different.
-    Nothing here can refuse: [lead] is an item boundary's token, which the
-    checkpoint accepted when it was recorded, and each cell that is fed back
-    was taken off the very state that put it there. A refusal is counted all
-    the same, because it would leave the position the checkpoint carries —
-    the defect this function exists to remove — in place. *)
+    It is one step into the item at [lead], so it is not itself a boundary
+    state. Nothing here should refuse: [lead] is the first token of a whole
+    item that parsed from this state. A refusal is counted all the same,
+    because it would leave the position the checkpoint carries in place. *)
 let reposition ~counters checkpoint ~position ~lead =
   let refuse () =
     counters.refused_positions <- counters.refused_positions + 1;
