@@ -9,18 +9,16 @@ the two fips202 files, in that order. Section 8.4 of ARCHITECTURE.md has
 the engine check the file in the context of the first entry that requires
 it, typed up to that require.
 
-The engine as it stands reads no requiring entry: a named file is checked
-as an entry of its own. The row therefore records what the check does
-today. consts.jinc sits beside params.jinc and is still reported with the
-unknown parameter jinc-alone.t records, while kem.jazz in the same
-directory, which requires the file through that chain, is clean. The row
-changes to the clean verdict the rule promises when the context rule
-lands; until then it is the observation, not the expectation.
+The checker reads that chain: it types the entry up to the require that
+names the file, so consts.jinc is typed in the environment params.jinc
+leaves behind and is clean, while the same bytes checked where no entry
+requires them are the error jinc-alone.t records. kem.jazz in the same
+directory, which requires the file through that chain, is clean too. Both
+lines are the verdict of the rule, not an observation of a missing part.
 
   $ sh corpus.sh ../../lsp-server/native/main.exe "$JASMIN_CONTEXT_CORPUS" context
   consts.jinc sha256 d45ddbcc45708a950c8443056bd28706bc783b5f34ba347401d4daea0bdbbb8b
-  consts.jinc:73:18: typing: unknown variable: `MLKEM_Q'
-  consts.jinc: 1 error
-  status 1
+  consts.jinc: ok
+  status 0
   kem.jazz: ok
   status 0

@@ -90,17 +90,23 @@ entry)
   check "$root/$unit" kem.jazz
   ;;
 alone)
-  # consts.jinc as the document, beside the params.jinc it uses and with
-  # none of those parameters in scope.
-  check "$root/$unit" consts.jinc
+  # consts.jinc with no entry beside it: a file no entry requires is checked
+  # on its own (design 8.4), which is what this row observes. The corpus file
+  # is copied unchanged; required-file.t pins its bytes by digest, and this
+  # row prints no digest of its own.
+  rm -rf "$work/alone"
+  mkdir -p "$work/alone"
+  cp "$consts" "$work/alone/consts.jinc"
+  check "$work/alone" consts.jinc
   ;;
 context)
   # The same consts.jinc named as the document in the directory that holds
   # its entry: kem.jazz requires kem.jinc, which requires indcpa.jinc,
   # which requires poly.jinc, which requires consts.jinc after params.jinc.
-  # The engine reads no requiring entry yet, so the file is checked as one
-  # of its own, and the entry beside it is checked too, to show that the
-  # context it needs does exist in the corpus.
+  # The checker reads that chain from the entry up to the require that names
+  # the file (design 8.4), so the file types in the environment params.jinc
+  # leaves behind and is clean. The entry beside it is checked too, to show
+  # that the context it gives is one the whole entry types in.
   printf 'consts.jinc sha256 %s\n' "$(digest "$consts")"
   check "$root/$unit" consts.jinc
   check "$root/$unit" kem.jazz

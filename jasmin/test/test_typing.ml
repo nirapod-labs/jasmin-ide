@@ -198,9 +198,8 @@ let test_recovered_region_suppresses () =
   let plain, _ =
     Loop.type_items
       ~resolve:(fun _ -> None)
-      ~budget:200 ~dropped:[] ~recovered:[] ~file
-      ~length:(String.length with_type_error)
-      ~items:parsed.items ~idirs:[]
+      ~budget:200 ~dropped:[] ~recovered:[] ~context:[] ~file
+      ~text:with_type_error ~items:parsed.items ~idirs:[]
   in
   check "region: the error is reported without a recovered region"
     (List.length plain.Jide_jasmin.Check.diagnostics = 1);
@@ -211,9 +210,7 @@ let test_recovered_region_suppresses () =
           ~resolve:(fun _ -> None)
           ~budget:200 ~dropped:[]
           ~recovered:[ diagnostic.Jide_lang.Diagnostic.span ]
-          ~file
-          ~length:(String.length with_type_error)
-          ~items:parsed.items ~idirs:[]
+          ~context:[] ~file ~text:with_type_error ~items:parsed.items ~idirs:[]
       in
       check "region: the error inside the recovered region is dropped"
         (suppressed.Jide_jasmin.Check.diagnostics = [])

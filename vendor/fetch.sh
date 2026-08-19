@@ -9,11 +9,19 @@
 #
 # The archive must hold a single top-level directory, jasmin-compiler-v<ver>/
 # (the name upstream publishes), with the release layout of the compiler:
-# src/, uint63/, LICENSE and MANIFEST. Only the parts the library needs are
-# copied out, into vendor/jasmin/, which is not committed.
+# src/, uint63/, dune-project, LICENSE and MANIFEST. Only the parts the library
+# needs are copied out, into vendor/jasmin/, which is not committed.
+#
+# The copied dune files are the archive's own, with no edit: the library keeps
+# the public name upstream gives it, jasmin.jasmin, and the release's
+# dune-project declares the package that name belongs to. The build therefore
+# sees a Jasmin library called jasmin.jasmin whether it comes from this tree or
+# from an installed release, which is what lets the workspace ask for one name
+# and be served by either. See vendor/README.md.
 #
 # The script is idempotent: with vendor/jasmin/ already assembled from the
-# requested digest it does not download, unpack or copy anything.
+# requested digest, by this version of the assembly, it does not download,
+# unpack or copy anything.
 
 set -eu
 
@@ -22,6 +30,11 @@ here=$(unset CDPATH
 dest=$here/jasmin
 stage=$here/.jasmin.new
 lock=$here/jasmin.lock
+# The shape of the assembled tree, beside the source digest in the stamp. A
+# tree assembled by an older shape is not reused, because the two are not
+# interchangeable even when they come from the same release bytes: shape 1
+# removed the public names and had no dune-project, shape 2 keeps both.
+layout=2
 
 say() { printf '%s\n' "vendor/fetch.sh: $*" >&2; }
 die() { say "error: $*"; exit 1; }
@@ -95,7 +108,9 @@ esac
 [ "${#sha}" -eq 64 ] || die "not a SHA-256 digest: $sha"
 
 if [ -d "$dest" ] && [ -f "$dest/.source-sha256" ] &&
-  [ "$(cat "$dest/.source-sha256")" = "$sha" ]; then
+  [ -f "$dest/.tree-layout" ] &&
+  [ "$(cat "$dest/.source-sha256")" = "$sha" ] &&
+  [ "$(cat "$dest/.tree-layout")" = "$layout" ]; then
   say "vendor/jasmin/ is already assembled from $sha, nothing to do"
 else
   work=$(mktemp -d "${TMPDIR:-/tmp}/jasmin-fetch.XXXXXX")
@@ -137,12 +152,12 @@ else
   for d in src uint63; do
     [ -d "$root/compiler/$d" ] || die "the archive has no compiler/$d"
   done
-  for f in LICENSE MANIFEST; do
+  for f in LICENSE MANIFEST dune-project; do
     [ -f "$root/compiler/$f" ] || die "the archive has no compiler/$f"
   done
   [ -f "$root/compiler/src/dune" ] || die "the archive has no compiler/src/dune"
 
-  # 3. Assemble the library tree.
+  # 3. Assemble the library tree, dune files untouched.
   rm -rf "$stage"
   mkdir -p "$stage"
   cp -R "$root/compiler/src" "$stage/src"
@@ -150,31 +165,32 @@ else
   cp "$root/compiler/LICENSE" "$stage/LICENSE"
   cp "$root/compiler/MANIFEST" "$stage/MANIFEST"
 
-  # 4. Drop the public names. A library that has one must belong to a
-  #    package of this workspace, and the vendor tree has no package of its
-  #    own, so the libraries stay private and are reached by their internal
-  #    names: `jasmin` and `uint63`. The implementations of the virtual
-  #    library name it the same way. See vendor/README.md.
-  find "$stage" -type f -name dune -print >"$work/dune-files"
-  public_before=$(grep -rI -E '\(public_name[[:space:]]+jasmin\.' "$stage" | wc -l | tr -d ' ')
-  [ "$public_before" -gt 0 ] || die "no public_name jasmin.* line in the tree"
-  while IFS= read -r f; do
-    awk '/^[[:space:]]*\(public_name[[:space:]]+jasmin\.[^)]*\)[[:space:]]*$/ {next}
-         {gsub(/\(implements jasmin\.uint63\)/, "(implements uint63)"); print}' \
-      "$f" >"$f.new"
-    mv "$f.new" "$f"
-  done <"$work/dune-files"
-  public_after=$(grep -rI -E '\(public_name[[:space:]]+jasmin\.' "$stage" | wc -l | tr -d ' ')
-  [ "$public_after" -eq 0 ] || die "a public_name jasmin.* line survived the strip"
-  leftovers=$(grep -rI -E '\(implements[[:space:]]+jasmin\.' "$stage" | wc -l | tr -d ' ')
-  [ "$leftovers" -eq 0 ] || die "an implements line still names a public library"
-  grep -q -E '^[[:space:]]*\(name[[:space:]]+jasmin\)' "$stage/src/dune" ||
-    die "src/dune no longer declares the jasmin library"
-  say "stripped $public_before public names from $base/compiler/{src,uint63}"
+  # 4. Keep the package the public names belong to. The release's own
+  #    compiler/dune-project declares `(package (name jasmin))`, which is what
+  #    `(public_name jasmin.jasmin)` and `(public_name jasmin.uint63)` need,
+  #    and it carries the `(using menhir 2.1)` the parser is generated with.
+  #    A dune-project also makes the assembled tree a project of its own, so
+  #    this workspace needs no `jasmin` package of its own and generates no
+  #    `jasmin.opam` for a package it does not publish. See vendor/README.md.
+  cp "$root/compiler/dune-project" "$stage/dune-project"
 
-  # 5. Put the tree in place and stamp it, so a repeat run is a no-op.
+  # 5. Check that the tree still answers to the name the workspace asks for,
+  #    so a release that renames the library fails here rather than in a build
+  #    that only the vendored route would see.
+  for name in jasmin.jasmin jasmin.uint63; do
+    grep -rIq -E "^[[:space:]]*\(public_name[[:space:]]+$name\)" "$stage/src" "$stage/uint63" ||
+      die "the archive declares no library with the public name $name"
+  done
+  grep -q -E '^[[:space:]]*\(package[[:space:]]+\(name[[:space:]]+jasmin\)' "$stage/dune-project" ||
+    die "compiler/dune-project no longer declares the package jasmin"
+  grep -q -E '^[[:space:]]*\(implements[[:space:]]+jasmin\.uint63\)' "$stage/uint63"/*/dune ||
+    die "uint63/{js,native}/dune no longer implement the public library jasmin.uint63"
+  say "kept the public names of $base/compiler/{src,uint63} and its dune-project"
+
+  # 6. Put the tree in place and stamp it, so a repeat run is a no-op.
   rm -rf "$dest"
   mv "$stage" "$dest"
   printf '%s\n' "$sha" >"$dest/.source-sha256"
+  printf '%s\n' "$layout" >"$dest/.tree-layout"
   say "assembled vendor/jasmin/ from $base"
 fi

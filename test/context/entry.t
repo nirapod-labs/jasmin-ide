@@ -8,10 +8,12 @@ Typing threads one environment through them: a require adds the items of
 the file it names to the environment the rest of the entry is typed in, and
 an item that fails leaves the environment it found, so a require that does
 not resolve is reported at the require itself. A diagnostic whose span
-indexes a required file is not reported on the entry
-(jasmin/adapter.mli), so this verdict is the entry's own; it does not say
-that the required files hold no error of their own, and required-file.t
-records that gap.
+indexes a required file is not reported on the entry (jasmin/adapter.mli):
+it is reported against the file it is in, so this verdict is the entry's
+own, and required-file.t records where such a diagnostic goes. A file that
+two requires reach is entered once, as the compiler enters it once, so a
+diamond in the closure does not report its declarations as already
+declared.
 
 The corpus is not in this repository; docs/context-tests.md says which one
 the rows are written against and how to run them.

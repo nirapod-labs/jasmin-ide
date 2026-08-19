@@ -14,15 +14,16 @@ a failure anywhere in consts.jinc leaves none of its declarations in
 scope. The clean line below is therefore the entry typed with the whole of
 consts.jinc in scope, and the second check is the control that shows it:
 the same entry over a copy of the file whose first MLKEM_Q at 73:18, the
-token jinc-alone.t reports, is MLKEM_NOPE, and the entry then reports the
-symbol it uses as unknown.
+token jinc-alone.t reports, is MLKEM_NOPE, and the check then reports the
+file's own error at that token and exits 1.
 
-What the control prints is the entry's own diagnostic, not the file's: a
-diagnostic whose span indexes a required file is dropped from a check of
-the entry (jasmin/adapter.mli), and required-file.t records that gap. So
-this row observes the context being built and used, up to the last item of
-the included file; the file's own diagnostics in context are what
-jinc-in-context.t records once the context rule lands.
+What the control prints is the file's diagnostic, at its own place, and
+not one of the entry's: the entry has nothing wrong with it, it just
+cannot use a declaration the file failed to make. The `entry.jazz: ok`
+above the status is that reading — the document is clean, and the check
+failed because a file it requires did not type. The compiler reports the
+same place for the same bytes, an unknown variable at consts.jinc line 73,
+and reports nothing on entry.jazz, because it stops at the file's error.
 
   $ sh corpus.sh ../../lsp-server/native/main.exe "$JASMIN_CONTEXT_CORPUS" scoped
   consts.jinc sha256 d45ddbcc45708a950c8443056bd28706bc783b5f34ba347401d4daea0bdbbb8b
@@ -30,6 +31,6 @@ jinc-in-context.t records once the context rule lands.
   status 0
   control: consts.jinc:73:18 is MLKEM_NOPE, not MLKEM_Q
   consts.jinc sha256 a1aa837a2f96fc52a29a9fe1f9f7f19be29f2c2ba5ddb62e57b193cc6713e315
-  entry.jazz:6:7: typing: unknown variable: `jdmontx16'
-  entry.jazz: 1 error
+  consts.jinc:73:18: typing: unknown variable: `MLKEM_NOPE'
+  entry.jazz: ok
   status 1

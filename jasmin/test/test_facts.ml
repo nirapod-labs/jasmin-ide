@@ -774,6 +774,8 @@ let () =
   test_kind_strings ();
   test_annotation_values ();
   test_uses ();
+  test_calls ();
+  test_calls_in_declarations ();
   test_uses_around_an_exec ();
   if !failures = 0 then print_endline "all facts tests passed"
   else (

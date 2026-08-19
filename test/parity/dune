@@ -7,9 +7,55 @@
 (executable
  (name parity_tree)
  (modules parity_tree)
- (libraries jide_jasmin jasmin))
+ (libraries jide_jasmin jasmin.jasmin))
 
 (rule
  (alias runtest)
  (action
   (run %{exe:parity_tree.exe} --selftest)))
+
+; The two measurements of completion: the names completion offers against the
+; resolver's scope, and the engine's intrinsic table against the compiler's own
+; list. Each needs something this repository does not carry -- a corpus, and a
+; compiler -- so `dune runtest` runs their self-tests only, which check the
+; sampling, the reading of the compiler's message and the comparison, and never
+; claim parity. `make completion-scope` and `make intrinsics` run the
+; measurements (test/parity/completion_scope.sh and test/parity/intrinsics.sh)
+; and are where the measured numbers come from.
+
+(executable
+ (name completion_scope)
+ (modules completion_scope)
+ (libraries jide_engine jide_jasmin jide_lang))
+
+; The one-reference-per-typed-call harness. It needs a corpus, which this
+; repository does not carry, so `dune runtest` runs only its self-test: the
+; counting itself over small programs, including the cases that must fail.
+; `make calls` runs the measurement over the corpus named by CORPUS. Both go
+; through the same `judge`, so the self-test is the counter and not a model
+; of it.
+
+(executable
+ (name calls)
+ (modules calls)
+ (libraries jide_engine jide_jasmin jide_lang))
+
+(rule
+ (alias runtest)
+ (action
+  (run %{exe:calls.exe} --selftest)))
+
+(rule
+ (alias runtest)
+ (action
+  (run %{exe:completion_scope.exe} --selftest)))
+
+(executable
+ (name intrinsics)
+ (modules intrinsics)
+ (libraries jide_jasmin unix))
+
+(rule
+ (alias runtest)
+ (action
+  (run %{exe:intrinsics.exe} --selftest)))

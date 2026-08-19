@@ -5,7 +5,7 @@
 (executable
  (name mutation)
  (modules mutation mutant outline isolate probe report selftest token)
- (libraries jide_jasmin jide_lang jasmin unix))
+ (libraries jide_jasmin jide_lang jasmin.jasmin unix))
 
 (rule
  (alias runtest)
