@@ -592,6 +592,142 @@ let test_uses () =
             (span_in with_loop_and_call "return s;" ~offset:7 ~length:1)
       | _ -> ())
 
+(* Every call a typed body makes: the callee's name where the source writes
+   it, the instruction that makes the call, and the item that holds it. A call
+   inside an [if] and one inside a [for] are found too, in source order. *)
+let calls_in_if_and_for =
+  {|
+fn add(reg u64 a) -> reg u64 { return a; }
+
+fn caller(reg u64 n) -> reg u64 {
+  reg u64 s;
+  reg u64 i;
+  s = 0;
+  if n > 0 {
+    s = add(s);
+  }
+  for i = 0 to n {
+    s = add(s);
+  }
+  return s;
+}
+|}
+
+let call_summary (call : Facts.call) =
+  let name =
+    match call.Facts.c_span with
+    | Some span ->
+        Printf.sprintf "%d..%d" span.Jide_lang.Span.start_byte
+          span.Jide_lang.Span.end_byte
+    | None -> "no name range"
+  in
+  Printf.sprintf "%s at %s in %d..%d" call.Facts.c_callee name
+    call.Facts.c_range.Jide_lang.Span.start_byte
+    call.Facts.c_range.Jide_lang.Span.end_byte
+
+(* [same_name name call expected] checks the range the callee's name was
+   written at. A call with no such range fails the check rather than stopping
+   the run, so the checks after it still report. *)
+let same_name name (call : Facts.call) (expected : Jide_lang.Span.t) =
+  match call.Facts.c_span with
+  | Some actual -> same_span name actual expected
+  | None -> check (name ^ ": the callee's name has a range") false
+
+let test_calls () =
+  let facts = facts_of "calls" with_loop_and_call in
+  check
+    (Printf.sprintf "calls: one call, got [%s]"
+       (String.concat ", " (List.map call_summary facts.Facts.calls)))
+    (List.length facts.Facts.calls = 1);
+  (match facts.Facts.calls with
+  | [ call ] ->
+      check "calls: the callee is add" (String.equal call.Facts.c_callee "add");
+      check "calls: the call's bytes are in the checked file"
+        (String.equal call.Facts.c_file file);
+      same_name "calls: the callee's name is where the source writes it" call
+        (span_in with_loop_and_call "s = add(s);" ~offset:4 ~length:3);
+      same_span "calls: the instruction is the whole statement"
+        call.Facts.c_range
+        (span_in with_loop_and_call "s = add(s);");
+      check "calls: the callee's name lies inside the instruction"
+        (match call.Facts.c_span with
+        | Some name ->
+            Jide_lang.Span.contains call.Facts.c_range
+              ~byte:name.Jide_lang.Span.start_byte
+        | None -> false);
+      with_item_in facts "caller" (fun item ->
+          same_span "calls: the call belongs to the item that holds it"
+            call.Facts.c_item item.Facts.i_span)
+  | _ -> ());
+  let nested = facts_of "calls in an if and a for" calls_in_if_and_for in
+  check
+    (Printf.sprintf "calls in an if and a for: two calls, got [%s]"
+       (String.concat ", " (List.map call_summary nested.Facts.calls)))
+    (List.length nested.Facts.calls = 2);
+  match nested.Facts.calls with
+  | [ under_if; under_for ] ->
+      same_name "calls in an if and a for: the first is the if's callee"
+        under_if
+        (span_in calls_in_if_and_for ~offset:4 ~length:3
+           "s = add(s);\n  }\n  for");
+      same_span "calls in an if and a for: the first is the if's instruction"
+        under_if.Facts.c_range
+        (span_in calls_in_if_and_for ~length:11 "s = add(s);\n  }\n  for");
+      same_name "calls in an if and a for: the second is the for's callee"
+        under_for
+        (span_in calls_in_if_and_for ~offset:4 ~length:3
+           "s = add(s);\n  }\n  return");
+      same_span "calls in an if and a for: the second is the for's instruction"
+        under_for.Facts.c_range
+        (span_in calls_in_if_and_for ~length:11 "s = add(s);\n  }\n  return")
+  | _ -> ()
+
+(* The initialiser of a declaration is a call like any other: [reg u64 t =
+   add(n);] makes one, and the facts must hold it. Two initialisers in one
+   declaration share its instruction range, and each keeps the name it was
+   written with. *)
+let calls_in_declarations =
+  {|
+fn add(reg u64 a) -> reg u64 { return a; }
+fn dbl(reg u64 a) -> reg u64 { return a; }
+
+fn single(reg u64 n) -> reg u64 {
+  reg u64 t = add(n);
+  return t;
+}
+
+fn pair(reg u64 n) -> reg u64, reg u64 {
+  reg u64 t = add(n), u = dbl(n);
+  return t, u;
+}
+|}
+
+let test_calls_in_declarations () =
+  let facts = facts_of "calls in declarations" calls_in_declarations in
+  check
+    (Printf.sprintf "calls in declarations: three calls, got [%s]"
+       (String.concat ", " (List.map call_summary facts.Facts.calls)))
+    (List.length facts.Facts.calls = 3);
+  match facts.Facts.calls with
+  | [ single_call; first; second ] ->
+      same_name "calls in declarations: the single initialiser's callee"
+        single_call
+        (span_in calls_in_declarations "add(n);" ~length:3);
+      same_span "calls in declarations: the single initialiser's instruction"
+        single_call.Facts.c_range
+        (span_in calls_in_declarations "reg u64 t = add(n);");
+      same_name "calls in declarations: the first initialiser is add" first
+        (span_in calls_in_declarations "add(n), u" ~length:3);
+      same_name "calls in declarations: the second initialiser is dbl" second
+        (span_in calls_in_declarations "dbl(n);" ~length:3);
+      same_span "calls in declarations: both share the statement"
+        second.Facts.c_range
+        (span_in calls_in_declarations "reg u64 t = add(n), u = dbl(n);");
+      same_span "calls in declarations: the first shares the statement too"
+        first.Facts.c_range
+        (span_in calls_in_declarations "reg u64 t = add(n), u = dbl(n);")
+  | _ -> ()
+
 (* An exec declares nothing and has no body, so it holds no use and adds no
    item: the uses before and after it belong to the functions they sit in. *)
 let test_uses_around_an_exec () =
