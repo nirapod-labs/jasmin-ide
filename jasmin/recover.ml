@@ -53,8 +53,9 @@
     consuming the tree unchanged. {!Parse.items_with_stubs} merges the stubs
     into the item stream in source order, which is what an outline walks.
 
-    Every restart is bounded and every call into the parser is wrapped: no
-    exception leaves this module. *)
+    Every restart is bounded, at most {!max_recoveries} per file; past the
+    bound the rest of the file is one stub and the items before it are kept.
+    Every call into the parser is wrapped: no exception leaves this module. *)
 
 open Jasmin
 module I = Parser.MenhirInterpreter
@@ -78,6 +79,10 @@ type dropped =
   | Dropped of {
       kind : kind;  (** The item's keyword, or [Item]. *)
       name : string option;  (** Its name, when the header was readable. *)
+      namespace : string option;
+          (** The namespace the item was in, qualified ([A::B]), or [None] at
+              the top level. A reference to the item from outside the
+              namespace is written with this in front of its name. *)
       span : Jide_lang.Span.t;
     }
 
@@ -110,11 +115,12 @@ let diagnostic_of_dropped = function
         (what ^ " could not be parsed and is not in the tree")
 
 type counters = {
-  mutable recoveries : int;  (** Restarts of any kind. *)
-  mutable item_restarts : int;
+  mutable recoveries : int;  (** Restarts and repairs of any kind. *)
+  mutable item_restarts : int;  (** Broken items dropped for a stub. *)
   mutable statement_restarts : int;
   mutable brace_restarts : int;  (** Closings with a brace that was missing. *)
-  mutable byte_restarts : int;
+  mutable token_repairs : int;
+      (** A token deleted, or a [;] and a [}] written for each other. *)
   mutable moved_positions : int;
       (** Restarts that moved the position the item after the hole begins
           at, so that item covers the hole alone. *)
@@ -130,7 +136,7 @@ let no_counters () =
     item_restarts = 0;
     statement_restarts = 0;
     brace_restarts = 0;
-    byte_restarts = 0;
+    token_repairs = 0;
     moved_positions = 0;
     refused_positions = 0;
   }
@@ -148,209 +154,18 @@ type t = {
   counters : counters;
 }
 
-(** How many restarts one file may have. *)
+(** How many restarts and repairs one file may have. *)
 let max_recoveries = 50
 
-(** How many times the driver may rewrite the buffer before it keeps what
-    the prefix alone parses. *)
-let max_byte_restarts = 8
+(** How many repairs one broken item may have before it is dropped. A repair
+    that only moves the failure along is not worth more than a few tries:
+    the stub is one diagnostic, and every repair is a guess. *)
+let max_repairs_per_item = 8
 
 let empty counters =
   { items = []; dropped = []; recovered = []; diagnostics = []; counters }
 
-type state = {
-  scan : Scan.t;
-  initial : Syntax.pprogram I.checkpoint;
-  boundaries : (int * Syntax.pprogram I.checkpoint) list ref;
-      (** Item boundaries, newest first. *)
-  statements : (int * Syntax.pprogram I.checkpoint) list ref;
-      (** Statement boundaries, newest first. *)
-  tried : (int * int) list ref;
-      (** Restart points already used, so a restart that makes no progress
-          is not tried twice. *)
-  mutable closed_item : int;
-      (** The token index the last completed item ends at, which is where
-          the item that is now broken begins. *)
-  mutable stubbed_upto : int;
-      (** The token index the last stub ended at. A restart that covers the
-          bytes between [closed_item] and this index would be reporting a
-          hole that is already stubbed, so only the bytes after it are a new
-          hole. *)
-  mutable input : (int * Syntax.pprogram I.env) option;
-      (** The last state that asked for a token and the index it asked for.
-          A failure at that index is a failure to shift that token, and the
-          state is where a virtual token can be offered instead. *)
-  mutable offered : bool;
-      (** Whether a token has been read since the last checkpoint, which is
-          what tells whether the parser reduced an item with a lookahead. *)
-  counters : counters;
-}
-
-(** [accepts checkpoint entry] is true when the token at [entry] can be
-    shifted from [checkpoint]. Menhir answers by running the reductions the
-    token would cause, which is why this is only asked at item boundaries:
-    it is what tells a top-level [fn] from a [fn] inside a body. *)
-let accepts checkpoint (entry : Scan.token) =
-  try I.acceptable checkpoint entry.token entry.start_pos with _ -> false
-
-(** [item_begins scan ~checkpoint ~target] is true when the parser, resumed
-    at [target] from [checkpoint], shifts the token there and reduces a
-    top-level item before it meets a token it cannot shift.
-
-    {!accepts} alone does not answer the question that matters here. A global
-    declaration begins with its type, and a type is also a statement and an
-    expression, so a name or a [u64] that the parser can shift where an item
-    belongs may be a global, may be a local declaration whose [reg] was lost,
-    or may be the middle of the expression above it. The grammar's FIRST set
-    cannot separate them and no lexical rule can. What can is the parser: run
-    the item from the candidate and see whether a [top] production comes out
-    of it. An item that is not really there fails inside the run, at the
-    token where the guess stops making sense, and the candidate is refused.
-
-    Only a [top] reduced after the candidate's own first token has been
-    shifted counts. Menhir defers the reduction of an item whose last symbol
-    has just been read until it knows the next token, so a checkpoint taken
-    at an item boundary still holds the item before it on the stack; the
-    first token offered then finishes *that* item and a [top] comes out of it
-    without the candidate having begun anything. A shift of the candidate is
-    what tells the two apart.
-
-    The run stops at the first [top] reduction, so it costs one item, and it
-    never touches [state]: the candidate may be wrong, and a wrong guess must
-    leave the parse that continues alone. *)
-let item_begins scan ~checkpoint ~target =
-  let rec loop ~shifted index checkpoint =
-    match checkpoint with
-    | I.InputNeeded environment -> (
-        let checkpoint = I.input_needed environment in
-        if index >= Scan.count scan then false
-        else
-          match I.offer checkpoint (Scan.triple scan index) with
-          | next -> loop ~shifted (index + 1) next
-          | exception _ -> false)
-    | I.AboutToReduce (_, production) -> (
-        match I.lhs production with
-        | I.X (I.N nonterminal)
-          when shifted && I.compare_nonterminals nonterminal I.N_top = 0 ->
-            true
-        | _ -> (
-            match I.resume checkpoint with
-            | next -> loop ~shifted index next
-            | exception _ -> false))
-    | I.Shifting _ -> (
-        match I.resume checkpoint with
-        | next -> loop ~shifted:true index next
-        | exception _ -> false)
-    | I.HandlingError _ | I.Accepted _ | I.Rejected -> false
-  in
-  loop ~shifted:false target checkpoint
-
-(** An item keyword at item level that follows the closing bracket of an
-    annotation, or the [export] or [inline] that begins its item, is not an
-    item boundary: the keyword belongs to the item that begins earlier, and a
-    checkpoint taken at it would resume inside that item's production. The
-    token that begins the item is the boundary. *)
-let annotated_keyword state index =
-  index > 0
-  && (Scan.token state.scan index).depth = 0
-  &&
-  match (Scan.token state.scan (index - 1)).token with
-  | Parser.RBRACKET | Parser.EXPORT | Parser.INLINE -> true
-  | _ -> false
-
-let record state ~index checkpoint =
-  if index < Scan.count state.scan then (
-    let entry = Scan.token state.scan index in
-    if
-      Scan.item_start entry.token
-      && (not (annotated_keyword state index))
-      && accepts checkpoint entry
-    then state.boundaries := (index, checkpoint) :: !(state.boundaries);
-    if Scan.statement_boundary state.scan index then
-      state.statements := (index, checkpoint) :: !(state.statements))
-
-(* The driver's inner loop: offer tokens, run reductions, stop when the
-   parser accepts or refuses. *)
-type step =
-  | Accepted of Syntax.pprogram
-  | Failed of int  (** The token index that could not be shifted. *)
-  | Raised of int * exn
-
-let rec drive state ~index ~eof_sent checkpoint =
-  match checkpoint with
-  | I.InputNeeded environment -> (
-      let checkpoint = I.input_needed environment in
-      state.input <- Some (index, environment);
-      state.offered <- false;
-      record state ~index checkpoint;
-      (* A token that follows the closing brace of a top-level block is a
-         restart point too: the item before it is complete, and this state
-         still owes that item its reduction, which {!reposition} performs. *)
-      if
-        index > 0
-        && index < Scan.count state.scan
-        && (let prev = Scan.token state.scan (index - 1) in
-            prev.token = Parser.RBRACE && prev.depth = 1)
-        && not (List.mem_assoc index !(state.boundaries))
-      then state.boundaries := (index, checkpoint) :: !(state.boundaries);
-      (* The same holds for an item that ends in any other token, such as the
-         semicolon of a declaration: the parser reduced it before this token,
-         and the reduction set [closed_item] to this index. *)
-      if
-        index = state.closed_item
-        && index < Scan.count state.scan
-        && not (List.mem_assoc index !(state.boundaries))
-      then state.boundaries := (index, checkpoint) :: !(state.boundaries);
-      if index < Scan.count state.scan then
-        match I.offer checkpoint (Scan.triple state.scan index) with
-        | next ->
-            state.offered <- true;
-            drive state ~index:(index + 1) ~eof_sent next
-        | exception exn -> Raised (index, exn)
-      else if eof_sent then Failed (min (index - 1) (Scan.count state.scan))
-      else
-        match I.offer checkpoint (Scan.eof_triple state.scan) with
-        | next ->
-            state.offered <- true;
-            drive state ~index:(index + 1) ~eof_sent:true next
-        | exception exn -> Raised (index, exn))
-  | I.AboutToReduce (_, production) -> (
-      (* A completed item: the next item begins at the token the parser is
-         looking at, when it is looking at one, and at the next token to
-         read when the reduction was a default one. Only an item at the top
-         level counts for the prefix: an item inside a namespace would leave
-         the prefix with an unclosed brace. *)
-      (match I.lhs production with
-      | I.X (I.N nonterminal) ->
-          if I.compare_nonterminals nonterminal I.N_top = 0 then
-            let at = if state.offered then index - 1 else index in
-            if
-              at >= Scan.count state.scan
-              || (Scan.token state.scan at).depth = 0
-            then (
-              state.closed_item <- at;
-              (* The checkpoint that waited for [at] is the one that still
-                 owes this item its reduction, so it is the restart point
-                 for the token after the item. *)
-              match state.input with
-              | Some (waiting, environment)
-                when waiting = at
-                     && at < Scan.count state.scan
-                     && not (List.mem_assoc at !(state.boundaries)) ->
-                  state.boundaries :=
-                    (at, I.input_needed environment) :: !(state.boundaries)
-              | _ -> ())
-      | I.X (I.T _) -> ());
-      match I.resume checkpoint with
-      | next -> drive state ~index ~eof_sent next
-      | exception exn -> Raised (index, exn))
-  | I.Shifting _ -> (
-      match I.resume checkpoint with
-      | next -> drive state ~index ~eof_sent next
-      | exception exn -> Raised (index, exn))
-  | I.HandlingError _ -> Failed (max 0 (index - 1))
-  | I.Accepted items -> Accepted items
-  | I.Rejected -> Failed (max 0 (index - 1))
+type checkpoint = Syntax.pprogram I.checkpoint
 
 let start_checkpoint ~name ~position =
   Parser.Incremental.module_ { position with Lexing.pos_fname = name }
@@ -364,35 +179,26 @@ let initial_position =
     item's production begins, and every item production but [param], [exec],
     [namespace] and one behind a [#[]] annotation begins with a nullable
     symbol ([annotations], or the optional [from?] of a [require]). Menhir
-    gives such an empty production the position the parser has reached —
-    [parser.mly], and the generated [let _startpos = _menhir_stack.endp] —
+    gives such an empty production the position the parser has reached,
     which is the end of the last token that was shifted. So a straight parse
-    starts each item where the item before it ends, and a restart has to
+    starts each item where the token before it ends, and a restart has to
     resume with that same position or the item it produces swallows the
-    bytes of the hole in front of it. The item's end needs no such care: it
-    comes from its own last token, and {!reposition} moves only the cells the
-    item that follows begins with, so the item before the hole keeps the end
-    its own tokens give it. *)
+    bytes of the hole in front of it. *)
 let position_before scan target =
   if target <= 0 then initial_position
   else (Scan.token scan (target - 1)).end_pos
 
-let new_state counters scan =
-  let initial =
-    start_checkpoint ~name:(Scan.name scan) ~position:initial_position
-  in
-  {
-    scan;
-    initial;
-    boundaries = ref [ (0, initial) ];
-    statements = ref [];
-    tried = ref [];
-    closed_item = 0;
-    stubbed_upto = 0;
-    input = None;
-    offered = false;
-    counters;
-  }
+(** The parser run to its next request for a token, or to its end. A
+    semantic action that raises is a failure like any other. *)
+let rec settle (checkpoint : checkpoint) =
+  match checkpoint with
+  | I.InputNeeded _ -> `Need checkpoint
+  | I.Shifting _ | I.AboutToReduce _ -> (
+      match I.resume checkpoint with
+      | next -> settle next
+      | exception _ -> `Error)
+  | I.Accepted items -> `Accepted items
+  | I.HandlingError _ | I.Rejected -> `Error
 
 (** A copy of [state] with its own checkpoint lists and its own counters, so
     an attempt that fails leaves nothing of an imaginary parse behind. *)
