@@ -315,22 +315,6 @@ let reposition ~counters checkpoint ~position ~lead =
             | Some _ -> refuse ()))
   | _ -> refuse ()
 
-(** [close_blocks checkpoint ~position ~count] offers [count] closing braces
-    at [position]. [None] means the parser did not take them, which is how a
-    failure that is not a missing brace is told apart from one that is. *)
-let close_blocks checkpoint ~position ~count =
-  let rec loop checkpoint remaining =
-    if remaining <= 0 then Some checkpoint
-    else
-      match wait_for_input checkpoint with
-      | None -> None
-      | Some checkpoint -> (
-          match I.offer checkpoint (Parser.RBRACE, position, position) with
-          | next -> loop next (remaining - 1)
-          | exception _ -> None)
-  in
-  loop checkpoint count
-
 (** The name a broken item had, read from the tokens of the broken region so
     the stub can carry it. *)
 let dropped_of scan ~from ~upto =
@@ -388,30 +372,39 @@ let dropped_of scan ~from ~upto =
     | Some (kind, at) -> (kind, declared kind at)
     | None -> (
         (* No keyword left in the region: the broken item lost the one it
-           began with, which is what deleting [fn] does. Its first token is
-           then the name, and a name followed by a parenthesis names a
-           function; a name before an [=] names a global. *)
-        match first_eq from with
-        | Some eq -> (
-            match last_name ~from ~upto:eq with
-            | Some name -> (Global, Some name)
-            | None -> (Item, None))
-        | None -> (
-            match
-              if from < upto then Some (Scan.token scan from).token else None
-            with
-            | Some (Parser.NID name) ->
-                let called =
-                  from + 1 < upto
-                  && (Scan.token scan (from + 1)).token = Parser.LPAREN
-                in
-                ((if called then Function else Item), Some name)
-            | _ -> (Item, None)))
+           began with, which is what deleting [fn] does. A region that begins
+           with [inline] or [export] is a function: at item level those two
+           begin nothing else. Otherwise its first token is the name, and a
+           name followed by a parenthesis names a function; a name before an
+           [=] names a global. *)
+        match
+          if from < upto then Some (Scan.token scan from).token else None
+        with
+        | Some (Parser.INLINE | Parser.EXPORT) -> (Function, first_name from)
+        | _ -> (
+            match first_eq from with
+            | Some eq -> (
+                match last_name ~from ~upto:eq with
+                | Some name -> (Global, Some name)
+                | None -> (Item, None))
+            | None -> (
+                match
+                  if from < upto then Some (Scan.token scan from).token
+                  else None
+                with
+                | Some (Parser.NID name) ->
+                    let called =
+                      from + 1 < upto
+                      && (Scan.token scan (from + 1)).token = Parser.LPAREN
+                    in
+                    ((if called then Function else Item), Some name)
+                | _ -> (Item, None))))
   in
   Dropped
     {
       kind;
       name;
+      namespace = None;
       span =
         Scan.span scan
           ~start_byte:(Scan.start_byte scan from)
@@ -422,25 +415,175 @@ let contains (outer : Jide_lang.Span.t) (inner : Jide_lang.Span.t) =
   outer.Jide_lang.Span.start_byte <= inner.Jide_lang.Span.start_byte
   && outer.Jide_lang.Span.end_byte >= inner.Jide_lang.Span.end_byte
 
-(** [crosses_item scan ~source ~target] is true when a token strictly between
-    [source] and [target] begins an item of a shallower block: the body the
-    statement belongs to has closed and another item starts before the
-    target. A statement restart that resumes there would parse the next
-    item's body with the state of this one, so it is not a restart point. *)
-let crosses_item scan ~source ~target =
-  let depth = (Scan.token scan source).depth in
-  let rec loop index =
-    index < target
-    && ((Scan.token scan index).depth < depth
-        && Scan.item_only (Scan.token scan index).token
-       || loop (index + 1))
-  in
-  loop (source + 1)
+(** The terminals that carry no value, which are the ones a repair can
+    write without inventing a name or a number. *)
+let valueless =
+  Parser.
+    [
+      LBRACE;
+      RBRACE;
+      LPAREN;
+      RPAREN;
+      LBRACKET;
+      RBRACKET;
+      SEMICOLON;
+      COMMA;
+      COLON;
+      COLONCOLON;
+      DOT;
+      EQ;
+      RARROW;
+      NAMESPACE;
+      FN;
+      PARAM;
+      TYPE;
+      EXEC;
+      REQUIRE;
+      FROM;
+      EXPORT;
+      INLINE;
+      REG;
+      STACK;
+      GLOBAL;
+      POINTER;
+      CONSTANT;
+      MUTABLE;
+      RETURN;
+      IF;
+      ELSE;
+      FOR;
+      TO;
+      DOWNTO;
+      WHILE;
+      T_BOOL;
+      T_INT;
+      SHARPLBRACKET;
+      SHARP;
+      UNDERSCORE;
+      QUESTIONMARK;
+      ARRAYINIT;
+      ASSERT;
+      TRUE;
+      FALSE;
+      ALIGNED;
+      UNALIGNED;
+      PLUS;
+      MINUS;
+      STAR;
+      AMP;
+      AMPAMP;
+      PIPE;
+      PIPEPIPE;
+      HAT;
+      BANG;
+      BANGEQ;
+      EQEQ;
+      LTLT;
+      ROR;
+      ROL;
+    ]
 
-let statement_before state index =
-  List.find_opt
-    (fun (at, _) -> at < index && at > state.closed_item)
-    !(state.statements)
+type boundary = { at : int; checkpoint : checkpoint; level : int }
+(** An item boundary the parse reached: the token index, the checkpoint
+    that waits for that token, and the namespace depth there. *)
+
+type frame = {
+  mutable start : boundary;
+  mutable fence : int;
+  mutable repairs : int;
+}
+(** A broken item: the boundary it begins at and the fence it ends at. *)
+
+type run = {
+  scan : Scan.t;
+  count : int;
+  after : int array;
+      (** [after.(i)] is the number of [}] minus the number of [{] in the
+          tokens from [i] to the end: the brace depth before token [i] as
+          the end of the buffer sees it. *)
+  counters : counters;
+  mutable dropped : dropped list;
+  mutable recovered : Jide_lang.Span.t list;
+  mutable tried : (int * int) list;  (** Statement restarts already made. *)
+}
+(** The bytes and tokens of one parse, and what it has reported. *)
+
+type cursor = {
+  mutable checkpoint : checkpoint;
+  mutable index : int;
+  mutable braces : int;  (** Braces shifted and not closed, virtual included. *)
+  mutable boundary : boundary;  (** The last boundary reached. *)
+  mutable look : bool;  (** Whether the last token read can end an item. *)
+  mutable statements : (int * checkpoint * int) list;
+      (** Statement checkpoints since [boundary], newest first. *)
+  mutable history : (int * checkpoint * int) list;
+      (** Every state since [boundary], newest first, so a fence found
+          behind the failure can be returned to. *)
+  mutable frames : frame list;
+      (** Broken items being repaired, innermost first. *)
+}
+(** Where the parse is. [checkpoint] waits for the token at [index]. *)
+
+let after_depths scan =
+  let count = Scan.count scan in
+  let after = Array.make (count + 1) 0 in
+  for index = count - 1 downto 0 do
+    after.(index) <-
+      after.(index + 1) - brace_delta (Scan.token scan index).Scan.token
+  done;
+  after
+
+(** The namespaces a boundary state is inside, qualified, read off the
+    parser's own stack: each open namespace left its keyword there, with its
+    name in the cell above it. *)
+let namespace_of (environment : Syntax.pprogram I.env) =
+  let rec walk environment above found =
+    match I.top environment with
+    | None -> found
+    | Some (I.Element (state, value, _, _)) -> (
+        let found, above =
+          match I.incoming_symbol state with
+          | I.T I.T_NAMESPACE -> (
+              match above with
+              | Some names -> (String.concat "::" names :: found, None)
+              | None -> (found, None))
+          | I.N I.N_separated_nonempty_list_COLONCOLON_NID_ ->
+              (found, Some (value : string list))
+          | _ -> (found, None)
+        in
+        match I.pop environment with
+        | Some below -> walk below above found
+        | None -> found)
+  in
+  match walk environment None [] with
+  | [] -> None
+  | names -> Some (String.concat "::" names)
+
+(** One stub and one recovered region for the tokens [from] to [upto]. The
+    stub's bytes run from its first token to the end of its last one, which
+    is where the item after it begins, so the two abut as they do in a parse
+    that was never interrupted. A stub that covers earlier ones, an item that
+    was repaired and then dropped as a whole, replaces them. *)
+let note_dropped ?namespace run ~from ~upto =
+  let scan = run.scan in
+  let start_byte = Scan.start_byte scan from in
+  let end_byte =
+    if upto >= run.count then String.length (Scan.text scan)
+    else (position_before scan upto).Lexing.pos_cnum
+  in
+  if start_byte < end_byte then (
+    let span = Scan.span scan ~start_byte ~end_byte in
+    let stub =
+      match dropped_of scan ~from ~upto with
+      | Dropped fields -> Dropped { fields with span; namespace }
+    in
+    run.dropped <-
+      stub
+      :: List.filter
+           (function Dropped { span = inner; _ } -> not (contains span inner))
+           run.dropped;
+    run.recovered <-
+      span :: List.filter (fun inner -> not (contains span inner)) run.recovered)
 
 let was_tried state (source, target) =
   List.exists (fun pair -> pair = (source, target)) !(state.tried)
