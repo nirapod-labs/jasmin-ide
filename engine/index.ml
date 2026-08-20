@@ -601,3 +601,93 @@ let shift_declaration (declaration : declaration) delta =
     item_span = shift_span declaration.item_span delta;
   }
 
+let rec shift_item (item : item) delta =
+  {
+    item with
+    item_span = shift_span item.item_span delta;
+    item_name_span = Option.map (fun span -> shift_span span delta) item.item_name_span;
+    item_children = List.map (fun child -> shift_item child delta) item.item_children;
+  }
+
+let shift_require (require : require) delta =
+  {
+    require with
+    written_span = shift_span require.written_span delta;
+    item_span = shift_span require.item_span delta;
+    from =
+      Option.map (fun (name, span) -> (name, shift_span span delta)) require.from;
+  }
+
+let of_text ~(file : string) (text : string) : t * Jide_lang.Diagnostic.t list =
+  let bom, body = with_bom text in
+  let parsed = Jide_jasmin.Adapter.parse ~name:file body in
+  let items = parsed.Jide_jasmin.Parse.items in
+  let diagnostics =
+    List.map
+      (fun diagnostic -> shift_diagnostic diagnostic bom)
+      parsed.Jide_jasmin.Parse.diagnostics
+  in
+  let state =
+    {
+      file;
+      text;
+      occurrences = ref [];
+      declarations = ref [];
+      requires = ref [];
+    }
+  in
+  let outline = List.map (item state) items in
+  let occurrences =
+    unique compare_occurrence
+      (List.map (fun occurrence -> shift_occurrence occurrence bom)
+         !(state.occurrences))
+  in
+  let declarations =
+    unique compare_declaration
+      (List.map (fun declaration -> shift_declaration declaration bom)
+         !(state.declarations))
+  in
+  let requires =
+    List.sort compare_require
+      (List.map (fun require -> shift_require require bom) !(state.requires))
+  in
+  ( {
+      file;
+      text;
+      items;
+      outline;
+      declarations;
+      occurrences;
+      requires;
+    },
+    diagnostics )
+
+let equal_declaration (left : declaration) (right : declaration) =
+  String.equal (normalise left.file) (normalise right.file)
+  && left.name_span.Jide_lang.Span.start_byte
+     = right.name_span.Jide_lang.Span.start_byte
+
+let find_occurrence (index : t) ~(byte : int) =
+  List.fold_left
+    (fun found occurrence ->
+      if Jide_lang.Span.contains occurrence.span ~byte then
+        match found with
+        | None -> Some occurrence
+        | Some previous ->
+            let previous_length =
+              previous.span.Jide_lang.Span.end_byte
+              - previous.span.Jide_lang.Span.start_byte
+            in
+            let length =
+              occurrence.span.Jide_lang.Span.end_byte
+              - occurrence.span.Jide_lang.Span.start_byte
+            in
+            if length < previous_length then Some occurrence else found
+      else found)
+    None index.occurrences
+
+let find_declaration (index : t) ~(name_start : int) =
+  List.find_opt
+    (fun declaration ->
+      declaration.name_span.Jide_lang.Span.start_byte = name_start)
+    index.declarations
