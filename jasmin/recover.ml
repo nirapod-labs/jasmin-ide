@@ -585,24 +585,371 @@ let note_dropped ?namespace run ~from ~upto =
     run.recovered <-
       span :: List.filter (fun inner -> not (contains span inner)) run.recovered)
 
-let was_tried state (source, target) =
-  List.exists (fun pair -> pair = (source, target)) !(state.tried)
+let note_recovered run ~from ~upto =
+  let start_byte = Scan.start_byte run.scan from in
+  let end_byte = Scan.start_byte run.scan upto in
+  if start_byte < end_byte then
+    run.recovered <- Scan.span run.scan ~start_byte ~end_byte :: run.recovered
 
-let prune state source =
-  state.boundaries :=
-    List.filter (fun (at, _) -> at <= source) !(state.boundaries);
-  state.statements :=
-    List.filter (fun (at, _) -> at <= source) !(state.statements)
+(** [candidate run index] is true when the token there may begin an item:
+    the parser still has to say whether one does. *)
+let candidate run index =
+  let token = (Scan.token run.scan index).Scan.token in
+  if Scan.item_start token then true
+  else if Scan.type_start token then
+    index = 0 || not (continues_a_type (Scan.token run.scan (index - 1)).token)
+  else false
 
-type attempt =
-  | Restart of {
-      source : int;  (** The checkpoint's token index. *)
-      target : int;  (** Where to resume reading. *)
-      checkpoint : Syntax.pprogram I.checkpoint;
-      statement : bool;  (** True for a statement checkpoint. *)
-    }
+(** [item_parses run environment ~start ~limit] is true when a whole item
+    parses from [start] in the boundary state [environment], ending at or
+    before [limit]: the parser comes back to a boundary with the braces it
+    read balanced, before any error. *)
+let item_parses run environment ~start ~limit =
+  let rec loop checkpoint index net =
+    if
+      index > start && net = 0
+      && ends_item (Scan.token run.scan (index - 1)).Scan.token
+      && at_boundary checkpoint
+    then true
+    else if index >= limit || index >= run.count || net < 0 then false
+    else
+      match offer checkpoint (Scan.triple run.scan index) with
+      | `Need next ->
+          loop next (index + 1)
+            (net + brace_delta (Scan.token run.scan index).Scan.token)
+      | `Accepted _ | `Error -> false
+  in
+  loop (I.input_needed environment) start 0
 
-let next_attempt state ~failure =
+(** [closes run environment index] is true when the [}] at [index] closes
+    the namespace the boundary state [environment] is in. *)
+let closes run environment index =
+  match offer (I.input_needed environment) (Scan.triple run.scan index) with
+  | `Need next -> at_boundary next
+  | `Accepted _ | `Error -> false
+
+(** The fence of the item broken at [boundary]: the first token after the
+    boundary where a whole item parses, or the [}] that closes the boundary's
+    namespace, or [limit] when there is neither before it.
+
+    With [~outside:true] an item is a candidate only where the braces after
+    it balance to the boundary's depth or less. An item deeper than that sits
+    in a block the text after it closes, which is what the items of a
+    namespace whose header is broken look like: they parse on their own, but
+    they belong to that namespace. *)
+let find_fence ?(outside = false) run (boundary : boundary) ~limit =
+  match normalise boundary.checkpoint with
+  | None -> limit
+  | Some environment ->
+      let rec search index =
+        if index >= limit then limit
+        else
+          let token = (Scan.token run.scan index).Scan.token in
+          if token = Parser.RBRACE then
+            if
+              boundary.level > 0
+              && run.after.(index + 1) = boundary.level - 1
+              && closes run environment index
+            then index
+            else search (index + 1)
+          else if
+            candidate run index
+            && ((not outside) || run.after.(index) <= boundary.level)
+            && item_parses run environment ~start:index ~limit
+          then index
+          else search (index + 1)
+      in
+      search (boundary.at + 1)
+
+(** The boundary state [environment], ready to read the token at [target]
+    with the position the item there begins at: the end of the token before
+    it, as in a parse that was never interrupted. *)
+let resume_at run environment ~target =
+  if target >= run.count then I.input_needed environment
+  else
+    let lead = Scan.token run.scan target in
+    let position = position_before run.scan target in
+    if lead.Scan.token = Parser.RBRACE then I.input_needed environment
+    else
+      match I.top environment with
+      | None ->
+          (* The start state holds no symbol and so no position to move; it
+             is only reachable before any item was read, so nothing is lost
+             by starting it again at that position. *)
+          start_checkpoint ~name:(Scan.name run.scan) ~position
+      | Some _ ->
+          reposition ~counters:run.counters
+            (I.input_needed environment)
+            ~position ~lead
+
+let virtual_braces checkpoint ~position ~count =
+  let rec loop checkpoint remaining =
+    if remaining <= 0 then Some checkpoint
+    else
+      match offer checkpoint (Parser.RBRACE, position, position) with
+      | `Need next -> loop next (remaining - 1)
+      | `Accepted _ | `Error -> None
+  in
+  loop checkpoint count
+
+(** [survives run checkpoint ~from ~braces ~level ~fence] is true when the
+    next three tokens from [from] parse. A repair that reaches the fence
+    sooner has to leave a whole item there: the parser is at a boundary of
+    depth [level] or less, or inside a body that virtual braces close to one.
+    [braces] is the depth the parser is at before [from]. *)
+let survives run checkpoint ~from ~braces ~level ~fence =
+  let rec loop checkpoint index braces remaining =
+    if remaining = 0 then true
+    else if index >= fence || index >= run.count then
+      (braces <= level && at_boundary checkpoint)
+      || braces > level
+         &&
+         match
+           virtual_braces checkpoint
+             ~position:(position_before run.scan index)
+             ~count:(braces - level)
+         with
+         | Some closed -> at_boundary closed
+         | None -> false
+    else
+      let token = (Scan.token run.scan index).Scan.token in
+      match offer checkpoint (Scan.triple run.scan index) with
+      | `Need next ->
+          loop next (index + 1) (braces + brace_delta token) (remaining - 1)
+      | `Accepted _ -> true
+      | `Error -> false
+  in
+  loop checkpoint from braces 3
+
+(** [item_keyword run index] is true when the token there begins an item and
+    can begin nothing else. [export] is also an annotation label, and inside
+    a [#[...]] group it begins nothing. *)
+let item_keyword run index =
+  let token = (Scan.token run.scan index).Scan.token in
+  Scan.item_only token
+  && not
+       (token = Parser.EXPORT && index > 0
+       &&
+       match (Scan.token run.scan (index - 1)).Scan.token with
+       | Parser.SHARPLBRACKET | Parser.COMMA | Parser.EQ -> true
+       | _ -> false)
+
+(** The first token of the item whose keyword is at [index]: back over
+    [export] and [inline], and over [#[...]] groups, but not past [from]. *)
+let item_head run ~from index =
+  let token at = (Scan.token run.scan at).Scan.token in
+  let rec group at depth =
+    (* [at] is inside a group, scanning back; [depth] brackets are open. *)
+    if at < from then None
+    else
+      match token at with
+      | Parser.RBRACKET -> group (at - 1) (depth + 1)
+      | Parser.LBRACKET -> group (at - 1) (depth - 1)
+      | Parser.SHARPLBRACKET ->
+          if depth = 1 then Some at else group (at - 1) (depth - 1)
+      | _ -> group (at - 1) depth
+  in
+  let rec back at =
+    if at - 1 < from then at
+    else
+      match token (at - 1) with
+      | Parser.INLINE | Parser.EXPORT -> back (at - 1)
+      | Parser.RBRACKET -> (
+          match group (at - 2) 1 with
+          | Some opening -> back opening
+          | None -> at)
+      | _ -> at
+  in
+  back index
+
+(** The next item keyword after [from] and before [fence] that is not part
+    of the item that begins at [from], or [fence]. *)
+let next_keyword run ~from ~fence =
+  let rec search index =
+    if index >= fence then fence
+    else if item_keyword run index then
+      let head = item_head run ~from index in
+      if head > from then head else search (index + 1)
+    else search (index + 1)
+  in
+  search (from + 1)
+
+(** [set_boundary cursor ~at ~checkpoint ~level] records a boundary. The
+    parse goes on from [working] when it is given: a state that already
+    carries the position of the item at [at] (see {!resume_at}), and so is
+    one step into that item. The boundary keeps the state before that step,
+    which is the one a later restart of the same item has to begin from. *)
+let set_boundary ?working cursor ~at ~checkpoint ~level =
+  let working = Option.value working ~default:checkpoint in
+  cursor.boundary <- { at; checkpoint; level };
+  cursor.checkpoint <- working;
+  cursor.statements <- [];
+  cursor.history <- [ (at, working, level) ]
+
+let rec drive run cursor : Syntax.pprogram =
+  let index = cursor.index in
+  if cursor.look && at_boundary cursor.checkpoint then
+    set_boundary cursor ~at:index ~checkpoint:cursor.checkpoint
+      ~level:cursor.braces;
+  cursor.look <- false;
+  if cursor.boundary.at <> index then
+    cursor.history <-
+      (index, cursor.checkpoint, cursor.braces) :: cursor.history;
+  if
+    index < run.count
+    && cursor.braces > cursor.boundary.level
+    && Scan.statement_boundary run.scan index
+  then
+    cursor.statements <-
+      (index, cursor.checkpoint, cursor.braces) :: cursor.statements;
+  match cursor.frames with
+  | frame :: _ when index = frame.fence -> at_fence run cursor frame
+  | _ -> (
+      if index >= run.count then at_end run cursor
+      else
+        let token = (Scan.token run.scan index).Scan.token in
+        match offer cursor.checkpoint (Scan.triple run.scan index) with
+        | `Need next ->
+            cursor.checkpoint <- next;
+            cursor.index <- index + 1;
+            cursor.braces <- cursor.braces + brace_delta token;
+            cursor.look <- may_precede_item token;
+            drive run cursor
+        | `Accepted items -> items
+        | `Error -> failure run cursor)
+
+(* The end of the buffer. At a boundary the namespaces still open are closed
+   and the end is read; anywhere else the item that is open is broken. *)
+and at_end run cursor =
+  if cursor.boundary.at = cursor.index then
+    let position = position_before run.scan run.count in
+    let closed =
+      if cursor.braces <= 0 then Some cursor.checkpoint
+      else (
+        run.counters.recoveries <- run.counters.recoveries + 1;
+        run.counters.brace_restarts <- run.counters.brace_restarts + 1;
+        virtual_braces cursor.checkpoint ~position ~count:cursor.braces)
+    in
+    match closed with
+    | None -> []
+    | Some checkpoint -> (
+        match offer checkpoint (Scan.eof_triple run.scan) with
+        | `Accepted items -> items
+        | `Need _ | `Error -> [])
+  else failure run cursor
+
+(* The parse reached the fence of the item it is repairing. If it is at a
+   boundary of the item's own depth the item is whole; if it is inside a body
+   of that item, virtual braces close it; otherwise the item is dropped. *)
+and at_fence run cursor frame =
+  let level = frame.start.level in
+  (* A repair may have closed the namespace the item was in, a [}] written
+     for a [;]: a boundary at a shallower depth ends the item as well. *)
+  if cursor.boundary.at = cursor.index && cursor.braces <= level then (
+    cursor.frames <- List.tl cursor.frames;
+    drive run cursor)
+  else
+    let missing = cursor.braces - level in
+    let closed =
+      if missing <= 0 then None
+      else
+        match
+          virtual_braces cursor.checkpoint
+            ~position:(position_before run.scan cursor.index)
+            ~count:missing
+        with
+        | Some checkpoint when at_boundary checkpoint -> Some checkpoint
+        | _ -> None
+    in
+    match closed with
+    | Some checkpoint ->
+        run.counters.recoveries <- run.counters.recoveries + 1;
+        run.counters.brace_restarts <- run.counters.brace_restarts + 1;
+        cursor.checkpoint <- checkpoint;
+        cursor.braces <- level;
+        set_boundary cursor ~at:cursor.index ~checkpoint ~level;
+        cursor.frames <- List.tl cursor.frames;
+        drive run cursor
+    | None -> drop run cursor frame
+
+and failure run cursor =
+  let at = cursor.index in
+  let frame =
+    match cursor.frames with
+    | frame :: _ when frame.start.at = cursor.boundary.at -> frame
+    | _ ->
+        let limit =
+          match cursor.frames with frame :: _ -> frame.fence | [] -> run.count
+        in
+        let frame =
+          {
+            start = cursor.boundary;
+            fence = find_fence run cursor.boundary ~limit;
+            repairs = 0;
+          }
+        in
+        cursor.frames <- frame :: cursor.frames;
+        frame
+  in
+  if
+    run.counters.recoveries < max_recoveries
+    && frame.repairs < max_repairs_per_item
+    && repair_namespace run cursor frame
+  then (
+    frame.repairs <- frame.repairs + 1;
+    run.counters.recoveries <- run.counters.recoveries + 1;
+    drive run cursor)
+  else if frame.fence <= at then (
+    (* The item that follows began before the token that failed: a body
+       left open read the first tokens of the next item ([inline] before
+       [fn]) and failed later. The parse goes back to the fence, where the
+       broken item has to end. *)
+    (match
+       List.find_opt (fun (index, _, _) -> index = frame.fence) cursor.history
+     with
+    | Some (index, checkpoint, braces) ->
+        cursor.checkpoint <- checkpoint;
+        cursor.index <- index;
+        cursor.braces <- braces;
+        cursor.look <- false;
+        cursor.statements <-
+          List.filter
+            (fun (index, _, _) -> index < frame.fence)
+            cursor.statements;
+        cursor.history <-
+          List.filter (fun (index, _, _) -> index < frame.fence) cursor.history
+    | None -> ());
+    if cursor.index = frame.fence then at_fence run cursor frame
+    else drop run cursor frame)
+  else if run.counters.recoveries >= max_recoveries then give_up run cursor
+  else if frame.repairs < max_repairs_per_item && repair run cursor frame then (
+    frame.repairs <- frame.repairs + 1;
+    run.counters.recoveries <- run.counters.recoveries + 1;
+    drive run cursor)
+  else drop run cursor frame
+
+(* The repairs that keep the broken item, in the order of what they lose:
+   nothing, one statement, one token. Each stays inside the fence. *)
+and repair run cursor frame =
+  let at = cursor.index in
+  let level = frame.start.level in
+  let entry = Scan.token run.scan at in
+  let braces () =
+    if Scan.item_only entry.Scan.token && cursor.braces > level then
+      match
+        virtual_braces cursor.checkpoint
+          ~position:(position_before run.scan at)
+          ~count:(cursor.braces - level)
+      with
+      | Some checkpoint when at_boundary checkpoint ->
+          run.counters.brace_restarts <- run.counters.brace_restarts + 1;
+          cursor.checkpoint <- checkpoint;
+          cursor.braces <- level;
+          set_boundary cursor ~at ~checkpoint ~level;
+          true
+      | _ -> false
+    else false
+  in
   let statement () =
     match statement_before state failure with
     | None -> None
