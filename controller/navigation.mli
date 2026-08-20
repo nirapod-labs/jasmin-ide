@@ -61,10 +61,22 @@ val references_json : Jide_engine.Locate.location list -> Yojson.Safe.t
 val hover_json : Jide_engine.Locate.hover option -> Yojson.Safe.t
 (** The result of a [textDocument/hover] request: the contents as one
     MarkupContent of the protocol's [markdown] kind, with the range the engine
-    gave, or [null]. *)
+    gave, or [null].
+
+    The kind is always [markdown]: the client's
+    [textDocument.hover.contentFormat] is not read, and no plain text answer
+    is offered. That is a client-capability negotiation this server does not
+    do; both clients this lab ships ask for markdown, so nothing is lost
+    there, and a client that asked for [plaintext] alone would be sent a
+    MarkupContent it may not render. *)
 
 val symbols_json : Jide_engine.Locate.symbol list -> Yojson.Safe.t
 (** The result of a [textDocument/documentSymbol] request: the tree of
     [DocumentSymbol], an empty array when there are none. A node carries
     [children] only when it has some and [detail] only when the engine gave
-    one, so a leaf is four members and no empty array. *)
+    one, so a leaf is four members and no empty array.
+
+    The hierarchy is always what is written. The client's
+    [textDocument.documentSymbol.hierarchicalDocumentSymbolSupport] is not
+    read, so a client that can only take the flat [SymbolInformation] form is
+    sent nested nodes instead. *)
