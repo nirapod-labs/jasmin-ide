@@ -959,11 +959,24 @@ and repair run cursor frame =
         let depth = (Scan.token run.scan source).Scan.depth in
         match Scan.next_statement run.scan ~from:at ~depth with
         | Some target
-          when target > source
-               && (not (was_tried state (source, target)))
-               && not (crosses_item state.scan ~source ~target) ->
-            Some (Restart { source; target; checkpoint; statement = true })
-        | _ -> None)
+          when target > source && target <= frame.fence
+               && not (List.mem (source, target) run.tried) ->
+            run.tried <- (source, target) :: run.tried;
+            run.counters.statement_restarts <-
+              run.counters.statement_restarts + 1;
+            note_recovered run ~from:source ~upto:target;
+            cursor.checkpoint <- checkpoint;
+            cursor.index <- target;
+            cursor.braces <- braces;
+            cursor.look <- false;
+            cursor.statements <-
+              List.filter
+                (fun (index, _, _) -> index <= source)
+                cursor.statements;
+            cursor.history <-
+              List.filter (fun (index, _, _) -> index < source) cursor.history;
+            true
+        | _ -> false)
   in
   let item () =
     let depth_of index = (Scan.token state.scan index).depth in
