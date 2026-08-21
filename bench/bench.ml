@@ -1,0 +1,351 @@
+(* Timing for the two budgets a whole check decides: the whole check of a
+   unit, and the interval from a keystroke to the diagnostics it produces.
+
+   Both run the server's own code in this process, so a number is the work
+   the server does and not a model of it. A build must not run beside a
+   measurement: `make bench` refuses to start while one is running, and
+   bench/run.sh says how it decides. *)
+
+let now = Unix.gettimeofday
+let default_runs = 20
+let default_count = 5
+let default_arch_name = "x86-64"
+let default_call_conv_name = "linux"
+
+let die message =
+  prerr_endline ("bench: " ^ message);
+  exit 2
+
+let parse_arch name =
+  match Jide_jasmin.Adapter.arch_of_string name with
+  | Some arch -> arch
+  | None ->
+      die
+        (Printf.sprintf "unknown architecture: %s (known: %s)" name
+           (String.concat ", " Jide_jasmin.Adapter.arch_names))
+
+let parse_call_conv name =
+  match Jide_jasmin.Adapter.call_conv_of_string name with
+  | Some call_conv -> call_conv
+  | None ->
+      die
+        (Printf.sprintf "unknown calling convention: %s (known: linux, windows)"
+           name)
+
+let usage =
+  String.concat "\n"
+    [
+      "usage: bench <command> [options]";
+      "";
+      "commands:";
+      "  whole      time a whole check (parse and type) of each unit";
+      "  keystroke  time a didChange from the protocol loop to the diagnostics";
+      "  largest    print the largest Jasmin files under a directory";
+      "";
+      "options:";
+      "  --units FILE      a table of units, one per line:";
+      "                    label<TAB>arch<TAB>idirs<TAB>path";
+      "                    arch is a name or `auto`; idirs is `-` or a";
+      "                    comma-separated list of name=path";
+      "  --arch NAME       architecture for the files on the command line";
+      "                    (default: the first path component that names one)";
+      "  --call-conv NAME  calling convention (default: linux)";
+      "  -I NAME=PATH      an include path, repeatable";
+      "  --label NAME      the row name for the files on the command line";
+      "  --runs N          checks per unit (default: 20)";
+      "  --samples         print every run as well as the summary";
+      "  --count N         how many files `largest` prints (default: 5)";
+      "  -h, --help        print this text";
+      "";
+      "A file named on the command line without --arch takes the architecture";
+      "its path names, so a corpus that keeps one directory per architecture";
+      "needs no options.";
+      "";
+      "The exit status is 0 when every unit ran, and 2 when the command line";
+      "or an input is wrong.";
+    ]
+
+(* A unit is one file, the architecture it is checked for and the include
+   paths its requires resolve through. [arch_name] is kept beside the parsed
+   architecture because the adapter exposes the names and the parser, not
+   the printer, and the table has to print what was used. *)
+type unit_ = {
+  label : string;
+  arch_name : string;
+  arch : Jide_jasmin.Adapter.arch;
+  call_conv : Jide_jasmin.Adapter.call_conv;
+  idirs : (string * string) list;
+  file : string;
+}
+
+let read_file path =
+  match In_channel.with_open_bin path In_channel.input_all with
+  | text -> text
+  | exception Sys_error message -> die ("cannot read " ^ path ^ ": " ^ message)
+
+(* The architecture a path names: the corpus keeps one directory per
+   architecture, so the first component that is an architecture name is the
+   one the file is checked for. *)
+let arch_name_of_path path =
+  let rec find = function
+    | [] -> default_arch_name
+    | part :: rest -> (
+        match Jide_jasmin.Adapter.arch_of_string part with
+        | Some _ -> part
+        | None -> find rest)
+  in
+  find (String.split_on_char '/' path)
+
+let make_unit ~label ~arch ~call_conv ~idirs ~file =
+  if not (Sys.file_exists file) then die ("no such file: " ^ file);
+  let arch_name =
+    match arch with Some name -> name | None -> arch_name_of_path file
+  in
+  { label; arch_name; arch = parse_arch arch_name; call_conv; idirs; file }
+
+let split_include value =
+  match String.index_opt value '=' with
+  | None | Some 0 -> die ("-I needs name=path, got: " ^ value)
+  | Some index ->
+      let name = String.sub value 0 index in
+      let path =
+        String.sub value (index + 1) (String.length value - index - 1)
+      in
+      (name, path)
+
+let split_idirs = function
+  | "-" | "" -> []
+  | value -> List.map split_include (String.split_on_char ',' value)
+
+(* -- statistics ---------------------------------------------------------- *)
+
+let median values =
+  match List.sort Float.compare values with
+  | [] -> 0.0
+  | sorted ->
+      let count = List.length sorted in
+      if count mod 2 = 1 then List.nth sorted (count / 2)
+      else
+        (List.nth sorted ((count / 2) - 1) +. List.nth sorted (count / 2))
+        /. 2.0
+
+(* Nearest rank: the ceil (q * n) -th smallest value. *)
+let percentile q values =
+  match List.sort Float.compare values with
+  | [] -> 0.0
+  | sorted ->
+      let count = List.length sorted in
+      let rank = int_of_float (ceil (q *. float_of_int count)) in
+      List.nth sorted (max 1 (min count rank) - 1)
+
+let maximum values =
+  List.fold_left (fun best value -> Float.max best value) 0.0 values
+
+let mean values =
+  match values with
+  | [] -> 0.0
+  | values ->
+      List.fold_left ( +. ) 0.0 values /. float_of_int (List.length values)
+
+(* One run, in milliseconds, with the value the run produced. *)
+let time f =
+  let start = now () in
+  let value = f () in
+  ((now () -. start) *. 1000.0, value)
+
+(* -- the whole check ----------------------------------------------------- *)
+
+let check unit_ ~text =
+  match
+    Jide_jasmin.Adapter.check unit_.arch unit_.call_conv ~file:unit_.file ~text
+      ~idirs:unit_.idirs
+  with
+  | result -> result
+  | exception exn ->
+      die
+        (Printf.sprintf "%s: the check raised %s" unit_.label
+           (Printexc.to_string exn))
+
+let diagnostics_of unit_ ~text result =
+  Jide_check.Report.of_check ~file:unit_.file ~text result
+
+let errors_of diagnostics =
+  List.length
+    (List.filter
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         diagnostic.severity = Jide_lang.Diagnostic.Error)
+       diagnostics)
+
+type whole_result = {
+  whole_unit : unit_;
+  checks : float list;
+  parses : float list;
+  diagnostics : int;
+  errors : int;
+}
+
+let measure_whole ~runs unit_ =
+  let text = read_file unit_.file in
+  (* The parses come first: twenty checks of a closure-heavy unit leave a
+     large heap behind, and a parse timed after them would carry the
+     collector's work as well as its own. *)
+  let parses =
+    List.init runs (fun _ ->
+        fst (time (fun () -> Jide_jasmin.Adapter.parse ~name:unit_.file text)))
+  in
+  let checks =
+    List.init runs (fun _ -> fst (time (fun () -> check unit_ ~text)))
+  in
+  let diagnostics = diagnostics_of unit_ ~text (check unit_ ~text) in
+  {
+    whole_unit = unit_;
+    checks;
+    parses;
+    diagnostics = List.length diagnostics;
+    errors = errors_of diagnostics;
+  }
+
+let print_whole_samples results =
+  List.iter
+    (fun result ->
+      List.iteri
+        (fun index milliseconds ->
+          Printf.printf "whole %s %d %.4f\n" result.whole_unit.label (index + 1)
+            milliseconds)
+        result.checks)
+    results
+
+let print_whole_table results =
+  Printf.printf "%-44s %-7s %3s %10s %8s %8s %8s %5s %6s\n" "unit" "arch" "n"
+    "median" "p95" "max" "parse" "diags" "errors";
+  List.iter
+    (fun result ->
+      Printf.printf "%-44s %-7s %3d %10.3f %8.3f %8.3f %8.3f %5d %6d\n"
+        result.whole_unit.label result.whole_unit.arch_name
+        (List.length result.checks)
+        (median result.checks)
+        (percentile 0.95 result.checks)
+        (maximum result.checks) (median result.parses) result.diagnostics
+        result.errors)
+    results
+
+(* -- keystroke to diagnostics -------------------------------------------- *)
+
+let request id method_ params =
+  Jsonrpc.Packet.Request
+    (Jsonrpc.Request.create ~id:(`Int id) ~method_
+       ~params:(Jsonrpc.Structured.t_of_yojson params)
+       ())
+
+let notification method_ params =
+  Jsonrpc.Packet.Notification
+    (Jsonrpc.Notification.create ~method_
+       ~params:(Jsonrpc.Structured.t_of_yojson params)
+       ())
+
+let initialize_params : Yojson.Safe.t = `Assoc [ ("capabilities", `Assoc []) ]
+
+let open_params ~uri ~text : Yojson.Safe.t =
+  `Assoc
+    [
+      ( "textDocument",
+        `Assoc
+          [
+            ("uri", `String uri);
+            ("languageId", `String "jasmin");
+            ("version", `Int 1);
+            ("text", `String text);
+          ] );
+    ]
+
+let change_params ~uri ~version ~text : Yojson.Safe.t =
+  `Assoc
+    [
+      ( "textDocument",
+        `Assoc [ ("uri", `String uri); ("version", `Int version) ] );
+      ("contentChanges", `List [ `Assoc [ ("text", `String text) ] ]);
+    ]
+
+(* One keystroke: a space typed at the start of the second line, which no
+   Jasmin construct depends on, so the text stays valid and the check still
+   measures a whole check. Attempt [n] inserts [n] spaces, so every run gets
+   a text of its own, as a real edit does. *)
+let edit text attempt =
+  let offset =
+    match String.index_opt text '\n' with Some index -> index + 1 | None -> 0
+  in
+  let rest = String.sub text offset (String.length text - offset) in
+  String.sub text 0 offset ^ String.make attempt ' ' ^ rest
+
+type keystroke_sample = {
+  total : float;
+  loop : float;
+  checked : float;
+  converted : float;
+  found : int;
+  failed : int;
+}
+
+type keystroke_result = {
+  keystroke_unit : unit_;
+  samples : keystroke_sample list;
+  log : string list;
+}
+
+(* The interval the keystroke budget names: the packet arrives at the loop,
+   the loop stores the change, the check runs and the diagnostics are built.
+   The design's debounce and its publish step are not in the tree at this
+   commit, so neither contributes here. *)
+let run_keystroke ~attempt server unit_ base uri =
+  let text = edit base attempt in
+  let packet =
+    notification "textDocument/didChange"
+      (change_params ~uri ~version:(attempt + 1) ~text)
+  in
+  let start = now () in
+  ignore (Jide_controller.Server.handle_packet server packet);
+  let after_loop = now () in
+  let stored =
+    match
+      Jide_engine.Engine.document (Jide_controller.Server.engine server) ~uri
+    with
+    | Some document -> Jide_engine.Document.text document
+    | None -> die (unit_.label ^ ": the loop left the document out of the store")
+  in
+  if not (String.equal stored text) then
+    die (unit_.label ^ ": the loop stored other text than the change carried");
+  let result = check unit_ ~text:stored in
+  let after_check = now () in
+  let diagnostics = diagnostics_of unit_ ~text:stored result in
+  let stop = now () in
+  {
+    total = (stop -. start) *. 1000.0;
+    loop = (after_loop -. start) *. 1000.0;
+    checked = (after_check -. after_loop) *. 1000.0;
+    converted = (stop -. after_check) *. 1000.0;
+    found = List.length diagnostics;
+    failed = errors_of diagnostics;
+  }
+
+let measure_keystroke ~runs unit_ =
+  let base = read_file unit_.file in
+  let uri = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path unit_.file) in
+  let log = ref [] in
+  let server =
+    Jide_controller.Server.create ~log:(fun message -> log := message :: !log)
+  in
+  ignore
+    (Jide_controller.Server.handle_packet server
+       (request 1 "initialize" initialize_params));
+  (match Jide_controller.Server.state server with
+  | Jide_controller.Server.Running -> ()
+  | _ -> die (unit_.label ^ ": the server did not reach the running state"));
+  ignore
+    (Jide_controller.Server.handle_packet server
+       (notification "textDocument/didOpen" (open_params ~uri ~text:base)));
+  let samples =
+    List.init runs (fun index ->
+        run_keystroke ~attempt:(index + 1) server unit_ base uri)
+  in
+  { keystroke_unit = unit_; samples; log = List.rev !log }
+
