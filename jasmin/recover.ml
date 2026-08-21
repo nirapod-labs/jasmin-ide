@@ -1123,115 +1123,115 @@ and repair_namespace run cursor frame =
           else None)
         valueless
     in
-    match pick !(state.boundaries) with
-    | Some _ as attempt -> attempt
-    | None ->
-        (* No token that begins an item with a keyword of its own is left
-           ahead of the hole, so the item after it can only be a global. *)
-        let rec any = function
-          | [] -> None
-          | ((source, _) as boundary) :: rest -> (
-              match
-                choose_verified boundary
-                  (Scan.type_candidates state.scan ~from:failure
-                     ~depth:(Some (depth_of source)))
-              with
-              | Some _ as attempt -> attempt
-              | None -> (
-                  match
-                    choose_verified boundary
-                      (Scan.type_candidates state.scan ~from:failure ~depth:None)
-                  with
-                  | Some _ as attempt -> attempt
-                  | None -> any rest))
-        in
-        any !(state.boundaries)
-  in
-  match statement () with Some attempt -> Some attempt | None -> item ()
+    let deleted =
+      if whole cursor.checkpoint ~from:(at + 1) cursor.braces then
+        [ (cursor.checkpoint, at + 1, cursor.braces) ]
+      else []
+    in
+    match deleted @ written with
+    | (checkpoint, index, braces) :: _ -> take checkpoint ~index ~braces
+    | [] -> false
+  else if cursor.braces = level then
+    (* The keyword is missing, or its token is not the keyword: the name and
+       the brace of a header are there, at the item's first token or after
+       it. *)
+    let header index =
+      index + 1 < run.count
+      && (match (Scan.token run.scan index).Scan.token with
+         | Parser.NID _ -> true
+         | _ -> false)
+      && (Scan.token run.scan (index + 1)).Scan.token = Parser.LBRACE
+    in
+    let position = first.Scan.start_pos in
+    let attempt ~from =
+      match virtual_token start.checkpoint Parser.NAMESPACE position with
+      | Some next when whole next ~from level -> Some next
+      | _ -> None
+    in
+    match if header start.at then attempt ~from:start.at else None with
+    | Some next -> take next ~index:start.at ~braces:level
+    | None -> (
+        match
+          if header (start.at + 1) then attempt ~from:(start.at + 1) else None
+        with
+        | Some next -> take next ~index:(start.at + 1) ~braces:level
+        | None -> false)
+  else false
+
+(* The broken item is dropped: one stub for its tokens, and the parse goes on
+   at the fence from the state of the boundary it began at. *)
+and drop run cursor frame =
+  (* A keyword that begins an item and nothing else, between the broken item
+     and its fence, is a second broken item: it is stubbed on its own, so two
+     holes are two markers. The fence stays where it is, since no whole item
+     begins before it. *)
+  let upto = next_keyword run ~from:frame.start.at ~fence:frame.fence in
+  let environment = normalise frame.start.checkpoint in
+  note_dropped
+    ?namespace:(Option.bind environment namespace_of)
+    run ~from:frame.start.at ~upto;
+  run.counters.recoveries <- run.counters.recoveries + 1;
+  run.counters.item_restarts <- run.counters.item_restarts + 1;
+  let level = frame.start.level in
+  match environment with
+  | None -> []
+  | Some environment ->
+      let working = resume_at run environment ~target:upto in
+      cursor.index <- upto;
+      cursor.braces <- level;
+      cursor.look <- false;
+      set_boundary cursor ~at:upto
+        ~checkpoint:(I.input_needed environment)
+        ~working ~level;
+      (if upto < frame.fence then (
+         frame.start <- cursor.boundary;
+         frame.repairs <- 0)
+       else
+         let rec pop = function
+           | [] -> []
+           | inner :: rest -> if inner == frame then rest else pop rest
+         in
+         cursor.frames <- pop cursor.frames);
+      drive run cursor
+
+(* The bound is reached: the rest of the buffer is one stub, and the items
+   already read are kept. *)
+and give_up run cursor =
+  let boundary = cursor.boundary in
+  let environment = normalise boundary.checkpoint in
+  note_dropped
+    ?namespace:(Option.bind environment namespace_of)
+    run ~from:boundary.at ~upto:run.count;
+  cursor.frames <- [];
+  match environment with
+  | None -> []
+  | Some environment ->
+      let checkpoint = I.input_needed environment in
+      cursor.checkpoint <- checkpoint;
+      cursor.index <- run.count;
+      cursor.braces <- boundary.level;
+      cursor.look <- false;
+      set_boundary cursor ~at:run.count ~checkpoint ~level:boundary.level;
+      at_end run cursor
 
 let recover ~name ~text : t =
   let counters = no_counters () in
-  let dropped = ref [] in
-  let recovered = ref [] in
-  let diagnostics = ref [] in
-  let raised = ref 0 in
-  let note_raise exn =
-    if !raised < 3 then (
-      incr raised;
-      diagnostics := Error.to_diagnostic (Error.of_exn exn) :: !diagnostics)
-  in
-  (* Where an item restart would go, or the end of the buffer when the
-     broken item is the last one. *)
-  let target_of state ~failure =
-    match Scan.next_item state.scan ~from:failure with
-    | Some target -> target
-    | None -> Scan.count state.scan
-  in
-  (* Where the bytes of a hole end: where the item that follows it begins,
-     which is the end of the last token in the hole. The two abut, as they do
-     in a parse that was never interrupted, so a stub never overlaps the item
-     after it — a typing diagnostic in that item is the program's own error
-     and must not be dropped with the hole's. A hole that runs off the end of
-     the buffer ends with the buffer. *)
-  let hole_end state upto =
-    if upto <= 0 then 0
-    else if upto >= Scan.count state.scan then Scan.start_byte state.scan upto
-    else (position_before state.scan upto).Lexing.pos_cnum
-  in
-  (* Where the hole a byte restart covers begins, as a token index. Until the
-     restart has reported anything, that is the whole open item
-     ([closed_item]). Once it has, the bytes before [stubbed_upto] are a stub
-     already and the question is whether the bytes after it are the rest of
-     the same item or an item of their own: a token that can begin a top-level
-     item begins a new one, and anything else — a statement of the body the
-     item opens — is the tail of the item that is already reported. The tail
-     is reported from the item's own start, which replaces its stub with one
-     covering the whole item, instead of as a second item the file does not
-     have. *)
-  let hole_start state target =
-    let stubbed = state.stubbed_upto in
-    if stubbed <= state.closed_item || stubbed >= target then state.closed_item
-    else if Scan.item_only (Scan.token state.scan stubbed).token then stubbed
-    else state.closed_item
-  in
-  (* One stub and one recovered region for the bytes of one hole. Two holes
-     are two stubs even when one of them is first seen as part of a wider
-     restart, which is why the restart that follows one starts at the end of
-     the stub already reported ([stubbed_upto]) rather than at the last
-     completed item. A restart that has nothing new to report adds nothing,
-     and one that sees the same hole again from further out replaces it — the
-     same item, reported once, over all of its bytes. *)
-  let note_dropped state ~from ~upto =
-    let span =
-      Scan.span state.scan
-        ~start_byte:(Scan.start_byte state.scan from)
-        ~end_byte:(hole_end state upto)
-    in
-    (* The bytes the stubs already reported, which are disjoint and in source
-       order: a hole that lies entirely inside them has nothing new to report,
-       however many of them it takes to cover it. That is what a rewrite of
-       the prefix sees: the holes it blanked are the stubs it was reported
-       as, and the restart that follows one of them reads the buffer from the
-       beginning again. Bytes between two reported holes are trivia — a line
-       break between two broken items — and they are reported as missing with
-       the holes they sit between. *)
-    let covered (span : Jide_lang.Span.t) =
-      let text = Scan.text state.scan in
-      let length = String.length text in
-      let blank start_byte end_byte =
-        let rec loop index =
-          index >= end_byte
-          ||
-          match text.[index] with
-          | ' ' | '\t' | '\r' | '\n' -> loop (index + 1)
-          | _ -> false
-        in
-        loop (max 0 start_byte)
+  match Scan.make ~name text with
+  | Error diagnostic -> { (empty counters) with diagnostics = [ diagnostic ] }
+  | Ok scan ->
+      let run =
+        {
+          scan;
+          count = Scan.count scan;
+          after = after_depths scan;
+          counters;
+          dropped = [];
+          recovered = Scan.blanked scan;
+          tried = [];
+        }
       in
-      let spans =
-        List.filter_map (function Dropped { span; _ } -> Some span) !dropped
-        |> List.sort (fun (a : Jide_lang.Span.t) (b : Jide_lang.Span.t) ->
-               compare a.Jide_lang.Span.start_byte b.Jide_lang.Span.start_byte)
+      let initial =
+        start_checkpoint ~name:(Scan.name scan) ~position:initial_position
       in
       let rec walk reach = function
         | _ when reach >= span.Jide_lang.Span.end_byte -> true
