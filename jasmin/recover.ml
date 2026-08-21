@@ -951,11 +951,13 @@ and repair run cursor frame =
     else false
   in
   let statement () =
-    match statement_before state failure with
-    | None -> None
-    | Some (source, checkpoint) -> (
-        let depth = (Scan.token state.scan source).depth in
-        match Scan.next_statement state.scan ~from:failure ~depth with
+    match
+      List.find_opt (fun (index, _, _) -> index <= at) cursor.statements
+    with
+    | None -> false
+    | Some (source, checkpoint, braces) -> (
+        let depth = (Scan.token run.scan source).Scan.depth in
+        match Scan.next_statement run.scan ~from:at ~depth with
         | Some target
           when target > source
                && (not (was_tried state (source, target)))
