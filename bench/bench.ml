@@ -169,3 +169,120 @@ let check unit_ ~text =
 let diagnostics_of unit_ ~text result =
   Jide_check.Report.of_check ~file:unit_.file ~text result
 
+let errors_of diagnostics =
+  List.length
+    (List.filter
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         diagnostic.severity = Jide_lang.Diagnostic.Error)
+       diagnostics)
+
+type whole_result = {
+  whole_unit : unit_;
+  checks : float list;
+  parses : float list;
+  diagnostics : int;
+  errors : int;
+}
+
+let measure_whole ~runs unit_ =
+  let text = read_file unit_.file in
+  (* The parses come first: twenty checks of a closure-heavy unit leave a
+     large heap behind, and a parse timed after them would carry the
+     collector's work as well as its own. *)
+  let parses =
+    List.init runs (fun _ ->
+        fst (time (fun () -> Jide_jasmin.Adapter.parse ~name:unit_.file text)))
+  in
+  let checks =
+    List.init runs (fun _ -> fst (time (fun () -> check unit_ ~text)))
+  in
+  let diagnostics = diagnostics_of unit_ ~text (check unit_ ~text) in
+  {
+    whole_unit = unit_;
+    checks;
+    parses;
+    diagnostics = List.length diagnostics;
+    errors = errors_of diagnostics;
+  }
+
+let print_whole_samples results =
+  List.iter
+    (fun result ->
+      List.iteri
+        (fun index milliseconds ->
+          Printf.printf "whole %s %d %.4f\n" result.whole_unit.label (index + 1)
+            milliseconds)
+        result.checks)
+    results
+
+let print_whole_table results =
+  Printf.printf "%-44s %-7s %3s %10s %8s %8s %8s %5s %6s\n" "unit" "arch" "n"
+    "median" "p95" "max" "parse" "diags" "errors";
+  List.iter
+    (fun result ->
+      Printf.printf "%-44s %-7s %3d %10.3f %8.3f %8.3f %8.3f %5d %6d\n"
+        result.whole_unit.label result.whole_unit.arch_name
+        (List.length result.checks)
+        (median result.checks)
+        (percentile 0.95 result.checks)
+        (maximum result.checks) (median result.parses) result.diagnostics
+        result.errors)
+    results
+
+(* -- keystroke to diagnostics -------------------------------------------- *)
+
+let request id method_ params =
+  Jsonrpc.Packet.Request
+    (Jsonrpc.Request.create ~id:(`Int id) ~method_
+       ~params:(Jsonrpc.Structured.t_of_yojson params)
+       ())
+
+let notification method_ params =
+  Jsonrpc.Packet.Notification
+    (Jsonrpc.Notification.create ~method_
+       ~params:(Jsonrpc.Structured.t_of_yojson params)
+       ())
+
+let initialize_params : Yojson.Safe.t = `Assoc [ ("capabilities", `Assoc []) ]
+
+let open_params ~uri ~text : Yojson.Safe.t =
+  `Assoc
+    [
+      ( "textDocument",
+        `Assoc
+          [
+            ("uri", `String uri);
+            ("languageId", `String "jasmin");
+            ("version", `Int 1);
+            ("text", `String text);
+          ] );
+    ]
+
+let change_params ~uri ~version ~text : Yojson.Safe.t =
+  `Assoc
+    [
+      ( "textDocument",
+        `Assoc [ ("uri", `String uri); ("version", `Int version) ] );
+      ("contentChanges", `List [ `Assoc [ ("text", `String text) ] ]);
+    ]
+
+(* One keystroke: a space typed at the start of the second line, which no
+   Jasmin construct depends on, so the text stays valid and the check still
+   measures a whole check. Attempt [n] inserts [n] spaces, so every run gets
+   a text of its own, as a real edit does. *)
+let edit text attempt =
+  let offset =
+    match String.index_opt text '\n' with Some index -> index + 1 | None -> 0
+  in
+  let rest = String.sub text offset (String.length text - offset) in
+  String.sub text 0 offset ^ String.make attempt ' ' ^ rest
+
+type keystroke_sample = {
+  total : float;
+  loop : float;
+  checked : float;
+  converted : float;
+  found : int;
+  failed : int;
+}
+
