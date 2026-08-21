@@ -286,3 +286,66 @@ type keystroke_sample = {
   failed : int;
 }
 
+type keystroke_result = {
+  keystroke_unit : unit_;
+  samples : keystroke_sample list;
+  log : string list;
+}
+
+(* The interval the keystroke budget names: the packet arrives at the loop,
+   the loop stores the change, the check runs and the diagnostics are built.
+   The design's debounce and its publish step are not in the tree at this
+   commit, so neither contributes here. *)
+let run_keystroke ~attempt server unit_ base uri =
+  let text = edit base attempt in
+  let packet =
+    notification "textDocument/didChange"
+      (change_params ~uri ~version:(attempt + 1) ~text)
+  in
+  let start = now () in
+  ignore (Jide_controller.Server.handle_packet server packet);
+  let after_loop = now () in
+  let stored =
+    match
+      Jide_engine.Engine.document (Jide_controller.Server.engine server) ~uri
+    with
+    | Some document -> Jide_engine.Document.text document
+    | None -> die (unit_.label ^ ": the loop left the document out of the store")
+  in
+  if not (String.equal stored text) then
+    die (unit_.label ^ ": the loop stored other text than the change carried");
+  let result = check unit_ ~text:stored in
+  let after_check = now () in
+  let diagnostics = diagnostics_of unit_ ~text:stored result in
+  let stop = now () in
+  {
+    total = (stop -. start) *. 1000.0;
+    loop = (after_loop -. start) *. 1000.0;
+    checked = (after_check -. after_loop) *. 1000.0;
+    converted = (stop -. after_check) *. 1000.0;
+    found = List.length diagnostics;
+    failed = errors_of diagnostics;
+  }
+
+let measure_keystroke ~runs unit_ =
+  let base = read_file unit_.file in
+  let uri = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path unit_.file) in
+  let log = ref [] in
+  let server =
+    Jide_controller.Server.create ~log:(fun message -> log := message :: !log)
+  in
+  ignore
+    (Jide_controller.Server.handle_packet server
+       (request 1 "initialize" initialize_params));
+  (match Jide_controller.Server.state server with
+  | Jide_controller.Server.Running -> ()
+  | _ -> die (unit_.label ^ ": the server did not reach the running state"));
+  ignore
+    (Jide_controller.Server.handle_packet server
+       (notification "textDocument/didOpen" (open_params ~uri ~text:base)));
+  let samples =
+    List.init runs (fun index ->
+        run_keystroke ~attempt:(index + 1) server unit_ base uri)
+  in
+  { keystroke_unit = unit_; samples; log = List.rev !log }
+
