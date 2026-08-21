@@ -978,68 +978,150 @@ and repair run cursor frame =
             true
         | _ -> false)
   in
-  let item () =
-    let depth_of index = (Scan.token state.scan index).depth in
-    let fit (source, _) target =
-      source <= failure
-      && source >= state.closed_item
-      && target > source
-      && depth_of target >= depth_of source
-      && not (was_tried state (source, target))
-    in
-    let restart (source, checkpoint) target =
-      Some (Restart { source; target; checkpoint; statement = false })
-    in
-    let choose (source, checkpoint) target =
+  (* A token deleted, or a [;] and a [}] written for each other, kept when
+     the three tokens after it parse. Where both do, the one that leaves the
+     parser at the depth the rest of the buffer closes is taken: the text
+     after the fault is the text as it was, so that depth is the true one. *)
+  let token_repair () =
+    let deleted =
       if
-        fit (source, checkpoint) target
-        && accepts checkpoint (Scan.token state.scan target)
-      then restart (source, checkpoint) target
-      else None
+        survives run cursor.checkpoint ~from:(at + 1) ~braces:cursor.braces
+          ~level ~fence:frame.fence
+      then [ (None, cursor.checkpoint, cursor.braces) ]
+      else []
     in
-    (* A token that begins a global is a restart target only when an item
-       really begins at it. {!accepts} cannot tell a global's type from a
-       name that continues the broken item, so the candidate is handed to the
-       parser first: the one that comes back with a [top] production is the
-       next item, and one that does not is simply the next candidate. The
-       keyword targets below are asked first and are unchanged; this search
-       reaches the items the item set cannot name. *)
-    let choose_verified (source, checkpoint) targets =
-      let rec loop = function
-        | [] -> None
-        | target :: rest -> (
-            match choose (source, checkpoint) target with
-            | Some _ as attempt ->
-                if item_begins state.scan ~checkpoint ~target then attempt
-                else loop rest
-            | None -> loop rest)
-      in
-      loop targets
-    in
-    (* Newest checkpoint first. From each, the nearest item at its own depth
-       keeps the block the checkpoint is in (the items of a namespace whose
-       neighbour is broken), and the smallest depth left in the buffer is the
-       fallback for a block that was never closed. *)
-    let rec pick = function
-      | [] -> None
-      | ((source, _) as boundary) :: rest -> (
-          let inside =
-            match
-              Scan.next_item_at_depth state.scan ~from:failure
-                ~depth:(depth_of source)
-            with
-            | Some target -> choose boundary target
-            | None -> None
+    let replaced =
+      match entry.Scan.token with
+      | (Parser.RBRACE | Parser.SEMICOLON) as written -> (
+          let token =
+            if written = Parser.RBRACE then Parser.SEMICOLON else Parser.RBRACE
           in
-          match inside with
-          | Some _ as attempt -> attempt
-          | None -> (
-              match Scan.next_item state.scan ~from:failure with
-              | Some target -> (
-                  match choose boundary target with
-                  | Some _ as attempt -> attempt
-                  | None -> pick rest)
-              | None -> None))
+          match
+            offer cursor.checkpoint
+              (token, entry.Scan.start_pos, entry.Scan.end_pos)
+          with
+          | `Need checkpoint
+            when survives run checkpoint ~from:(at + 1)
+                   ~braces:(cursor.braces + brace_delta token)
+                   ~level ~fence:frame.fence ->
+              [ (Some token, checkpoint, cursor.braces + brace_delta token) ]
+          | _ -> [])
+      | _ -> []
+    in
+    let options = deleted @ replaced in
+    let consistent (_, _, braces) = braces = run.after.(at + 1) in
+    let chosen =
+      match List.find_opt consistent options with
+      | Some option -> Some option
+      | None -> ( match options with option :: _ -> Some option | [] -> None)
+    in
+    match chosen with
+    | None -> false
+    | Some (written, checkpoint, braces) ->
+        run.counters.token_repairs <- run.counters.token_repairs + 1;
+        (* The token's own bytes, not the trivia after it, which belongs to
+           the item that may begin there. *)
+        run.recovered <-
+          Scan.span run.scan ~start_byte:entry.Scan.start_byte
+            ~end_byte:entry.Scan.end_byte
+          :: run.recovered;
+        cursor.index <- at + 1;
+        cursor.braces <- braces;
+        (match written with
+        | Some token ->
+            cursor.checkpoint <- checkpoint;
+            cursor.look <- may_precede_item token
+        | None -> (
+            (* The token after a deleted one is read with the state before
+               it. If that state is a boundary, the item that begins there
+               starts where the deleted token ended, the end of the token
+               before it in the buffer. *)
+            cursor.look <- false;
+            match
+              if at + 1 < run.count && at_boundary checkpoint then
+                normalise checkpoint
+              else None
+            with
+            | Some environment ->
+                set_boundary cursor ~at:(at + 1)
+                  ~checkpoint:(I.input_needed environment)
+                  ~working:(resume_at run environment ~target:(at + 1))
+                  ~level:braces
+            | None -> cursor.look <- true));
+        true
+  in
+  braces () || statement () || token_repair ()
+
+(* A namespace is the one item that holds items, so a namespace whose
+   header is broken would take every item inside it with it. One token
+   written, deleted or replaced in the header is tried, and kept only when
+   the whole namespace then parses, up to the fence. *)
+and repair_namespace run cursor frame =
+  let at = cursor.index in
+  let level = frame.start.level in
+
+  let start = frame.start in
+  let first = Scan.token run.scan start.at in
+  let fence =
+    lazy
+      (find_fence ~outside:true run start
+         ~limit:
+           (match cursor.frames with
+           | _ :: outer :: _ -> outer.fence
+           | _ -> run.count))
+  in
+  let whole checkpoint ~from =
+    let fence = Lazy.force fence in
+    let rec loop checkpoint index braces =
+      if index >= fence || index >= run.count then
+        index = fence && braces = level && at_boundary checkpoint
+      else
+        let token = (Scan.token run.scan index).Scan.token in
+        match offer checkpoint (Scan.triple run.scan index) with
+        | `Need next -> loop next (index + 1) (braces + brace_delta token)
+        | `Accepted _ | `Error -> false
+    in
+    loop checkpoint from
+  in
+  let take checkpoint ~index ~braces =
+    frame.fence <- Lazy.force fence;
+    run.counters.token_repairs <- run.counters.token_repairs + 1;
+    (let first = min index at and last = max index at in
+     if last < run.count then
+       run.recovered <-
+         Scan.span run.scan
+           ~start_byte:(Scan.token run.scan first).Scan.start_byte
+           ~end_byte:(Scan.token run.scan last).Scan.end_byte
+         :: run.recovered);
+    cursor.checkpoint <- checkpoint;
+    cursor.index <- index;
+    cursor.braces <- braces;
+    cursor.look <- false;
+    cursor.statements <- [];
+    cursor.history <- [ (index, checkpoint, braces) ];
+    true
+  in
+  let virtual_token checkpoint token position =
+    match offer checkpoint (token, position, position) with
+    | `Need next -> Some next
+    | `Accepted _ | `Error -> None
+  in
+  if first.Scan.token = Parser.NAMESPACE then
+    (* The keyword is there: one token at the failure is missing, extra or
+       wrong. *)
+    let position = position_before run.scan at in
+    let written =
+      List.filter_map
+        (fun token ->
+          if try I.acceptable cursor.checkpoint token position with _ -> false
+          then
+            match virtual_token cursor.checkpoint token position with
+            | Some next
+              when whole next ~from:at (cursor.braces + brace_delta token) ->
+                Some (next, at, cursor.braces + brace_delta token)
+            | _ -> None
+          else None)
+        valueless
     in
     match pick !(state.boundaries) with
     | Some _ as attempt -> attempt
