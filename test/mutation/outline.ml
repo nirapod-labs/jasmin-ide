@@ -128,13 +128,33 @@ let compare ~(original : entry list) ~(mutant : entry list) ~edit_start
      holds it. Pairing the mutant by position would take that item for the
      first one after the edit and shift every pair after it, so the mutant is
      read in the original's coordinates and the same test splits it: an entry
-     that covers the edit, mapped back, is not an away item either. *)
+     that covers the edit, mapped back, is not an away item either.
+
+     The covering item may also have shrunk: a namespace cut in the middle
+     of its body ends where the cut is, so mapped back it no longer covers
+     the edit, and by position alone it would stand before its own items.
+     It is still the item that covered the edit, and it is recognised as
+     that item by what does not move: its kind, its name and its start,
+     which lies before the edit. No away item shares all three with it. *)
+  let covering =
+    List.filter
+      (fun entry ->
+        not (entry.end_byte <= edit_start || entry.start_byte >= edit_end))
+      original
+  in
+  let covers entry =
+    List.exists
+      (fun item ->
+        item.kind = entry.kind && item.name = entry.name
+        && item.start_byte = map_start entry.start_byte)
+      covering
+  in
   let mutant =
     List.filter
       (fun entry ->
         let start_byte = map_start entry.start_byte
         and end_byte = map_end entry.end_byte in
-        end_byte <= edit_start || start_byte >= edit_end)
+        (end_byte <= edit_start || start_byte >= edit_end) && not (covers entry))
       mutant
   in
   if List.length mutant < away then

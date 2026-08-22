@@ -79,33 +79,6 @@ type use = {
     occurrence the compiler made up itself, which has no place in the source,
     is not reported. *)
 
-type call = {
-  c_span : Jide_lang.Span.t option;
-  c_callee : string;
-  c_item : Jide_lang.Span.t;
-  c_range : Jide_lang.Span.t;
-  c_file : string;
-}
-(** One call in a typed body, for example the [add (s)] of [s = add(s)].
-    [c_callee] is the name the compiler typed the call against. [c_span] is
-    the range that name was written at, and it is [None] when the syntax holds
-    no such range for the call. [c_range] is the range of the whole instruction
-    that makes the call, so [c_span] lies inside it, and [c_item] is the range
-    of the item the instruction belongs to, that item's {!i_span}. The
-    compiler's typed call keeps the function's name and not the range it was
-    written at, so [c_span] comes from the syntax instruction with the same
-    range. One instruction can make several calls, a declaration with several
-    initialisers does, and those calls are paired with the syntax in the order
-    they are written. A call with no name range is still reported, so that a
-    reader counts it.
-
-    [c_file] is the file both ranges index. It is the checked file for a call
-    the file writes itself, and the required file for a call written in a
-    [.jinc] the checked file pulls in: the parser splices a required file's
-    items into the requiring one, and their ranges stay in the required file's
-    own bytes. A reader that takes the ranges for the checked file's bytes
-    reads another file's text, so the field is what keeps the two apart. *)
-
 type item_kind = Function | Param | Global
 
 type item = {
@@ -124,18 +97,14 @@ type item = {
     initialiser nor a use is not there: the compiler's typing discards it,
     and these facts are the compiler's answer. *)
 
-type t = { items : item list; uses : use list; calls : call list }
+type t = { items : item list; uses : use list }
 (** [items] are the items of one checked file, in source order, and they
-    all belong to that file; an item a required [.jinc] declares is spliced
-    into the requiring file and keeps its own file's ranges, as {!call.c_file}
-    says. [uses] are the variable occurrences the items' bodies hold, in source
-    order by the byte an occurrence starts at; a parameter and a global have no
-    body and add none. [calls] are the calls the bodies make, in the same
-    order; an item the compiler never typed, and a body it never reached, add
-    none. *)
+    all belong to that file. [uses] are the variable occurrences the items'
+    bodies hold, in source order by the byte an occurrence starts at; a
+    parameter and a global have no body and add none. *)
 
 val empty : t
 
 val merge : t -> t -> t
-(** [merge earlier later] holds both sets of items and both sets of uses and
-    calls, in that order. *)
+(** [merge earlier later] holds both sets of items and both sets of uses, in
+    that order. *)

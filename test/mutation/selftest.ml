@@ -200,6 +200,66 @@ let test_boundary () =
   check "the mapping the harness used before lost the item before the edit"
     (not old.Outline.identity_ok)
 
+(* A covering item that shrank. In
+
+     namespace C {\n  u64 x = 1;\n  fn f() { }\n}\n
+
+   the namespace covers bytes 0..41, its global [C::x] 13..26 and its
+   function [C::f] 26..39. Truncating at [fn] (byte 29) leaves the global
+   whole and the namespace open; a recovery that closes the namespace where
+   the text ends gives it bytes 0..26. The global is the one item away from
+   the edit and it is unchanged, so the outline criterion holds. The
+   comparison the harness used before kept the namespace because, mapped
+   back, it ends before the cut: it then paired the namespace with the global
+   and reported a change the truncation did not make. *)
+let test_shrunk_cover () =
+  let source = "namespace C {\n  u64 x = 1;\n  fn f() { }\n}\n" in
+  let tokens = Array.of_list (tokens_of source) in
+  let site =
+    let rec find index =
+      if tokens.(index).Token.text = "fn" then index else find (index + 1)
+    in
+    find 0
+  in
+  let cut = Mutant.truncate ~source tokens site in
+  check "the hand-checked example truncates at byte 29"
+    (cut.edit_start = 29 && cut.edit_end = String.length source);
+  let original =
+    [
+      entry "namespace" "C" 0 41;
+      entry "global" "C::x" 13 26;
+      entry "fn" "C::f" 26 39;
+    ]
+  in
+  let compare mutant =
+    Outline.compare ~original ~mutant ~edit_start:cut.edit_start
+      ~edit_end:cut.edit_end ~map_start:cut.map_start ~map_end:cut.map_end
+  in
+  let closed =
+    compare [ entry "namespace" "C" 0 26; entry "global" "C::x" 13 26 ]
+  in
+  check "a namespace that shrank to the cut is still the item that covered it"
+    (closed.Outline.identity_ok && closed.Outline.span_ok
+   && closed.Outline.away = 1);
+  let lost = compare [ entry "namespace" "C" 0 26 ] in
+  check "and the global it held is still compared"
+    (not lost.Outline.identity_ok);
+  let renamed =
+    compare [ entry "namespace" "C" 0 26; entry "global" "C::y" 13 26 ]
+  in
+  check "under its own name" (not renamed.Outline.identity_ok);
+  let by_position_only =
+    List.filter
+      (fun (item : Outline.entry) ->
+        cut.map_end item.end_byte <= cut.edit_start
+        || cut.map_start item.start_byte >= cut.edit_end)
+      [ entry "namespace" "C" 0 26; entry "global" "C::x" 13 26 ]
+  in
+  check "by position alone the namespace stood first, before its global"
+    (match by_position_only with
+    | first :: _ -> first.Outline.kind = "namespace"
+    | [] -> false)
+
 let test_parse () =
   let program =
     "fn a(reg u32 x) -> reg u32 { return x; }\n\
@@ -246,6 +306,7 @@ let run () =
   test_mutations ();
   test_comparison ();
   test_boundary ();
+  test_shrunk_cover ();
   test_parse ();
   test_isolation ();
   if !failures = 0 then (
