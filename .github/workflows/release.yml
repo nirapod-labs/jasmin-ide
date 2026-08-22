@@ -15,9 +15,17 @@
 #   contents: write      the draft release, which creates a draft and no
 #                        published release;
 #   attestations: write  the attestation job;
-#   id-token: write      the two publishing jobs and no others. It mints an
-#                        identity token, which is what a registry checks, so it
-#                        never leaves the publish stage.
+#   id-token: write      the two publishing jobs and the attestation job. It
+#                        mints an identity token: a registry checks one, and the
+#                        attestation action uses one to obtain the certificate
+#                        it signs with. Nothing else in this file may hold it,
+#                        and `scripts/check-workflows.sh` reads every job's
+#                        effective permissions to say so.
+#
+# The attestation job is the one place the design's "`id-token: write` only in
+# the publishing jobs" is read wider than its words: an attestation is itself a
+# publication, to the transparency log, so the job takes the same release gate
+# and no other job may hold either scope. `docs/edge.md` records the choice.
 
 name: release
 
@@ -99,6 +107,10 @@ jobs:
         uses: actions/checkout@PIN
 
       - name: Build twice in an Alpine container and check what is linked
+        # The image is a tag, not a digest, and the packages `apk add` names
+        # are unpinned: a digest cannot be read without the network, so the
+        # fill-in pass that writes the action SHAs pins the image by digest
+        # too, before the first release is published.
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/out"
@@ -397,21 +409,30 @@ jobs:
   # `gh attestation verify` checks a download against, and the only reason a
   # binary nobody rebuilt can be trusted.
   #
-  # A recorded conflict, not an oversight. The attestation action signs with a
+  # A job of its own, with its own permissions, and the only job besides the
+  # two publishing jobs allowed `id-token: write`: the action signs with a
   # certificate it obtains through the runner's identity token, so it needs
-  # `id-token: write` as well as `attestations: write`. This file follows the
-  # design's rule as written — `id-token: write` in the publishing jobs and
-  # nowhere else — rather than widening it in passing, so as it stands this is
-  # the one job that cannot complete. Widening that rule is a change to the
-  # design and not a detail of this file, so it is left as the rule states it.
+  # that scope as well as `attestations: write` to write the attestation. It
+  # stays behind the `release` gate, and no step of another job may hold
+  # either scope.
+  #
+  # Attestation is on unless a maintainer turns it off: `ATTEST_ENABLED` is a
+  # repository variable, and setting it to `false` skips this job. Nothing
+  # waits on the answer either way — the draft depends on `packages` and its
+  # SHA256SUMS, not on this job — so a skipped or failed attestation cannot
+  # stop a draft from existing, and a failed one is a red job in the run. The
+  # release checklist asks for the attestations to be verified before anything
+  # is published, which is where that red job is read.
   attest:
     name: attest the release files
     needs: [packages]
+    if: vars.ATTEST_ENABLED != 'false'
     runs-on: ubuntu-24.04
     environment: release
     permissions:
       contents: read
       attestations: write
+      id-token: write
     steps:
       - name: Download the release files
         uses: actions/download-artifact@PIN
@@ -426,10 +447,13 @@ jobs:
 
   # The draft: every file, its checksums and generated notes. A draft is a work
   # item, not a publication, so this is the last job that runs on the tag
-  # alone.
+  # alone. It depends on `packages`, which is where the files and SHA256SUMS
+  # are made, and not on `attest`, which runs beside it: attestation is
+  # optional (`ATTEST_ENABLED`), and a draft must not be blocked by a job that
+  # may not run at all.
   draft:
     name: draft the release
-    needs: [attest]
+    needs: [packages]
     runs-on: ubuntu-24.04
     environment: release
     permissions:

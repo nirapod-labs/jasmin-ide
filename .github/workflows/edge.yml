@@ -77,11 +77,14 @@ jobs:
           printf 'commit=%s\n' "$commit" >>"$GITHUB_OUTPUT"
           printf 'edge: upstream main is at %s\n' "$commit"
 
-      # The extraction is the expensive half, and its inputs are exactly the
-      # upstream commit plus the Rocq packages, so the tarball is cached per
-      # commit and a repeat run of the same week costs only the build.
-      # `restore-keys` matches nothing: a partial hit from another commit would
-      # be a different Jasmin under this commit's name.
+      # The extraction is the expensive half, so its result is cached per
+      # upstream commit and a repeat run of the same week costs only the
+      # build. The key holds the upstream commit and nothing else: the Rocq
+      # and library versions below are inputs too, but they are not in the
+      # key, so a change to them must change the key (`jasmin-dist-v2-...`)
+      # or a hit would keep serving a tarball the old versions built.
+      # `restore-keys` matches nothing: a partial hit from another commit
+      # would be a different Jasmin under this commit's name.
       - name: Restore the distribution tarball for this upstream commit
         id: cache
         uses: actions/cache@PIN
@@ -175,11 +178,15 @@ jobs:
           fi
           sh test/parity/parity.sh "$RUNNER_TEMP/jasmin" | tail -30
 
+      # The step records what the run built, and fails when the binary the
+      # build was for is not there: a step that prints an empty field and exits
+      # 0 reports a build it did not check.
       - name: Record what this run built
         run: |
           set -eu
+          binary=./_build/install/default/bin/jasmin-lsp
+          test -x "$binary"
           printf 'edge: upstream %s\n' "${{ steps.upstream.outputs.commit }}"
-          printf 'edge: server %s\n' \
-            "$(./_build/install/default/bin/jasmin-lsp check --help >/dev/null 2>&1 && printf built)"
+          printf 'edge: server %s\n' "$binary"
           printf 'edge: the tarball of this commit is cached under jasmin-dist-%s\n' \
             "${{ steps.upstream.outputs.commit }}"
