@@ -81,3 +81,46 @@ test("a setting that is not a file is reported instead of being skipped", () => 
   assert.equal(resolution.message, serverSettingInvalidMessage(missingSettingServer));
   assert.ok(resolution.message.includes(serverSetting));
 });
+
+test("a setting with surrounding whitespace is trimmed before it is used", () => {
+  const resolution = resolve({
+    settingPath: `  ${settingServer}  `,
+    files: [settingServer]
+  });
+
+  assert.deepEqual(resolution, {kind: "found", path: settingServer, source: "setting"});
+});
+
+test("a blank setting is treated as empty, so the search continues", () => {
+  const resolution = resolve({
+    settingPath: "   ",
+    files: [bundledServer]
+  });
+
+  assert.deepEqual(resolution, {kind: "found", path: bundledServer, source: "extension"});
+});
+
+test("the plain executable name wins over the Windows name inside the extension", () => {
+  const resolution = resolve({files: [bundledServer, bundledWindowsServer]});
+
+  assert.deepEqual(resolution, {kind: "found", path: bundledServer, source: "extension"});
+});
+
+test("the plain executable name wins over the Windows name on PATH", () => {
+  const windowsOnPath = join("/home", "jasmin", "bin", `${serverExecutable}.exe`);
+  const resolution = resolve({
+    commands: {[serverExecutable]: pathServer, [`${serverExecutable}.exe`]: windowsOnPath}
+  });
+
+  assert.deepEqual(resolution, {kind: "found", path: pathServer, source: "path"});
+});
+
+test("an empty PATH result is ignored and the next name is tried", () => {
+  const windowsOnPath = join("/home", "jasmin", "bin", `${serverExecutable}.exe`);
+  const resolution = resolve({
+    commands: {[serverExecutable]: "", [`${serverExecutable}.exe`]: windowsOnPath}
+  });
+
+  assert.deepEqual(resolution, {kind: "found", path: windowsOnPath, source: "path"});
+});
+
