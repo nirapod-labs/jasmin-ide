@@ -313,3 +313,274 @@ and lvalues session env ((annotation, values) : Syntax.plvals) =
 and block session env (block : Syntax.pblock) =
   List.fold_left (instruction session) env (Location.unloc block)
 
+and instruction session env
+    ((annotations_, (instr : Syntax.pinstr_r Location.located)) :
+      Syntax.pinstr) =
+  let item_span = span_of_location (Location.loc instr) in
+  let env = annotations session env annotations_ in
+  match Location.unloc instr with
+  | Syntax.PIArrayInit ident -> ignored session env Use_var ident
+  | PIAssign (targets, _operator, value, condition) ->
+      let env = lvalues session env targets in
+      let env = expression session env value in
+      (match condition with
+      | None -> env
+      | Some condition -> expression session env condition)
+  | PIAssert (_message, condition) -> expression session env condition
+  | PIIf (condition, when_true, when_false) ->
+      let env = expression session env condition in
+      ignore (block session env when_true);
+      (match when_false with
+      | None -> ()
+      | Some when_false -> ignore (block session env when_false));
+      env
+  | PIFor (ident, (_direction, first, last), body) ->
+      let env = ignored session env Use_var ident in
+      let env = expression session env first in
+      let env = expression session env last in
+      ignore (block session env body);
+      env
+  | PIWhile (before, condition, after) ->
+      (match before with
+      | None -> ()
+      | Some before -> ignore (block session env before));
+      let env = expression session env condition in
+      (match after with
+      | None -> ()
+      | Some after -> ignore (block session env after));
+      env
+  | PIdecl (stotype, names) ->
+      List.fold_left
+        (fun env name ->
+          let env = ptype session env (snd stotype) in
+          let declaration = declare session env Index.Variable name ~item_span in
+          push_var env declaration)
+        env names
+  | PIdeclinit (stotype, inits) ->
+      List.fold_left
+        (fun env (init : (string Location.located * Syntax.pexpr) Location.located)
+           ->
+          let name, value = Location.unloc init in
+          let before = env in
+          let env = ptype session env (snd stotype) in
+          let declaration = declare session env Index.Variable name ~item_span in
+          let env = push_var env declaration in
+          (* The initialising expression is typed before the name is in
+             scope, as [tt_annot_decl] does. *)
+          ignore (expression session before value);
+          env)
+        env inits
+
+(* ------------------------------------------------------------------ *)
+(* Items *)
+
+let resolve_path ~idirs ~dir ~from written =
+  let base =
+    match from with
+    | None -> dir
+    | Some name -> (
+        match List.assoc_opt name idirs with
+        | Some directory -> directory
+        | None -> dir)
+  in
+  let path =
+    if Filename.is_relative written then Filename.concat base written
+    else written
+  in
+  normalise path
+
+let max_chain = 64
+
+let rec item session env (located : Syntax.pitem Location.located) : env =
+  let item_span = span_of_location (Location.loc located) in
+  match Location.unloc located with
+  | Syntax.PParam pp ->
+      let env = ptype session env pp.ppa_ty in
+      let env = expression session env pp.ppa_init in
+      let declaration = declare session env Index.Parameter pp.ppa_name ~item_span in
+      push_var env declaration
+  | PGlobal global ->
+      let env = annotations session env global.pgd_annot in
+      let env = ptype session env global.pgd_type in
+      let env =
+        match global.pgd_val with
+        | Syntax.GEexpr value -> expression session env value
+        | GEarray values -> List.fold_left (expression session) env values
+      in
+      let declaration = declare session env Index.Global global.pgd_name ~item_span in
+      push_var env declaration
+  | Pexec exec ->
+      ignore (use session env Use_call exec.pex_name);
+      env
+  | PTypeAlias (name, annotations_, ty) ->
+      let env = annotations session env annotations_ in
+      let env = ptype session env ty in
+      let declaration = declare session env Index.Type_alias name ~item_span in
+      push_type env declaration
+  | Prequire (from, files) ->
+      let env =
+        match from with
+        | None -> env
+        | Some ident -> ignored session env Use_include ident
+      in
+      let from = Option.map Location.unloc from in
+      List.fold_left
+        (fun env (file : string Location.located) ->
+          require_file session env ~from (Location.unloc file))
+        env files
+  | PNamespace (name, items) ->
+      let namespace = Location.unloc name in
+      ignore (declare session env Index.Namespace name ~item_span);
+      let inner = push_namespace env namespace in
+      let resolved = List.fold_left (item session) inner items in
+      exit_namespace resolved
+  | PFundef function_ ->
+      let env = annotations session env function_.pdf_annot in
+      let local = { env with frames = empty_frame :: env.frames } in
+      let local =
+        List.fold_left
+          (fun env ((annotations_, (stotype, names)) :
+                     Syntax.pannotations * Syntax.paramdecls) ->
+            let env = annotations session env annotations_ in
+            let env = ptype session env (snd stotype) in
+            List.fold_left
+              (fun env name ->
+                let declaration =
+                  declare session env Index.Parameter name ~item_span
+                in
+                push_var env declaration)
+              env names)
+          local function_.pdf_args
+      in
+      let local =
+        match function_.pdf_rty with
+        | None -> local
+        | Some returns ->
+            List.fold_left
+              (fun env (annotations_, stotype) ->
+                let env = annotations session env annotations_ in
+                ptype session env (snd stotype))
+              local returns
+      in
+      let final =
+        List.fold_left (instruction session) local function_.pdf_body.pdb_instr
+      in
+      (match Location.unloc function_.pdf_body.pdb_ret with
+      | None -> ()
+      | Some returns ->
+          List.iter
+            (fun ident -> ignore (use session final Use_var ident))
+            returns);
+      (* The function is declared after its body: pretyping pushes it into
+         the environment from before the parameters, so a body cannot call
+         itself. *)
+      let declaration = declare session env Index.Function function_.pdf_name ~item_span in
+      push_fun env declaration
+
+and require_file session env ~from written =
+  let path = resolve_path ~idirs:session.idirs ~dir:env.dir ~from written in
+  let namespace_key = String.concat "::" env.namespace in
+  if List.mem (namespace_key, path) session.loaded then env
+  else if List.length env.chain >= max_chain then env
+  else (
+    session.loaded <- (namespace_key, path) :: session.loaded;
+    match session.read path with
+    | None -> env
+    | Some text ->
+        let index = index_of session path text in
+        let inner =
+          {
+            env with
+            file = path;
+            index;
+            dir = Filename.dirname path;
+            chain = path :: env.chain;
+          }
+        in
+        let resolved = List.fold_left (item session) inner index.Index.items in
+        (* The frames the included file built stay; the file it came from is
+           back for everything after the require. *)
+        { resolved with file = env.file; index = env.index; dir = env.dir; chain = env.chain })
+
+(* ------------------------------------------------------------------ *)
+
+let of_text ~idirs ~read ~file text : t =
+  let session =
+    {
+      idirs;
+      read;
+      indexes = Hashtbl.create 16;
+      answers = Hashtbl.create 256;
+      order_rev = [];
+      loaded = [];
+    }
+  in
+  let file = normalise file in
+  let index = index_of session file text in
+  (* The document itself is loaded in its own namespace, as the adapter's
+     [enter_file] does before it types the first item. *)
+  session.loaded <- [ ("", file) ];
+  let env =
+    {
+      frames = [ empty_frame ];
+      namespace = [];
+      file;
+      index;
+      dir = Filename.dirname file;
+      chain = [ file ];
+    }
+  in
+  ignore (List.fold_left (item session) env index.Index.items);
+  {
+    entry = file;
+    indexes = session.indexes;
+    answers = session.answers;
+    order = List.rev session.order_rev;
+    loaded = List.rev session.loaded;
+  }
+
+let of_file ~idirs ~read file =
+  match read (normalise file) with
+  | None -> None
+  | Some text -> Some (of_text ~idirs ~read ~file:(normalise file) text)
+
+let entry (t : t) = t.entry
+let files (t : t) = t.order
+
+let file (t : t) path =
+  Hashtbl.find_opt t.indexes (normalise path)
+
+let answer_at (t : t) ~file ~byte =
+  let file = normalise file in
+  match Hashtbl.find_opt t.indexes file with
+  | None -> None
+  | Some index -> (
+      match Index.find_occurrence index ~byte with
+      | None -> None
+      | Some occurrence -> (
+          let key = (file, occurrence.Index.span.Jide_lang.Span.start_byte) in
+          match Hashtbl.find_opt t.answers key with
+          | Some answer -> Some (occurrence, answer)
+          | None -> Some (occurrence, Unresolved)))
+
+let answers (t : t) path =
+  let file = normalise path in
+  match Hashtbl.find_opt t.indexes file with
+  | None -> []
+  | Some index ->
+      List.map
+        (fun occurrence ->
+          let key = (file, occurrence.Index.span.Jide_lang.Span.start_byte) in
+          let answer =
+            match Hashtbl.find_opt t.answers key with
+            | Some answer -> answer
+            | None -> Unresolved
+          in
+          (occurrence, answer))
+        index.Index.occurrences
+
+let loaded (t : t) = t.loaded
+
+let declaration_of_answer = function
+  | Resolved declaration -> Some declaration
+  | Intrinsic | Annotation | Include_path | Unresolved -> None
