@@ -8,6 +8,9 @@
 #
 #
 #
+#
+#
+#
 
 set -u
 
@@ -205,6 +208,9 @@ extract_structural() {
 		if (ind == 0) {
 			in_env = 0; in_permissions = 0; in_jobs = 0; job = ""; job_perm = 0
 			top = key_of(text)
+			if (top in top_seen)
+				print "dupkey\t" FILENAME "\t" NR "\t" top
+			top_seen[top] = 1
 			if (top == "permissions") in_permissions = 1
 			else if (top == "env") in_env = 1
 			else if (top == "jobs") in_jobs = 1
@@ -216,7 +222,11 @@ extract_structural() {
 			next
 		}
 		if (in_env && ind == 2) {
-			print "env\t" FILENAME "\t" key_of(text) "\t" value_of(text, key_of(text))
+			keyed = key_of(text)
+			if (keyed in env_seen)
+				print "dupkey\t" FILENAME "\t" NR "\t" keyed
+			env_seen[keyed] = 1
+			print "env\t" FILENAME "\t" keyed "\t" value_of(text, keyed)
 			next
 		}
 		if (!in_jobs) next
@@ -243,12 +253,14 @@ extract_structural() {
 			print "jobenv\t" FILENAME "\t" job "\t" (value == "" ? "nokey" : value)
 			next
 		}
-		if (text ~ /^uses:/) {
-			print "uses\t" FILENAME "\t" NR "\t" value_of(text, "uses")
+		body = text
+		if (item) body = substr(text, 3)
+		if (body ~ /^uses:/) {
+			print "uses\t" FILENAME "\t" NR "\t" value_of(body, "uses")
 			next
 		}
-		if (text ~ /^run:/) {
-			value = value_of(text, "run")
+		if (body ~ /^run:/) {
+			value = value_of(body, "run")
 			if (value ~ /^[|>]/) { in_run = 1; run_indent = ind }
 			else print "runline\t" FILENAME "\t" NR "\t" value
 			next
@@ -296,35 +308,58 @@ rule_failed() {
 
 #
 
-pins=$tmp/pins
+pins=$tmp/pins.violations
+pins_counts=$tmp/pins.counts
+: >"$pins"
+: >"$pins_counts"
 
-awk -F'\t' -v counts="$pins.counts" '
-	$1 == "uses" {
-		ref = $4
-		at = index(ref, "@")
-		if (at == 0) {
-			printf "violation: %s:%s: %s names no action and no reference\n", $2, $3, ref
-			next
+awk -F'\t' -v counts="$pins_counts" '
+	$1 == "env" { env_path[++n_env] = $2; env_name[n_env] = $3; env_value[n_env] = $4 }
+	$1 == "uses" { use_path[++n_use] = $2; use_line[n_use] = $3; use_ref[n_use] = $4 }
+
+	END {
+		for (i = 1; i <= n_env; i++) {
+			name = env_name[i]
+			if (name !~ /_SHA$/ || name ~ /_ACTION$/) continue
+			value = env_value[i]
+			if (value == "PIN") { record_unfilled++; continue }
+			if (value ~ /^[0-9a-f]+$/ && length(value) == 40) { record_filled++; continue }
+			record_other++
+			printf "violation: pins: %s: the record %s holds %s, which is neither the placeholder PIN nor a full 40-character commit SHA\n", \
+				env_path[i], name, (value == "" ? "an empty value" : value)
 		}
-		action = substr(ref, 1, at - 1)
-		revision = substr(ref, at + 1)
-		if (revision == "PIN") {
-			unfilled_count++
-			printf "violation: %s:%s: %s is not pinned to a full 40-character commit SHA; its reference is the placeholder PIN\n", \
-				$2, $3, ref
-			next
+
+		for (i = 1; i <= n_use; i++) {
+			path = use_path[i]; line = use_line[i]; ref = use_ref[i]
+			at = index(ref, "@")
+			if (at == 0) {
+				use_other++
+				printf "violation: pins: %s:%s: %s names no action and no reference\n", path, line, ref
+				continue
+			}
+			action = substr(ref, 1, at - 1)
+			revision = substr(ref, at + 1)
+			if (revision == "PIN") {
+				use_unfilled++
+				printf "violation: pins: %s:%s: %s is not pinned to a full 40-character commit SHA; its reference is the placeholder PIN\n", \
+					path, line, ref
+				continue
+			}
+			if (revision ~ /^[0-9a-f]+$/ && length(revision) == 40) { use_filled++; continue }
+			use_other++
+			printf "violation: pins: %s:%s: %s is not pinned to a full 40-character commit SHA\n", \
+				path, line, ref
 		}
-		if (revision ~ /^[0-9a-f]+$/ && length(revision) == 40) {
-			filled_count++
-			next
-		}
-		printf "violation: %s:%s: %s is not pinned to a full 40-character commit SHA\n", \
-			$2, $3, ref
+
+		printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\n", use_unfilled + 0, use_filled + 0, use_other + 0, \
+			record_unfilled + 0, record_filled + 0, record_other + 0, n_use + 0 > counts
 	}
-	END { printf "%d\t%d\n", unfilled_count + 0, filled_count + 0 > counts }
-' "$facts" >>"$found" || rule_failed
+' "$facts" >"$pins" || rule_failed
 
 #
+
+agreement=$tmp/agreement.violations
+: >"$agreement"
 
 awk -F'\t' '
 	$1 == "env" { value[$2 SUBSEP $3] = $4; names[$2] = names[$2] " " $3 }
@@ -344,22 +379,22 @@ awk -F'\t' '
 			if (value[$2 SUBSEP name] == action) prefix = base
 		}
 		if (prefix == "") {
-			printf "violation: %s:%s: %s has no <NAME>_ACTION entry in this workflow env block\n", \
+			printf "violation: agreement: %s:%s: %s has no <NAME>_ACTION entry in this workflow env block\n", \
 				$2, $3, action
 			next
 		}
 		if (value[$2 SUBSEP (prefix "_VERSION")] == "")
-			printf "violation: %s:%s: %s has no %s_VERSION entry in this workflow env block\n", \
+			printf "violation: agreement: %s:%s: %s has no %s_VERSION entry in this workflow env block\n", \
 				$2, $3, action, prefix
 		sha = value[$2 SUBSEP (prefix "_SHA")]
 		if (sha == "")
-			printf "violation: %s:%s: %s has no %s_SHA entry in this workflow env block\n", \
+			printf "violation: agreement: %s:%s: %s has no %s_SHA entry in this workflow env block\n", \
 				$2, $3, action, prefix
 		else if (sha != revision)
-			printf "violation: %s:%s: %s names %s on its uses line while %s_SHA is %s\n", \
+			printf "violation: agreement: %s:%s: %s names %s on its uses line while %s_SHA is %s\n", \
 				$2, $3, action, revision, prefix, sha
 	}
-' "$facts" >>"$found" || rule_failed
+' "$facts" >"$agreement" || rule_failed
 
 awk -F'\t' '
 	$1 == "topperm" { value[$2] = $3; present[$2] = 1 }
@@ -367,9 +402,9 @@ awk -F'\t' '
 		for (path in present) {
 			if (value[path] == "read") continue
 			if (value[path] == "nokey")
-				printf "violation: %s: declares no top-level `permissions: contents: read`\n", path
+				printf "violation: permissions: %s: declares no top-level `permissions: contents: read`\n", path
 			else
-				printf "violation: %s: the top-level permissions block grants contents: %s, not read\n", \
+				printf "violation: permissions: %s: the top-level permissions block grants contents: %s, not read\n", \
 					path, value[path]
 		}
 	}
@@ -384,18 +419,18 @@ awk -F'\t' '
 			if (parts[3] != "id-token") continue
 			if (perm[entry] != "write") continue
 			if (parts[2] !~ /^publish/)
-				printf "violation: %s: job %s grants id-token: write and is not a publishing job\n", \
+				printf "violation: token: %s: job %s grants id-token: write and is not a publishing job\n", \
 					parts[1], parts[2]
 			else if (env[parts[1] SUBSEP parts[2]] != "publish")
-				printf "violation: %s: job %s grants id-token: write outside the publish environment\n", \
+				printf "violation: token: %s: job %s grants id-token: write outside the publish environment\n", \
 					parts[1], parts[2]
 		}
 	}
 ' "$facts" >>"$found" || rule_failed
 
 awk -F'\t' '
-	$1 == "dupkey" { printf "violation: %s:%s: the key %s appears twice in one mapping\n", $2, $3, $4 }
-	$1 == "unchecked" { printf "violation: %s: %s\n", $2, $3 }
+	$1 == "dupkey" { printf "violation: content: %s:%s: the key %s appears twice in one mapping\n", $2, $3, $4 }
+	$1 == "unchecked" { printf "violation: extract: %s: %s\n", $2, $3 }
 ' "$facts" >>"$found" || rule_failed
 
 awk -F'\t' '
@@ -416,7 +451,7 @@ awk -F'\t' '
 			sub(/[ \t].*$/, "", name)
 			if (name == "") next
 			if (!(name in target))
-				printf "violation: %s:%s: make %s names no target of this repository Makefile\n", \
+				printf "violation: make: %s:%s: make %s names no target of this repository Makefile\n", \
 					$2, $3, name
 		}
 
@@ -433,7 +468,7 @@ awk -F'\t' '
 			sub("^[.][/]", "", path)
 			if (path !~ "^(scripts|vendor|test|fuzz|bench|compiler|editor|docs)/") continue
 			if (system("test -f \"" path "\"") != 0)
-				printf "violation: %s:%s: %s runs %s, which is not a file of this repository\n", \
+				printf "violation: scripts: %s:%s: %s runs %s, which is not a file of this repository\n", \
 					$2, $3, words[1], path
 		}
 	}
@@ -479,37 +514,55 @@ awk -v tokens="$tokens" '
 		lower = tolower($0)
 		for (i = 1; i <= n; i++) {
 			if (index(lower, list[i]) > 0) {
-				printf "violation: %s:%d: contains a forbidden token\n", FILENAME, FNR
+				printf "violation: content: %s:%d: contains a forbidden token\n", FILENAME, FNR
 				next
 			}
 		}
 	}
 ' $workflows >>"$found" || rule_failed
 
-counts=$(cat "$pins.counts" 2>/dev/null || printf '0\t0')
-unfilled_total=${counts%%	*}
-filled_total=${counts##*	}
+counts=$(cat "$pins_counts" 2>/dev/null) || counts=
+[ -n "$counts" ] || rule_failed
+set -- $counts
+[ $# -eq 7 ] || rule_failed
+use_unfilled=$1
+use_filled=$2
+use_other=$3
+record_unfilled=$4
+record_filled=$5
+record_other=$6
+pins_total=$7
+for field in "$use_unfilled" "$use_filled" "$use_other" \
+	"$record_unfilled" "$record_filled" "$record_other" "$pins_total"; do
+	case $field in
+	'' | *[!0-9]*) rule_failed ;;
+	esac
+done
 
-cat "$found"
+unfilled=$((use_unfilled + record_unfilled))
+not_pin=$((use_filled + use_other + record_filled + record_other))
 
 pins_set_aside=0
-if [ "$private" -eq 1 ] && [ "$unfilled_total" -gt 0 ] && [ "$filled_total" -eq 0 ]; then
+if [ "$private" -eq 1 ] && [ "$not_pin" -eq 0 ] && [ "$unfilled" -gt 0 ]; then
 	pins_set_aside=1
-	grep -v 'is not pinned to a full 40-character commit SHA\|_SHA entry in this\|_ACTION entry in this\|_VERSION entry in this\|on its uses line while' \
-		"$found" >"$tmp/rest" 2>/dev/null || : >"$tmp/rest"
-	mv "$tmp/rest" "$found"
-	printf 'check-workflows: %s pin(s) are the placeholder PIN and %s carry a SHA, so the pin and agreement rules are set aside for this run only\n' \
-		"$unfilled_total" "$filled_total"
-	printf 'check-workflows: a commit SHA cannot be looked up without the network, and a made-up 40-character value would be a lie that looks like a pin\n'
-	printf 'check-workflows: they are filled in one pass when the project goes public; without --private this check fails until then\n'
-elif [ "$filled_total" -gt 0 ] && [ "$unfilled_total" -gt 0 ]; then
-	printf 'check-workflows: %s pin(s) carry a SHA and %s are still PIN: the fill-in pass is half done, and that is an error\n' \
-		"$filled_total" "$unfilled_total"
+	printf 'check-workflows: warning: %s pin(s) are the placeholder PIN on their uses: lines and all %s <NAME>_SHA record(s) hold it too, so the pin and agreement rules are set aside for this run only; a commit SHA cannot be looked up without the network, and a made-up 40-character value would be a lie that looks like a pin\n' \
+		"$use_unfilled" "$record_unfilled"
+elif [ "$private" -eq 1 ] && [ "$not_pin" -gt 0 ] && [ "$unfilled" -gt 0 ]; then
+	printf 'check-workflows: %s pin value(s) no longer hold PIN and %s still do, so the fill-in pass is half done and that is an error\n' \
+		"$not_pin" "$unfilled"
 fi
 
-if [ -s "$found" ]; then
+if [ "$pins_set_aside" -eq 1 ]; then
+	: >"$tmp/all"
+else
+	cat "$pins" "$agreement" >"$tmp/all"
+fi
+cat "$found" >>"$tmp/all"
+cat "$tmp/all"
+
+if [ -s "$tmp/all" ]; then
 	printf 'check-workflows: %s line(s) above, which is a failure\n' \
-		"$(wc -l <"$found" | tr -d ' ')"
+		"$(wc -l <"$tmp/all" | tr -d ' ')"
 	exit 1
 fi
 
