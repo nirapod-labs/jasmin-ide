@@ -346,3 +346,75 @@ let test_a_byte_order_mark_shifts_nothing () =
         declaration.name_span.Jide_lang.Span.start_byte = start + 3
     | _ -> false)
 
+let test_a_file_that_does_not_parse () =
+  let index, diagnostics = of_text ~file:"/work/broken.jazz" "fn f( {\n" in
+  check "broken: the parser says so" (diagnostics <> []);
+  check "broken: no occurrences" (index.Jide_engine.Index.occurrences = []);
+  check "broken: no declarations" (index.Jide_engine.Index.declarations = []);
+  check "broken: no outline" (index.Jide_engine.Index.outline = [])
+
+let test_an_annotation_carries_its_value () =
+  let text =
+    "#[mmx]\n#[returnaddress=stack]\nfn f(reg u32 a) -> reg u32 { return a; }\n"
+  in
+  let index, diagnostics = of_text ~file:"/work/annot.jazz" text in
+  check "annotation: the file parses" (diagnostics = []);
+  check "annotation: a label is an occurrence over the label only"
+    (List.exists
+       (fun (occurrence : Jide_engine.Index.occurrence) ->
+         String.equal occurrence.name "returnaddress"
+         && occurrence.role = Jide_engine.Index.Annot
+         && String.equal (text_of text occurrence.span) "returnaddress")
+       index.Jide_engine.Index.occurrences);
+  check "annotation: a keyword value is kept with the label"
+    (List.exists
+       (fun (occurrence : Jide_engine.Index.occurrence) ->
+         String.equal occurrence.name "returnaddress"
+         && occurrence.value = Some "stack")
+       index.Jide_engine.Index.occurrences);
+  check "annotation: a label with no value carries none"
+    (List.exists
+       (fun (occurrence : Jide_engine.Index.occurrence) ->
+         String.equal occurrence.name "mmx" && occurrence.value = None)
+       index.Jide_engine.Index.occurrences)
+
+(* One spelling per path, and the same one as Context's. *)
+let test_normalise_agrees_with_the_context () =
+  let paths =
+    [
+      "./a/./b/../c.jinc";
+      "/a//b/../c.jinc";
+      "/../a.jinc";
+      "a.jinc";
+      "/work/lib/a.jinc";
+    ]
+  in
+  check "normalise: the engine and the resolver write one spelling"
+    (List.for_all
+       (fun path ->
+         String.equal
+           (Jide_engine.Index.normalise path)
+           (Jide_engine.Context.normalise path))
+       paths);
+  check "normalise: a relative path"
+    (String.equal (Jide_engine.Index.normalise "./a/./b/../c.jinc") "a/c.jinc");
+  check "normalise: an absolute path"
+    (String.equal (Jide_engine.Index.normalise "/a//b/../c.jinc") "/a/c.jinc")
+
+let () =
+  test_the_occurrences_in_source_order ();
+  test_the_declarations_carry_two_ranges ();
+  test_the_require_edges ();
+  test_a_named_require ();
+  test_the_outline_nests_namespaces ();
+  test_the_last_segment_of_a_qualified_name ();
+  test_find_occurrence_and_find_declaration ();
+  test_equal_declaration ();
+  test_a_byte_order_mark_shifts_nothing ();
+  test_a_file_that_does_not_parse ();
+  test_an_annotation_carries_its_value ();
+  test_normalise_agrees_with_the_context ();
+  if !failures = 0 then print_endline "all index tests passed"
+  else (
+    Printf.printf "%d index test(s) failed\n" !failures;
+    exit 1)
