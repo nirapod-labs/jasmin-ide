@@ -638,11 +638,10 @@ let test_require_inside_namespace_has_errors () =
     (not (mentions result "unknown function"))
 
 (* A namespaced include that was read and does not type. The error's offsets
-   index the required file, not the document, and the namespace's items are
-   spliced into the namespace's one item, so that item is what says the file
-   has errors instead of the file being attributed on its own. The call to a
-   name the broken file declares is that failure seen again, not a fabricated
-   unknown function. *)
+   index the required file, not the document, so it cannot be placed; the
+   require item is what says the file has errors, exactly as it does for a
+   top-level require of the same file. The call to a name the broken file
+   declares is that failure seen again, not a fabricated unknown function. *)
 let test_require_inside_namespace_type_error () =
   let file = "namespaced-typed-broken.jinc" in
   let resolve path =
@@ -687,13 +686,8 @@ let test_require_inside_namespace_type_error () =
          && diagnostic.span.Jide_lang.Span.end_byte
             > diagnostic.span.Jide_lang.Span.start_byte)
        result.diagnostics);
-  (* The same file at top level is the same file: it too is reported against
-     the file, with the file's own message, which is the parity this test
-     exists to keep. The namespace path still summarises the failure on its
-     item instead, because the file's items are spliced into the namespace's
-     single item and their offsets reach the loop with nothing to map them to;
-     attributing that path is a separate change, and the two answers are
-     recorded apart here rather than pretending they agree. *)
+  (* The same file at top level is the same answer, which is the parity this
+     test exists to keep. *)
   let top_level =
     check_with ~resolve
       (Printf.sprintf
