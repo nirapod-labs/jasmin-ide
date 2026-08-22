@@ -1233,229 +1233,33 @@ let recover ~name ~text : t =
       let initial =
         start_checkpoint ~name:(Scan.name scan) ~position:initial_position
       in
-      let rec walk reach = function
-        | _ when reach >= span.Jide_lang.Span.end_byte -> true
-        | [] -> blank reach span.Jide_lang.Span.end_byte
-        | (earlier : Jide_lang.Span.t) :: rest ->
-            if earlier.Jide_lang.Span.start_byte > reach then
-              if blank reach earlier.Jide_lang.Span.start_byte then
-                walk (max reach earlier.Jide_lang.Span.end_byte) rest
-              else false
-            else walk (max reach earlier.Jide_lang.Span.end_byte) rest
+      let cursor =
+        {
+          checkpoint = initial;
+          index = 0;
+          braces = 0;
+          boundary = { at = 0; checkpoint = initial; level = 0 };
+          look = false;
+          statements = [];
+          history = [ (0, initial, 0) ];
+          frames = [];
+        }
       in
-      walk (min length span.Jide_lang.Span.start_byte) spans
-    in
-    (* A hole whose first bytes belong to a stub already reported cannot be
-       stated as a span of its own without overlapping it. The bytes after it
-       are the rest of an item whose stub is there, and {!hole_start} keeps
-       that case out; anything left here would be a report of half a hole, so
-       it is not made. *)
-    let front_reported =
-      List.exists
-        (function
-          | Dropped { span = earlier; _ } ->
-              earlier.Jide_lang.Span.start_byte < span.Jide_lang.Span.start_byte
-              && earlier.Jide_lang.Span.end_byte
-                 > span.Jide_lang.Span.start_byte)
-        !dropped
-    in
-    if
-      span.Jide_lang.Span.start_byte < span.Jide_lang.Span.end_byte
-      && not (covered span || front_reported)
-    then (
-      (* The stub's span is the hole's, so the stub and the region the typing
-         loop stays quiet about are the same bytes; {!dropped_of} reads the
-         name off the tokens and has no opinion about the extent. A hole that
-         grows over a stub already reported is the same item seen again, so
-         it keeps the name that stub was given: the wider range is read for
-         its span, not for a second guess at what the item was. *)
-      let stub =
-        match
-          List.find_opt
-            (function Dropped { span = earlier; _ } -> contains span earlier)
-            !dropped
-        with
-        | Some (Dropped fields) -> Dropped { fields with span }
-        | None -> (
-            match dropped_of state.scan ~from ~upto with
-            | Dropped fields -> Dropped { fields with span })
+      let items = try drive run cursor with _ -> [] in
+      (* In source order, which is the order an outline shows them in and
+         the order their diagnostics belong in. *)
+      let dropped =
+        List.sort
+          (fun (Dropped a) (Dropped b) ->
+            compare
+              (a.span.Jide_lang.Span.start_byte, a.span.Jide_lang.Span.end_byte)
+              (b.span.Jide_lang.Span.start_byte, b.span.Jide_lang.Span.end_byte))
+          run.dropped
       in
-      dropped :=
-        stub
-        :: List.filter
-             (function
-               | Dropped { span = earlier; _ } -> not (contains span earlier))
-             !dropped;
-      state.stubbed_upto <- max state.stubbed_upto upto;
-      recovered :=
-        span :: List.filter (fun older -> not (contains span older)) !recovered)
-  in
-  (* One pass over one buffer: checkpoint restarts until the parser accepts,
-     a rewrite when no checkpoint is left, the prefix alone when even that is
-     gone. *)
-  let rec pass ~depth text : Syntax.pprogram =
-    match Scan.make ~name text with
-    | Error diagnostic ->
-        diagnostics := diagnostic :: !diagnostics;
-        []
-    | Ok scan ->
-        recovered := List.rev_append (Scan.blanked scan) !recovered;
-        run (new_state counters scan) ~depth
-  and run state ~depth : Syntax.pprogram =
-    match drive state ~index:0 ~eof_sent:false state.initial with
-    | Accepted items -> items
-    | Raised (_, exn) ->
-        note_raise exn;
-        finish state ~depth
-    | Failed failure -> step state ~depth ~failure
-  and step state ~depth ~failure : Syntax.pprogram =
-    if counters.recoveries >= max_recoveries then finish state ~depth
-    else
-      match close_blocks_here state ~failure with
-      | Some items -> items
-      | None -> (
-          match next_attempt state ~failure with
-          | Some (Restart { source; target; checkpoint; statement }) ->
-              counters.recoveries <- counters.recoveries + 1;
-              if statement then
-                counters.statement_restarts <- counters.statement_restarts + 1
-              else counters.item_restarts <- counters.item_restarts + 1;
-              state.tried := (source, target) :: !(state.tried);
-              prune state source;
-              if statement then (
-                recovered :=
-                  Scan.span state.scan
-                    ~start_byte:(Scan.start_byte state.scan source)
-                    ~end_byte:(Scan.start_byte state.scan target)
-                  :: !recovered;
-                run_from state ~depth ~start:target checkpoint)
-              else (
-                note_dropped state ~from:source ~upto:target;
-                state.closed_item <- source;
-                (* The item this restart produces must begin where the item
-                   before it ends, which is the end of the token before
-                   [target] and the position a parse that was never
-                   interrupted gives it. A checkpoint carries the position of
-                   the token before the *dropped* item instead, so it is
-                   moved; the start state, which holds no symbol and so has
-                   no position to move, is rebuilt at that position — it is
-                   only reachable while nothing has been reduced, so nothing
-                   is lost by starting it again. *)
-                let position = position_before state.scan target in
-                let checkpoint =
-                  if source = 0 then
-                    start_checkpoint ~name:(Scan.name state.scan) ~position
-                  else
-                    reposition ~counters:state.counters checkpoint ~position
-                      ~lead:(Scan.token state.scan target)
-                in
-                run_from state ~depth ~start:target checkpoint)
-          | None ->
-              let target = target_of state ~failure in
-              let start = hole_start state target in
-              let from = Scan.start_byte state.scan start in
-              let upto = Scan.start_byte state.scan target in
-              if upto <= from || depth >= max_byte_restarts then
-                finish state ~depth
-              else (
-                counters.recoveries <- counters.recoveries + 1;
-                counters.byte_restarts <- counters.byte_restarts + 1;
-                (* The blanking covers every byte the stub stands for, from
-                   the beginning of the hole, so the text that is rewritten is
-                   exactly the text that is reported as missing. *)
-                note_dropped state ~from:start ~upto:target;
-                pass ~depth:(depth + 1)
-                  (Scan.blank (Scan.text state.scan) ~from ~upto)))
-  (* A block that was never closed is closed without a byte being rewritten.
-     The attempt runs on a copy: a virtual brace that the rest of the file
-     cannot follow must leave the ordinary restarts as they were.
-
-     Two things place the brace. The token decides whether one is tried at
-     all: only a token that can begin a top-level item and can never begin a
-     statement means the block was left open, because anything else could be
-     the next statement or the middle of this one ({!Scan.item_only_tokens}).
-     The position is the end of the last token the parser shifted, which is
-     where the missing brace would have been written: menhir starts the next
-     item where the last symbol ends, so a brace offered at the *following*
-     token instead would push that item's start past the trivia between them
-     and an outline would place it a few bytes late. A brace has no bytes of
-     its own, so its start and its end are that one position. *)
-  and close_blocks_here state ~failure : Syntax.pprogram option =
-    match state.input with
-    | None -> None
-    | Some (at, environment) -> (
-        let missing =
-          if at <> failure then 0
-          else if failure >= Scan.count state.scan then
-            Scan.open_depth state.scan
-          else
-            let entry = Scan.token state.scan failure in
-            if Scan.item_only entry.token then entry.depth else 0
-        in
-        if missing <= 0 then None
-        else
-          let position = position_before state.scan failure in
-          let attempt = fork state in
-          let checkpoint = I.input_needed environment in
-          match close_blocks checkpoint ~position ~count:missing with
-          | None -> None
-          | Some checkpoint -> (
-              match drive attempt ~index:failure ~eof_sent:false checkpoint with
-              | Accepted items ->
-                  commit state attempt;
-                  counters.recoveries <- counters.recoveries + 1;
-                  counters.brace_restarts <- counters.brace_restarts + 1;
-                  Some items
-              | Failed _ | Raised _ -> None))
-  and run_from state ~depth ~start checkpoint =
-    match drive state ~index:start ~eof_sent:false checkpoint with
-    | Accepted items -> items
-    | Raised (_, exn) ->
-        note_raise exn;
-        finish state ~depth
-    | Failed failure -> step state ~depth ~failure
-  (* Nothing left to try: keep the items that are already whole. The item
-     that is still broken and everything after it are blanked, so a file with
-     more faults than the bound returns the prefix instead of nothing. *)
-  and finish state ~depth =
-    ignore depth;
-    let scan = state.scan in
-    let base =
-      List.fold_left
-        (fun text (span : Jide_lang.Span.t) ->
-          Scan.blank text ~from:span.Jide_lang.Span.start_byte
-            ~upto:span.Jide_lang.Span.end_byte)
-        (Scan.text scan) !recovered
-    in
-    let cut_index = Scan.item_root scan state.closed_item in
-    let cut = Scan.start_byte scan cut_index in
-    let text = Scan.blank base ~from:cut ~upto:(String.length base) in
-    if String.equal text (Scan.text scan) then []
-    else (
-      if cut < String.length base then
-        note_dropped state
-          ~from:(max cut_index state.stubbed_upto)
-          ~upto:(Scan.count scan);
-      match Parseio.parse_program ~name (Utils.IO.input_string text) with
-      | items -> items
-      | exception _ -> [])
-  in
-  let items = pass ~depth:0 text in
-  (* In source order, which is the order an outline shows them in and the
-     order their diagnostics belong in. The restarts meet the bytes in the
-     order they are resolved, which is not always left to right. *)
-  let dropped =
-    List.sort
-      (fun (Dropped a) (Dropped b) ->
-        compare
-          (a.span.Jide_lang.Span.start_byte, a.span.Jide_lang.Span.end_byte)
-          (b.span.Jide_lang.Span.start_byte, b.span.Jide_lang.Span.end_byte))
-      !dropped
-  in
-  {
-    items;
-    dropped;
-    recovered = List.sort_uniq compare !recovered;
-    diagnostics = List.rev !diagnostics @ List.map diagnostic_of_dropped dropped;
-    counters;
-  }
+      {
+        items;
+        dropped;
+        recovered = List.sort_uniq compare run.recovered;
+        diagnostics = List.map diagnostic_of_dropped dropped;
+        counters;
+      }
