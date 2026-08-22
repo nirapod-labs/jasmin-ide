@@ -104,7 +104,6 @@ let statement_restarts parsed =
   (counters parsed).Jide_jasmin.Recover.statement_restarts
 
 let brace_restarts parsed = (counters parsed).Jide_jasmin.Recover.brace_restarts
-let byte_restarts parsed = (counters parsed).Jide_jasmin.Recover.byte_restarts
 
 (** The offset [needle] begins at, or -1. *)
 let index_of haystack needle =
@@ -407,7 +406,7 @@ let test_later_items_survive () =
              kind = Jide_jasmin.Recover.Function)
        (Jide_jasmin.Parse.dropped parsed));
   check "later items: the checkpoint restart did the work"
-    (item_restarts parsed >= 1 && byte_restarts parsed = 0)
+    (item_restarts parsed >= 1)
 
 let test_missing_rbrace () =
   let parsed = parse missing_rbrace in
@@ -419,7 +418,7 @@ let test_missing_rbrace () =
   check "missing rbrace: nothing is dropped"
     (Jide_jasmin.Parse.dropped parsed = []);
   check "missing rbrace: a virtual brace did the work"
-    (brace_restarts parsed >= 1 && byte_restarts parsed = 0)
+    (brace_restarts parsed >= 1)
 
 let test_missing_semicolon () =
   let parsed = parse missing_semicolon in
@@ -439,7 +438,7 @@ let test_missing_fn () =
   check "missing fn: the broken item is stubbed with its name"
     (dropped_names parsed = [ "second" ]);
   check "missing fn: an item restart did the work, without a byte rewrite"
-    (item_restarts parsed >= 1 && byte_restarts parsed = 0);
+    (item_restarts parsed >= 1);
   (* The item after the broken one begins where the broken one ends: the end
      of the [}] that closes [second]'s body, which is the byte before the
      blank line and the keyword [fn third]. *)
@@ -608,7 +607,7 @@ let test_global_after_a_hole () =
   check "global after a hole: one stub, for the broken function"
     (dropped_names parsed = [ "broken" ]);
   check "global after a hole: an item restart found them, not a rewrite"
-    (item_restarts parsed = 1 && byte_restarts parsed = 0);
+    (item_restarts parsed = 1);
   check "global after a hole: the compiler's error and one marker"
     (List.length (Jide_jasmin.Parse.diagnostics parsed) = 2)
 
@@ -632,16 +631,12 @@ inline
 }
 |}
 
-(* Two holes are two stubs; the bytes between them are trivia only when they
-   are blank (space, tab, CR, LF). A blank line between two broken items
-   therefore gives one stub per item. A comment between the same two items is
-   not blank, so the wider report that follows replaces both stubs with one
-   span and the first hole keeps no report of its own. That is a known
-   limitation: the rule reads the bytes between two reports, not whether the
-   wider report is the same item as the first, and the two shapes cannot be
-   told apart by a wider notion of blank. The second check pins today's
-   behaviour so that changing the rule is a deliberate act with this text in
-   front of it. *)
+(* Two holes are two stubs, whatever lies between them. Neither broken
+   function parses, so both lie before the same fence, the end of the buffer;
+   the keyword [fn] of the second begins an item and nothing else, so the
+   second is stubbed on its own, and a comment between the two changes
+   nothing. (An earlier driver merged the two reports when a comment stood
+   between them; this pins that it no longer does.) *)
 let two_holes =
   {|fn broken(reg u32 x -> reg u32 {
   return x;
@@ -666,8 +661,8 @@ fn broken2(reg u32 y -> reg u32 {
 let test_two_holes () =
   check "two holes: a blank line between them keeps two stubs"
     (dropped_names (parse two_holes) = [ "broken"; "broken2" ]);
-  check "two holes: a comment between them merges them into one report"
-    (dropped_names (parse two_holes_with_a_comment) = [ "broken2" ])
+  check "two holes: a comment between them keeps two stubs"
+    (dropped_names (parse two_holes_with_a_comment) = [ "broken"; "broken2" ])
 
 let test_one_hole_one_stub () =
   let parsed = parse fn_less_item in
@@ -851,7 +846,7 @@ let test_virtual_brace_keeps_the_function () =
     (Jide_jasmin.Parse.dropped parsed = []);
   check "virtual brace: a brace restart did the work" (brace_restarts parsed = 1);
   check "virtual brace: no byte is rewritten"
-    (Jide_jasmin.Parse.recovered parsed = [] && byte_restarts parsed = 0);
+    (Jide_jasmin.Parse.recovered parsed = []);
   (* The brace has no bytes of its own, and where it goes is a rule: it is
      written where the missing [}] would have been, at the end of the last
      token the parser shifted. The last token here is the [;] at byte 42, so
@@ -952,9 +947,9 @@ let test_namespace_and_the_items_after_it () =
     (item_names parsed = [ "N"; "after" ]);
   check "namespace tail: the broken item is stubbed once"
     (List.length (Jide_jasmin.Parse.dropped parsed) = 1);
-  (* A namespace that is dropped altogether must not take the items after it
-     with it either. *)
-  let dropped =
+  (* A namespace whose only item is broken is still a namespace: it stays,
+     empty, and the item after it is not taken with it. *)
+  let emptied =
     parse
       "namespace N {\n\
       \  fn broken(reg u32 a -> reg u32 { return a; }\n\
@@ -963,8 +958,27 @@ let test_namespace_and_the_items_after_it () =
       \  return a;\n\
        }\n"
   in
+  check "namespace tail: a namespace whose only item broke stays, empty"
+    (item_names emptied = [ "N"; "after" ]);
+  check "namespace tail: and the broken item is stubbed under its own name"
+    (match Jide_jasmin.Parse.dropped emptied with
+    | [ Jide_jasmin.Recover.Dropped { kind; name; _ } ] ->
+        kind = Jide_jasmin.Recover.Function && name = Some "broken"
+    | _ -> false);
+  (* A namespace that is dropped altogether, its header broken beyond one
+     token, must not take the items after it with it either. Its items are
+     whole, so they are kept, outside it. *)
+  let dropped =
+    parse
+      "namespace N = = {\n\
+      \  fn ok(reg u32 a) -> reg u32 { return a; }\n\
+       }\n\
+       fn after(reg u32 a) -> reg u32 {\n\
+      \  return a;\n\
+       }\n"
+  in
   check "namespace tail: a dropped namespace leaves the rest in the tree"
-    (item_names dropped = [ "after" ]);
+    (item_names dropped = [ "ok"; "after" ]);
   check "namespace tail: the dropped namespace is stubbed under its own name"
     (match Jide_jasmin.Parse.dropped dropped with
     | [ Jide_jasmin.Recover.Dropped { kind; name; _ } ] ->
@@ -1268,6 +1282,132 @@ let test_stubs_are_in_the_item_stream () =
        (function Jide_jasmin.Parse.Kept _ -> true | _ -> false)
        (Jide_jasmin.Parse.items_with_stubs (parse valid)))
 
+(* The fence. A broken item ends at the first token after it from which a
+   whole item parses, so no repair of it can swallow an item the fault did not
+   touch, whatever the fault did to the braces in between. Each case below
+   is checked against the same text parsed with no fault at all: the items
+   after the hole keep the compiler's own extents. *)
+let four_functions =
+  {|fn first(reg u32 a) -> reg u32 {
+  return a;
+}
+
+inline fn second(reg u32 a) -> reg u32 {
+  return a;
+}
+
+fn third(reg u32 a) -> reg u32 {
+  return a;
+}
+
+u32[2] g = { 1, 2 };
+|}
+
+let entries_after byte parsed =
+  List.filter (fun (_, start, _) -> start >= byte) (outline parsed)
+
+let test_fence () =
+  let clean = outline (parse four_functions) in
+  let after_first = List.filter (fun (name, _, _) -> name <> "first") clean in
+  (* The [}] that closes [first] written as [;]: the body stays open, and
+     [inline] can begin a declaration in it, so the parser reads it and fails
+     only at [fn]. The fence is at [inline], before the failure. *)
+  let open_body =
+    replace_nth four_functions ~needle:"}\n\ninline" ~replacement:";\n\ninline"
+      0
+  in
+  let parsed = parse open_body in
+  check "fence: an open body keeps every item after it"
+    (entries_after 1 parsed
+    |> List.filter (fun (name, _, _) -> name <> "first")
+    = after_first);
+  check "fence: the item whose first token the body read keeps it"
+    (List.exists
+       (fun (item : Jasmin.Syntax.pitem Jasmin.Location.located) ->
+         match Jasmin.Location.unloc item with
+         | Jasmin.Syntax.PFundef definition ->
+             Jasmin.Location.unloc definition.Jasmin.Syntax.pdf_name = "second"
+             && definition.Jasmin.Syntax.pdf_cc = Some `Inline
+         | _ -> false)
+       (Jide_jasmin.Parse.items parsed));
+  (* A [{] deleted inside [first]: from there on the text has one brace
+     fewer, so no depth read off the text in front of the hole is right. *)
+  let missing_open =
+    replace_nth four_functions ~needle:"u32 {\n  return a;\n}\n\ninline"
+      ~replacement:"u32  \n  return a;\n}\n\ninline" 0
+  in
+  check "fence: a lost brace before the hole moves no item after it"
+    (List.filter
+       (fun (name, _, _) -> name <> "first")
+       (outline (parse missing_open))
+    = after_first);
+  (* A declaration with an initialiser inside a broken body reads like a
+     global once its storage class is skipped. It is not one: no item ends
+     with [reg], so a type after it never begins an item. *)
+  let body_declaration =
+    "fn broken(reg u64 a -> reg u64 {\n\
+    \  reg u64 x = 0;\n\
+    \  return x;\n\
+     }\n\
+     u64 g = 1;\n"
+  in
+  let parsed = parse body_declaration in
+  check "fence: a local with an initialiser is not a global"
+    (item_names parsed = [ "g" ] && dropped_names parsed = [ "broken" ]);
+  (* And a global after a body that lost its [}]: the body is closed at the
+     fence by a virtual brace and both items stay. *)
+  let unclosed_then_global =
+    "fn f(reg u64 a) -> reg u64 {\n  return a;\n\nu64 g = 1;\n"
+  in
+  let parsed = parse unclosed_then_global in
+  check "fence: a global after an unclosed body is found"
+    (item_names parsed = [ "f"; "g" ] && Jide_jasmin.Parse.dropped parsed = [])
+
+(* A namespace is the one item that holds items, so where it closes decides
+   what the items after it are called. *)
+let test_namespace_fence () =
+  let text =
+    "namespace N {\n\
+    \  fn f(reg u32 a) -> reg u32 { return a; }\n\
+     }\n\
+     fn after(reg u32 a) -> reg u32 { return a; }\n"
+  in
+  let names parsed =
+    List.concat_map
+      (fun (item : Jasmin.Syntax.pitem Jasmin.Location.located) ->
+        match Jasmin.Location.unloc item with
+        | Jasmin.Syntax.PNamespace (name, inner) ->
+            let name = Jasmin.Location.unloc name in
+            ("namespace " ^ name)
+            :: List.map
+                 (fun inner -> name ^ "::" ^ inner)
+                 (List.concat_map names_of_item inner)
+        | _ -> names_of_item item)
+      (Jide_jasmin.Parse.items parsed)
+  in
+  let clean = names (parse text) in
+  (* The namespace's [}] written as [;]. Deleting the [;] would leave
+     [after] inside the namespace; writing [}] for it leaves the parser at
+     the depth the rest of the file closes, which is the repair taken. *)
+  let semicolon =
+    replace_nth text ~needle:"}\nfn after" ~replacement:";\nfn after" 0
+  in
+  check
+    "namespace fence: a [;] for the namespace's [}] keeps the item after it \
+     outside"
+    (names (parse semicolon) = clean);
+  (* The namespace's [{] deleted: its function parses on its own, but the
+     braces after it say it lies inside a block, so it is the namespace's. *)
+  let no_brace = replace_nth text ~needle:"N {" ~replacement:"N  " 0 in
+  check "namespace fence: a header without its brace keeps its items inside"
+    (names (parse no_brace) = clean);
+  (* The keyword deleted: the name and the brace are there. *)
+  let no_keyword =
+    replace_nth text ~needle:"namespace" ~replacement:"         " 0
+  in
+  check "namespace fence: a header without its keyword keeps its items inside"
+    (names (parse no_keyword) = clean)
+
 let test_no_exception_escapes () =
   let hostile =
     [
@@ -1325,6 +1465,8 @@ let () =
   test_restarted_items_keep_their_place ();
   test_restart_position ();
   test_stubs_are_in_the_item_stream ();
+  test_fence ();
+  test_namespace_fence ();
   test_no_exception_escapes ();
   if !failures = 0 then print_endline "all recovery tests passed"
   else (
