@@ -1,22 +1,22 @@
 (test
  (name test_adapter)
  (modules test_adapter)
- (libraries jide_jasmin jide_lang jasmin.jasmin))
+ (libraries jide_jasmin jide_lang jasmin))
 
 (test
  (name test_facts)
  (modules test_facts)
- (libraries jide_jasmin jide_lang jasmin.jasmin))
+ (libraries jide_jasmin jide_lang jasmin))
 
 (test
  (name test_recover)
  (modules test_recover token_names)
- (libraries jide_jasmin jide_lang jasmin.jasmin menhirLib))
+ (libraries jide_jasmin jide_lang jasmin menhirLib))
 
 (test
  (name test_typing)
  (modules test_typing)
- (libraries jide_jasmin jide_lang jasmin.jasmin))
+ (libraries jide_jasmin jide_lang jasmin))
 
 (test
  (name test_warnings)
