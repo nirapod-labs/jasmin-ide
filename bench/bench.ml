@@ -349,3 +349,45 @@ let measure_keystroke ~runs unit_ =
   in
   { keystroke_unit = unit_; samples; log = List.rev !log }
 
+let print_keystroke_samples results =
+  List.iter
+    (fun result ->
+      List.iteri
+        (fun index sample ->
+          Printf.printf "keystroke %s %d %.4f %.4f %.4f %.4f %d\n"
+            result.keystroke_unit.label (index + 1) sample.total sample.loop
+            sample.checked sample.converted sample.found)
+        result.samples)
+    results
+
+let print_keystroke_table results =
+  Printf.printf "%-44s %-7s %3s %10s %8s %8s %8s %8s %8s %5s %6s\n" "unit"
+    "arch" "n" "median" "p95" "max" "loop" "check" "convert" "diags" "errors";
+  List.iter
+    (fun result ->
+      let field f = List.map f result.samples in
+      Printf.printf
+        "%-44s %-7s %3d %10.3f %8.3f %8.3f %8.3f %8.3f %8.3f %5d %6d\n"
+        result.keystroke_unit.label result.keystroke_unit.arch_name
+        (List.length result.samples)
+        (median (field (fun sample -> sample.total)))
+        (percentile 0.95 (field (fun sample -> sample.total)))
+        (maximum (field (fun sample -> sample.total)))
+        (median (field (fun sample -> sample.loop)))
+        (median (field (fun sample -> sample.checked)))
+        (median (field (fun sample -> sample.converted)))
+        (match result.samples with [] -> 0 | sample :: _ -> sample.found)
+        (List.fold_left
+           (fun total sample -> total + sample.failed)
+           0 result.samples);
+      List.iter
+        (fun message ->
+          Printf.printf "  log %s: %s\n" result.keystroke_unit.label message)
+        result.log)
+    results
+
+(* -- the largest corpus files -------------------------------------------- *)
+
+let is_jasmin_file name =
+  Filename.check_suffix name ".jazz" || Filename.check_suffix name ".jinc"
+
