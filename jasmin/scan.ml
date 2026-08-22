@@ -88,8 +88,8 @@ let item_tokens =
     annotations, so a body legitimately contains them. [export] is an
     annotation label as well, and it is here because it cannot begin a
     statement: the places it can appear inside a body are all inside a [#[]
-    group, and a virtual [}] offered there breaks that group, so the attempt
-    is thrown away by the check that follows it (see [Recover.close_blocks]).
+    group, and a virtual [}] offered there breaks that group, so the parser
+    refuses the attempt and the driver tries its other repairs.
     A name is left out for the same reason: it begins a statement as well as
     a global. *)
 let item_only_tokens =
@@ -109,8 +109,7 @@ let item_only_tokens =
     set above leaves out; a test pins it. A token of this set that is where
     an item belongs may begin a global, may begin a statement and may
     continue an expression, so it is never a restart target on its own: the
-    driver asks the parser whether an item really begins there
-    ([Recover.item_begins]). *)
+    driver asks the parser whether a whole item really parses from there. *)
 let type_tokens =
   [
     Parser.T_BOOL;
@@ -328,17 +327,6 @@ let eof_of ~name text =
     pos_cnum = String.length text;
   }
 
-(** The blocks the buffer leaves open, which is how many virtual [}] tokens
-    a file that ends inside a body needs. *)
-let open_depth t =
-  Array.fold_left
-    (fun depth entry ->
-      match entry.token with
-      | Parser.LBRACE -> depth + 1
-      | Parser.RBRACE -> max 0 (depth - 1)
-      | _ -> depth)
-    0 t.tokens
-
 (** Why a buffer was refused: it has more bytes than one scan will read, or
     it holds more tokens than one scan will build. The two are reported
     apart, because the buffer that fills the byte ceiling exactly is refused
@@ -393,101 +381,6 @@ let triple t index =
   (entry.token, entry.start_pos, entry.end_pos)
 
 let eof_triple t = (Parser.EOF, t.eof, t.eof)
-
-(** [next_item t ~from] is the token index the driver restarts an item at:
-    the first token at or after [from] that can begin an item, among those
-    with the smallest brace depth the rest of the buffer offers. The depth
-    matters because a missing [}] leaves every later token one level deeper
-    than it reads, and a missing [}] in the item being skipped leaves it one
-    level shallower; the smallest depth is the item level either way. *)
-let next_item t ~from =
-  let length = count t in
-  let from = max 0 from in
-  if from >= length then None
-  else
-    let best_depth = ref max_int and best = ref None in
-    for index = from to length - 1 do
-      let entry = t.tokens.(index) in
-      if item_start entry.token && entry.depth < !best_depth then (
-        best_depth := entry.depth;
-        best := Some index)
-    done;
-    !best
-
-(** [next_item_at_depth t ~from ~depth] is the first token at or after
-    [from] that can begin an item at exactly [depth], for a restart that
-    resumes inside the same block as the checkpoint it starts from: an item
-    inside a namespace is a restart point only while the parser is still
-    inside that namespace. *)
-let next_item_at_depth t ~from ~depth =
-  let length = count t in
-  let rec loop index =
-    if index >= length then None
-    else
-      let entry = t.tokens.(index) in
-      if item_start entry.token && entry.depth = depth then Some index
-      else loop (index + 1)
-  in
-  loop (max 0 from)
-
-(** [type_candidates t ~from ~depth] are the token indices at or after
-    [from], in order, that could begin a global declaration at [depth]:
-    {!type_start} tokens at exactly that depth, or at the smallest depth the
-    rest of the buffer offers when [depth] is [None]. A global begins with its
-    type, which is also a statement and an expression, so an index from this
-    list is only a candidate: the caller has to ask the parser whether an
-    item really begins there. The list is in buffer order and each call
-    rescans, so a caller that rejects the first few candidates does not need
-    the list to be memoised. *)
-let type_candidates t ~from ~depth =
-  let length = count t in
-  let from = max 0 from in
-  if from >= length then []
-  else
-    let wanted =
-      match depth with
-      | Some depth -> depth
-      | None ->
-          let smallest = ref max_int in
-          for index = from to length - 1 do
-            if t.tokens.(index).depth < !smallest then
-              smallest := t.tokens.(index).depth
-          done;
-          !smallest
-    in
-    let found = ref [] in
-    for index = length - 1 downto from do
-      let entry = t.tokens.(index) in
-      if entry.depth = wanted && type_start entry.token then
-        found := index :: !found
-    done;
-    !found
-
-(** [item_root t index] is the token the top-level item containing [index]
-    begins at: [index] itself when it is already at item level, and the
-    keyword of the enclosing item when it is not. Blanking from there keeps
-    the braces that item opened balanced, which is what a prefix built to
-    survive has to do. *)
-let item_root t index =
-  let length = count t in
-  let index = max 0 (min index length) in
-  if index >= length then index
-  else
-    let rec below from depth =
-      let rec loop at =
-        if at < 0 then None
-        else if t.tokens.(at).depth < depth && item_start t.tokens.(at).token
-        then Some at
-        else loop (at - 1)
-      in
-      loop (from - 1)
-    in
-    let rec walk at =
-      let depth = t.tokens.(at).depth in
-      if depth = 0 then at
-      else match below at depth with Some outer -> walk outer | None -> at
-    in
-    walk index
 
 (** [statement_boundary t index] is true when the token at [index] begins a
     statement: it is one of the statement's own first tokens and the token
