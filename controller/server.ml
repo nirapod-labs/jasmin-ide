@@ -440,48 +440,51 @@ let handle_navigation t (request : Jsonrpc.Request.t) =
   | _ -> None
 
 let handle_initialized_request t request =
-  match Lsp.Client_request.of_jsonrpc request with
-  | Error message ->
-      [ reply_error request.id (error_code `InvalidRequest) message ]
-  | Ok (E (Lsp.Client_request.Initialize _)) ->
-      [
-        reply_error request.id
-          (error_code `InvalidRequest)
-          "the server is already initialized";
-      ]
-  | Ok (E Lsp.Client_request.Shutdown) -> (
-      match handle_shutdown t with
-      | Ok () -> [ reply_ok request.id `Null ]
-      | Error `ServerNotInitialized ->
-          [
-            reply_error request.id
-              (error_code `ServerNotInitialized)
-              "the server is not initialized";
-          ]
-      | Error `InvalidRequest ->
+  match handle_navigation t request with
+  | Some packets -> packets
+  | None -> (
+      match Lsp.Client_request.of_jsonrpc request with
+      | Error message ->
+          [ reply_error request.id (error_code `InvalidRequest) message ]
+      | Ok (E (Lsp.Client_request.Initialize _)) ->
           [
             reply_error request.id
               (error_code `InvalidRequest)
-              "the server is shutting down";
+              "the server is already initialized";
           ]
-      | Error _ ->
+      | Ok (E Lsp.Client_request.Shutdown) -> (
+          match handle_shutdown t with
+          | Ok () -> [ reply_ok request.id `Null ]
+          | Error `ServerNotInitialized ->
+              [
+                reply_error request.id
+                  (error_code `ServerNotInitialized)
+                  "the server is not initialized";
+              ]
+          | Error `InvalidRequest ->
+              [
+                reply_error request.id
+                  (error_code `InvalidRequest)
+                  "the server is shutting down";
+              ]
+          | Error _ ->
+              [
+                reply_error request.id
+                  (error_code `InternalError)
+                  "unexpected shutdown state";
+              ])
+      | Ok (E (Lsp.Client_request.UnknownRequest { meth; _ })) ->
           [
             reply_error request.id
-              (error_code `InternalError)
-              "unexpected shutdown state";
+              (error_code `MethodNotFound)
+              ("unknown request: " ^ meth);
+          ]
+      | Ok (E _) ->
+          [
+            reply_error request.id
+              (error_code `MethodNotFound)
+              ("unsupported request: " ^ request.method_);
           ])
-  | Ok (E (Lsp.Client_request.UnknownRequest { meth; _ })) ->
-      [
-        reply_error request.id
-          (error_code `MethodNotFound)
-          ("unknown request: " ^ meth);
-      ]
-  | Ok (E _) ->
-      [
-        reply_error request.id
-          (error_code `MethodNotFound)
-          ("unsupported request: " ^ request.method_);
-      ]
 
 let dispatch_request t (request : Jsonrpc.Request.t) =
   if String.equal request.method_ "initialize" then
