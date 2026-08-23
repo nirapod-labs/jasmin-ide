@@ -86,7 +86,11 @@ extract_structural() {
 		text = trim(line)
 
 		if (in_run) {
-			if (ind > run_indent) { print "runline\t" FILENAME "\t" NR "\t" text; next }
+			if (ind > run_indent) {
+				print "runline\t" FILENAME "\t" NR "\t" text
+				print "jobrun\t" FILENAME "\t" job "\t" NR "\t" text
+				next
+			}
 			in_run = 0
 		}
 
@@ -105,7 +109,7 @@ extract_structural() {
 		anchored = index(text, ": &") > 0 || index(text, ": *") > 0
 		if (item && (tail == "&" || tail == "*")) anchored = 1
 		if (flow || anchored) {
-			print "unchecked\t" FILENAME "\tflow style, an anchor or an alias, which this reader does not follow"
+			print "unchecked\t" FILENAME "\t" NR "\tflow style, an anchor or an alias, which this reader does not follow"
 			next
 		}
 
@@ -115,14 +119,17 @@ extract_structural() {
 			if (top in top_seen)
 				print "dupkey\t" FILENAME "\t" NR "\t" top
 			top_seen[top] = 1
-			if (top == "permissions") in_permissions = 1
-			else if (top == "env") in_env = 1
+			if (top == "permissions") {
+				in_permissions = 1
+				print "topblock\t" FILENAME "\t" NR
+			} else if (top == "env") in_env = 1
 			else if (top == "jobs") in_jobs = 1
 			next
 		}
 
-		if (in_permissions && ind == 2 && key_of(text) == "contents") {
-			print "topperm\t" FILENAME "\t" value_of(text, "contents")
+		if (in_permissions && ind == 2) {
+			keyed = key_of(text)
+			print "topkey\t" FILENAME "\t" NR "\t" keyed "\t" value_of(text, keyed)
 			next
 		}
 		if (in_env && ind == 2) {
@@ -130,7 +137,7 @@ extract_structural() {
 			if (keyed in env_seen)
 				print "dupkey\t" FILENAME "\t" NR "\t" keyed
 			env_seen[keyed] = 1
-			print "env\t" FILENAME "\t" keyed "\t" value_of(text, keyed)
+			print "env\t" FILENAME "\t" NR "\t" keyed "\t" value_of(text, keyed)
 			next
 		}
 		if (!in_jobs) next
@@ -146,12 +153,20 @@ extract_structural() {
 		if (job_perm) {
 			if (ind > job_perm) {
 				key = key_of(text)
-				print "jobperm\t" FILENAME "\t" job "\t" key "\t" value_of(text, key)
+				print "jobperm\t" FILENAME "\t" job "\t" NR "\t" key "\t" value_of(text, key)
 				next
 			}
 			job_perm = 0
 		}
-		if (ind == 4 && key_of(text) == "permissions") { job_perm = ind; next }
+		if (ind == 4 && key_of(text) == "permissions") {
+			job_perm = ind
+			print "jobpermblock\t" FILENAME "\t" job "\t" NR
+			next
+		}
+		if (ind == 8 && key_of(text) == "permissions") {
+			print "unchecked\t" FILENAME "\t" NR "\ta step declares permissions:, which GitHub reads on a job and not on a step"
+			next
+		}
 		if (ind == 4 && key_of(text) == "environment") {
 			value = value_of(text, "environment")
 			print "jobenv\t" FILENAME "\t" job "\t" (value == "" ? "nokey" : value)
@@ -160,13 +175,16 @@ extract_structural() {
 		body = text
 		if (item) body = substr(text, 3)
 		if (body ~ /^uses:/) {
-			print "uses\t" FILENAME "\t" NR "\t" value_of(body, "uses")
+			print "uses\t" FILENAME "\t" job "\t" NR "\t" value_of(body, "uses")
 			next
 		}
 		if (body ~ /^run:/) {
 			value = value_of(body, "run")
 			if (value ~ /^[|>]/) { in_run = 1; run_indent = ind }
-			else print "runline\t" FILENAME "\t" NR "\t" value
+			else {
+				print "runline\t" FILENAME "\t" NR "\t" value
+				print "jobrun\t" FILENAME "\t" job "\t" NR "\t" value
+			}
 			next
 		}
 	}
@@ -174,23 +192,46 @@ extract_structural() {
 }
 
 for file in $workflows; do
-	if [ "$mode" = yaml ]; then
-		extract_yaml "$file"
-	else
-		extract_structural "$file" >>"$facts"
-	fi
-	if ! grep -q "^topperm	$file" "$facts"; then
-		printf 'topperm\t%s\tnokey\n' "$file" >>"$facts"
-	fi
+	printf 'file\t%s\n' "$file" >>"$facts"
+	extract_structural "$file" >>"$facts"
 done
 
-if [ "$mode" = yaml ]; then
-	printf 'check-workflows: yaml mode: python3 with PyYAML parsed every file\n'
-else
-	printf 'check-workflows: structural mode: no PyYAML, so the arguments were read from the indentation with awk; anchors, aliases and flow mappings are not understood\n'
-fi
+printf 'check-workflows: structural mode: the arguments were read from the indentation with awk; anchors, aliases and flow mappings are not understood\n'
 printf 'check-workflows: %s workflow file(s) under %s\n' \
 	"$(printf '%s\n' $workflows | wc -l | tr -d ' ')" "$dir"
+
+if command -v actionlint >/dev/null 2>&1; then
+	if lint_output=$(actionlint $workflows 2>&1); then
+		printf 'check-workflows: actionlint %s read every file and found nothing\n' \
+			"$(actionlint --version 2>/dev/null | head -n 1)"
+	else
+		lint_status=$?
+		if [ "$lint_status" -eq 1 ]; then
+			printf 'check-workflows: actionlint found problems in these files\n'
+			printf '%s\n' "$lint_output" | awk '
+				{
+					if (match($0, /^[^:]+:[0-9]+:[0-9]+: /)) {
+						head = substr($0, 1, RLENGTH)
+						rest = substr($0, RLENGTH + 1)
+						split(head, parts, ":")
+						printf "violation: extract: %s:%s: actionlint: %s\n", \
+							parts[1], parts[2], rest
+					} else if ($0 ~ /^[ ]/ || $0 ~ /^[|]/ || $0 ~ /^[0-9]+[ ]*[|]/) {
+						next
+					} else {
+						printf "violation: extract: actionlint: %s\n", $0
+					}
+				}
+			' >>"$found"
+		else
+			printf '%s: actionlint could not run (exit %s), so whether these files are valid workflows was not checked\n' \
+				"$prog" "$lint_status" >&2
+			exit 2
+		fi
+	fi
+else
+	printf 'check-workflows: no actionlint on this host, so whether these files are valid workflows was not checked\n'
+fi
 
 targets=$tmp/targets
 {
@@ -218,8 +259,8 @@ pins_counts=$tmp/pins.counts
 : >"$pins_counts"
 
 awk -F'\t' -v counts="$pins_counts" '
-	$1 == "env" { env_path[++n_env] = $2; env_name[n_env] = $3; env_value[n_env] = $4 }
-	$1 == "uses" { use_path[++n_use] = $2; use_line[n_use] = $3; use_ref[n_use] = $4 }
+	$1 == "env" { env_path[++n_env] = $2; env_line[n_env] = $3; env_name[n_env] = $4; env_value[n_env] = $5 }
+	$1 == "uses" { use_path[++n_use] = $2; use_line[n_use] = $4; use_ref[n_use] = $5 }
 
 	END {
 		for (i = 1; i <= n_env; i++) {
