@@ -76,52 +76,27 @@ impl zed::Extension for JasminExtension {
             .unwrap_or_default();
         let configured_environment = binary.as_ref().and_then(|binary| binary.env.clone());
 
-        // 1. The path in the user's settings, used exactly as written: a build
-        //    from an opam switch, a development build, or a copy kept
-        //    somewhere specific.
-        if let Some(path) = binary.as_ref().and_then(|binary| binary.path.clone()) {
-            return Ok(server_command(
-                path,
-                arguments,
-                worktree,
-                configured_environment.as_ref(),
-            ));
-        }
+        // The four places, in order: the setting, `PATH`, a copy downloaded
+        // earlier that still matches its digest, and the release download.
+        let source = choose_source(
+            binary.as_ref().and_then(|binary| binary.path.clone()),
+            worktree.which(SERVER_BINARY),
+            platform_tag,
+            |platform| {
+                let cached = asset_name(VERSION, platform);
+                let expected = expected_digest(platform)?;
+                cached_copy_is_usable(&cached, expected).then_some(cached)
+            },
+        )?;
 
-        // 2. The executable on the user's `PATH`.
-        if let Some(path) = worktree.which(SERVER_BINARY) {
-            return Ok(server_command(
-                path,
-                arguments,
-                worktree,
-                configured_environment.as_ref(),
-            ));
-        }
-
-        // Both remaining steps need a released binary, and only three
-        // platforms have one.
-        let platform = platform_tag()?;
-
-        // 3. A copy downloaded earlier, if it still matches its digest. A copy
-        //    that does not match is deleted by the check, and the download
-        //    below replaces it.
-        if let Some(expected) = expected_digest(platform) {
-            let cached = asset_name(VERSION, platform);
-            if std::fs::metadata(&cached).is_ok() && digest::verify_file(&cached, expected).is_ok()
-            {
-                return Ok(server_command(
-                    cached,
-                    arguments,
-                    worktree,
-                    configured_environment.as_ref(),
-                ));
+        let command = match source {
+            ServerSource::Setting(path) | ServerSource::Path(path) | ServerSource::Cached(path) => {
+                path
             }
-        }
-
-        // 4. The release download, also held to the compiled-in digest.
-        let path = download_server(language_server_id, platform)?;
+            ServerSource::Release(platform) => download_server(language_server_id, platform)?,
+        };
         Ok(server_command(
-            path,
+            command,
             arguments,
             worktree,
             configured_environment.as_ref(),
@@ -147,6 +122,73 @@ impl zed::Extension for JasminExtension {
             &options,
         ))))
     }
+}
+
+/// The four places the server is taken from, in the order they are tried.
+#[derive(Debug, PartialEq, Eq)]
+enum ServerSource {
+    /// `lsp.jasmin-lsp.binary.path` in the user's settings, as written.
+    Setting(String),
+    /// `jasmin-lsp` on the user's `PATH`.
+    Path(String),
+    /// A copy from an earlier download that still matches its digest.
+    Cached(String),
+    /// The release download, which carries the platform tag to download for.
+    Release(&'static str),
+}
+
+/// Chooses the first of the four places that can supply the server: the
+/// setting, `PATH`, a copy downloaded earlier, and the release download.
+///
+/// Neither closure runs unless the places before it found nothing, so a
+/// configured path costs no platform check and no file system read. That is
+/// what makes the order of this function the whole of the lookup order.
+fn choose_source(
+    setting: Option<String>,
+    on_path: Option<String>,
+    platform: impl FnOnce() -> zed::Result<&'static str>,
+    cached: impl FnOnce(&'static str) -> Option<String>,
+) -> zed::Result<ServerSource> {
+    if let Some(path) = setting {
+        return Ok(ServerSource::Setting(path));
+    }
+    if let Some(path) = on_path {
+        return Ok(ServerSource::Path(path));
+    }
+    let platform = platform()?;
+    match cached(platform) {
+        Some(path) => Ok(ServerSource::Cached(path)),
+        None => Ok(ServerSource::Release(platform)),
+    }
+}
+
+/// True when a copy from an earlier download is there and still matches the
+/// digest the release records. `digest::verify_file` deletes a copy that does
+/// not match, so the release download replaces it and a stale binary is never
+/// started.
+fn cached_copy_is_usable(path: &str, expected_hex: &str) -> bool {
+    std::fs::metadata(path).is_ok() && digest::verify_file(path, expected_hex).is_ok()
+}
+
+/// The digest a release download has to match, or the refusal that stops the
+/// download before any request is made: a build that records no digest for the
+/// platform never downloads a binary it cannot check.
+fn download_digest(platform: &str) -> Result<&'static str, String> {
+    expected_digest(platform).ok_or_else(|| {
+        format!(
+            "This build of the Jasmin IDE extension records no SHA-256 for the {platform} \
+             language server, so it will not download one. Set `lsp.{SERVER_ID}.binary.path` \
+             to a `{SERVER_BINARY}` build of your own."
+        )
+    })
+}
+
+/// Checks a downloaded file against the digest compiled into this build. A
+/// file that does not match is deleted by the check before this returns, so it
+/// is never made executable, and the error names the file and both digests.
+fn accept_download(path: &str, expected_hex: &str) -> Result<(), String> {
+    digest::verify_file(path, expected_hex)
+        .map_err(|error| format!("the language server download was refused: {error}"))
 }
 
 /// Downloads the server for `platform` and returns the path it was saved to,

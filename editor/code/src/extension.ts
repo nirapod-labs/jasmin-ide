@@ -3,18 +3,18 @@ import { delimiter, join } from "node:path";
 import * as vscode from "vscode";
 import { LanguageClient, State, TransportKind } from "vscode-languageclient/node";
 import type { LanguageClientOptions, ServerOptions } from "vscode-languageclient/node";
+import { restartCommand, showLogCommand } from "./commands.js";
 import { resolveServerPath } from "./server-lookup.js";
 import type { ServerSource } from "./server-lookup.js";
 import { planServerLaunch } from "./server-start.js";
-import { configurationSection, readSettings } from "./settings.js";
+import { configurationSection, readSettings, toInitializationOptions } from "./settings.js";
+import type { ConfigurationReader } from "./settings.js";
+import { versionMismatchMessage } from "./version-check.js";
 
 const languageId = "jasmin-crypto";
 const clientId = configurationSection;
 const clientName = "Jasmin IDE";
 const outputChannelName = "Jasmin IDE";
-
-const restartCommand = "jasminIde.restartServer";
-const showLogCommand = "jasminIde.showServerLog";
 
 // The transports the launch plan can name, by the name the plan gives them.
 const transports = {stdio: TransportKind.stdio} as const;
@@ -77,7 +77,7 @@ async function startServer(
     return;
   }
 
-  const settings = readSettings();
+  const settings = readSettings(workspaceConfiguration());
   const resolution = resolveServerPath({
     settingPath: settings.serverPath,
     extensionPath: context.extensionPath,
@@ -107,7 +107,10 @@ async function startServer(
     documentSelector: [{language: languageId}],
     outputChannel: output,
     synchronize: {configurationSection},
-    initializationOptions: launch.initializationOptions
+    // The plan carries the same three options, built from the same settings;
+    // the client sends the mapping the settings module owns, because that is
+    // the one the settings tests cover.
+    initializationOptions: toInitializationOptions(settings)
   };
 
   const started = new LanguageClient(clientId, clientName, serverOptions, clientOptions);
@@ -154,21 +157,13 @@ function warnOnVersionMismatch(
   running: LanguageClient,
   output: vscode.LogOutputChannel
 ): void {
-  const serverVersion = running.initializeResult?.serverInfo?.version;
-  if (serverVersion === undefined) {
-    // A server that reports no serverInfo is not an error.
+  const message = versionMismatchMessage(extensionVersion(context), running.initializeResult);
+  if (message === undefined) {
+    // Matching versions, an unknown extension version, or a server that
+    // reports no serverInfo: all of them are silent.
     return;
   }
 
-  const clientVersion = extensionVersion(context);
-  if (clientVersion === undefined || clientVersion === serverVersion) {
-    return;
-  }
-
-  const message =
-    `The Jasmin language server reports version ${serverVersion}, ` +
-    `but this extension is version ${clientVersion}. ` +
-    "Some features may be missing or may not work.";
   output.warn(message);
   void vscode.window.showWarningMessage(message);
 }
@@ -179,6 +174,14 @@ function extensionVersion(context: vscode.ExtensionContext): string | undefined 
   // here so no untyped value reaches the rest of the extension.
   const manifest = context.extension.packageJSON as {readonly version?: unknown};
   return typeof manifest.version === "string" ? manifest.version : undefined;
+}
+
+/** The `jasminIde` section, seen through the reader the settings module takes. */
+function workspaceConfiguration(): ConfigurationReader {
+  const configuration = vscode.workspace.getConfiguration(configurationSection);
+  return {
+    get: (section) => configuration.get(section)
+  };
 }
 
 /** Resolves a command name on `PATH`, the third place the lookup tries. */

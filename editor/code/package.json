@@ -87,7 +87,7 @@
             "verbose"
           ],
           "default": "off",
-          "description": "Trace the messages between the client and the server in the Jasmin IDE output channel."
+          "markdownDescription": "Detail of the protocol trace between the client and the server: `off`, `messages` or `verbose`. The trace is written to the Jasmin IDE output channel while that channel's log level is `Trace`."
         },
         "jasminIde.diagnostics.delay": {
           "type": "number",
