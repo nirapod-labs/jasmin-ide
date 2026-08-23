@@ -68,16 +68,19 @@ type use = {
   u_item : Jide_lang.Span.t;
   u_decl : Jide_lang.Span.t;
   u_dfile : string;
+  u_file : string;
 }
 (** One variable occurrence in a typed body, for example the [a] in
-    [b = a]. [u_span] is the range of the occurrence itself, in the checked
-    file, and [u_name] the name the compiler holds the variable by at it.
-    [u_item] is the range of the item the occurrence belongs to, that item's
-    {!i_span}. [u_decl] is the range of the declaration the compiler bound the
-    occurrence to, which is the {!v_dloc} of that variable, and [u_dfile] the
-    file the range indexes; together they are the declaration's identity. An
-    occurrence the compiler made up itself, which has no place in the source,
-    is not reported. *)
+    [b = a]. [u_span] is the range of the occurrence itself and [u_file] the
+    file that range indexes: the checked file for an occurrence the file
+    writes, and a required file for one the parser spliced into the checked
+    file from a [require]. [u_name] is the name the compiler holds the
+    variable by at it. [u_item] is the range of the item the occurrence
+    belongs to, that item's {!i_span}. [u_decl] is the range of the
+    declaration the compiler bound the occurrence to, which is the {!v_dloc}
+    of that variable, and [u_dfile] the file the range indexes; together they
+    are the declaration's identity. An occurrence the compiler made up itself,
+    which has no place in the source, is not reported. *)
 
 type item_kind = Function | Param | Global
 

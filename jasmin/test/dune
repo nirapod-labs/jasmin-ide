@@ -1,7 +1,7 @@
 (test
  (name test_adapter)
  (modules test_adapter)
- (libraries jide_jasmin jide_lang jasmin))
+ (libraries jide_jasmin jide_lang jasmin unix))
 
 (test
  (name test_facts)

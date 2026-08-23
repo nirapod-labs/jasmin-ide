@@ -39,6 +39,7 @@ type use = {
   u_item : Jide_lang.Span.t;
   u_decl : Jide_lang.Span.t;
   u_dfile : string;
+  u_file : string;
 }
 
 type item_kind = Function | Param | Global
