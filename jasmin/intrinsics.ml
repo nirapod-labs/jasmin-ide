@@ -195,6 +195,12 @@ let module_of ~arch =
 let all ~arch = entries_of (module_of ~arch) ~arch
 let arch_names = Arch.names
 
+(* The names [all ~arch] lists, in the same order and without the suffix
+   resolution: the keys of the table, which is all completion needs. *)
+let names ~arch =
+  let (module A) = module_of ~arch in
+  List.map fst (Sopn.prim_string A.asmOp_sopn)
+
 let suffixes_of ~arch name =
   match Arch.of_string arch with
   | None -> []
@@ -204,10 +210,9 @@ let suffixes_of ~arch name =
       | None -> []
       | Some constructor -> suffixes_of_constructor constructor)
 
-(* The operation a written suffix names, or [None] when [name] does not
-   take it. The suffix carries no leading underscore; [""] means none was
-   written. *)
-let resolve constructor ~name ~suffix =
+(* The operation a suffix names, or [None] when the constructor does not take
+   it. The suffix carries no leading underscore; [""] means none was written. *)
+let op_of_suffix constructor ~suffix =
   match constructor with
   | Sopn.PrimX86 (suffixes, make) -> (
       match suffix with
@@ -222,31 +227,17 @@ let resolve constructor ~name ~suffix =
           | None -> None
           | Some candidate -> make candidate))
   | Sopn.PrimARM make -> (
-      (* [Tt_arm_m4.get_arm_prim] strips a trailing ["cc"] and then a
-         trailing ["S"], so the suffix is read the same way here; what is
-         left must be the table's own spelling of the name. *)
-      let strip ending word =
-        let ending_length = String.length ending
-        and word_length = String.length word in
-        if
-          word_length >= ending_length
-          && String.equal
-               (String.sub word (word_length - ending_length) ending_length)
-               ending
-        then Some (String.sub word 0 (word_length - ending_length), true)
-        else Some (word, false)
-      in
-      match strip "cc" suffix with
-      | None -> None
-      | Some (without_conditional, conditional) -> (
-          match strip "S" without_conditional with
-          | None -> None
-          | Some (without_flags, set_flags) -> (
-              if not (String.equal without_flags name) then None
-              else
-                match make set_flags conditional with
-                | Error _ -> None
-                | Ok op -> Some op)))
+      (* An ARM suffix is one of the flag and condition spellings
+         [arm_suffixes] lists: ["S"] sets the flags, ["cc"] makes the
+         operation conditional, ["Scc"] does both and [""] does neither. The
+         name is not part of the suffix, so it is not compared here. *)
+      let set_flags = List.mem suffix [ "S"; "Scc" ]
+      and conditional = List.mem suffix [ "cc"; "Scc" ] in
+      if not (List.mem suffix [ ""; "S"; "cc"; "Scc" ]) then None
+      else
+        match make set_flags conditional with
+        | Error _ -> None
+        | Ok op -> Some op)
 
 (* [signature_of] resolves the pair the way [Pretyping.tt_prim] would, so a
    pair it reports is one the compiler accepts. *)

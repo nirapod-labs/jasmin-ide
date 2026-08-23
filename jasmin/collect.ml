@@ -322,7 +322,8 @@ let calls_of ~(item_span : Jide_lang.Span.t) ~(syntax : S.pinstr list)
   pair (syntax_calls syntax) (typed_calls body)
 
 let function_item ~(file : string) ~(env : 'asm Pretyping.Env.env)
-    ~(item_span : Jide_lang.Span.t) ~(name_span : Jide_lang.Span.t)
+    ~(reading : string) ~(item_span : Jide_lang.Span.t)
+    ~(name_span : Jide_lang.Span.t) ~(syntax : S.pinstr list)
     (func : (unit, 'asm) P.pfunc) : Facts.t =
   let body = stmt_vars no_occurrence func.P.f_body in
   (* A function's results are the variables [return] names, and the compiler
@@ -362,7 +363,8 @@ let function_item ~(file : string) ~(env : 'asm Pretyping.Env.env)
           i_vars = List.map var_of declared;
         };
       ];
-    uses = uses_of ~item_span returned;
+    uses = uses_of ~reading ~item_span returned;
+    calls = calls_of ~item_span ~syntax func.P.f_body;
   }
 
 let variable_item (kind : Facts.item_kind) ~(item_span : Jide_lang.Span.t)
@@ -381,14 +383,17 @@ let variable_item (kind : Facts.item_kind) ~(item_span : Jide_lang.Span.t)
         };
       ];
     uses = [];
+    calls = [];
   }
 
 (** [leaves item] is [item] with namespaces flattened: the items a fact can
-    be made for, in source order. *)
-let rec leaves (item : S.pitem L.located) : S.pitem L.located list =
+    be made for, in source order, each with the namespace path it sits in. *)
+let rec leaves ?(path = []) (item : S.pitem L.located) :
+    (string list * S.pitem L.located) list =
   match L.unloc item with
-  | S.PNamespace (_, items) -> List.concat_map leaves items
-  | _ -> [ item ]
+  | S.PNamespace (name, items) ->
+      List.concat_map (leaves ~path:(path @ [ L.unloc name ])) items
+  | _ -> [ (path, item) ]
 
 let decl_location (decl : (unit, 'asm) P.pmod_item) : L.t option =
   match decl with
@@ -409,17 +414,17 @@ let declares ~(item_span : Jide_lang.Span.t) (decl : (unit, 'asm) P.pmod_item) :
       && Jide_lang.Span.contains item_span ~byte:location.loc_bchar
 
 let item_of_leaf ~(file : string) ~(env : 'asm Pretyping.Env.env)
-    ~(decls : (unit, 'asm) P.pmod_item list) (leaf : S.pitem L.located) :
-    Facts.t =
+    ~(decls : (unit, 'asm) P.pmod_item list) ~(reading : string)
+    (leaf : S.pitem L.located) : Facts.t =
   let item_span = span (L.loc leaf) in
   let find () = List.find_opt (declares ~item_span) decls in
   match L.unloc leaf with
   | S.PFundef definition -> (
       match find () with
       | Some (P.MIfun func) ->
-          function_item ~file ~env ~item_span
+          function_item ~file ~env ~reading ~item_span
             ~name_span:(span (L.loc definition.S.pdf_name))
-            func
+            ~syntax:definition.S.pdf_body.S.pdb_instr func
       | _ -> Facts.empty)
   | S.PParam definition -> (
       match find () with
@@ -441,5 +446,7 @@ let of_item ~(file : string) ~(env : 'asm Pretyping.Env.env)
     ~(item : S.pitem L.located) ~(decls : (unit, 'asm) P.pmod_item list) :
     Facts.t =
   List.fold_left
-    (fun facts leaf -> Facts.merge facts (item_of_leaf ~file ~env ~decls leaf))
+    (fun facts (path, leaf) ->
+      let reading = String.concat "::" path in
+      Facts.merge facts (item_of_leaf ~file ~env ~decls ~reading leaf))
     Facts.empty (leaves item)

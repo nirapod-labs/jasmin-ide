@@ -69,6 +69,7 @@ type use = {
   u_decl : Jide_lang.Span.t;
   u_dfile : string;
   u_file : string;
+  u_reading : string;
 }
 (** One variable occurrence in a typed body, for example the [a] in
     [b = a]. [u_span] is the range of the occurrence itself and [u_file] the
@@ -79,8 +80,38 @@ type use = {
     belongs to, that item's {!i_span}. [u_decl] is the range of the
     declaration the compiler bound the occurrence to, which is the {!v_dloc}
     of that variable, and [u_dfile] the file the range indexes; together they
-    are the declaration's identity. An occurrence the compiler made up itself,
+    are the declaration's identity. [u_reading] is the namespace path the
+    occurrence's item was typed in, the path joined by [::] and empty at the
+    top level: a file a namespace requires is typed once per namespace, so a
+    use is one reading of its byte, and the reading tells the readings apart. An occurrence the compiler made up itself,
     which has no place in the source, is not reported. *)
+
+type call = {
+  c_span : Jide_lang.Span.t option;
+  c_callee : string;
+  c_item : Jide_lang.Span.t;
+  c_range : Jide_lang.Span.t;
+  c_file : string;
+}
+(** One call in a typed body, for example the [add (s)] of [s = add(s)].
+    [c_callee] is the name the compiler typed the call against. [c_span] is
+    the range that name was written at, and it is [None] when the syntax holds
+    no such range for the call. [c_range] is the range of the whole instruction
+    that makes the call, so [c_span] lies inside it, and [c_item] is the range
+    of the item the instruction belongs to, that item's {!i_span}. The
+    compiler's typed call keeps the function's name and not the range it was
+    written at, so [c_span] comes from the syntax instruction with the same
+    range. One instruction can make several calls, a declaration with several
+    initialisers does, and those calls are paired with the syntax in the order
+    they are written. A call with no name range is still reported, so that a
+    reader counts it.
+
+    [c_file] is the file both ranges index. It is the checked file for a call
+    the file writes itself, and the required file for a call written in a
+    [.jinc] the checked file pulls in: the parser splices a required file's
+    items into the requiring one, and their ranges stay in the required file's
+    own bytes. A reader that takes the ranges for the checked file's bytes
+    reads another file's text, so the field is what keeps the two apart. *)
 
 type item_kind = Function | Param | Global
 
@@ -100,14 +131,21 @@ type item = {
     initialiser nor a use is not there: the compiler's typing discards it,
     and these facts are the compiler's answer. *)
 
-type t = { items : item list; uses : use list }
-(** [items] are the items of one checked file, in source order, and they
-    all belong to that file. [uses] are the variable occurrences the items'
-    bodies hold, in source order by the byte an occurrence starts at; a
-    parameter and a global have no body and add none. *)
+type t = { items : item list; uses : use list; calls : call list }
+(** [items] are the items of the checked file, in source order, and they all
+    belong to that file. [uses] are the variable occurrences the bodies of the
+    checked file's items hold, and the bodies of the files its top-level
+    [require] items reach, each file's uses in source order by the byte an
+    occurrence starts at. A use names its file in {!use.u_file} and the
+    namespace it was typed in in {!use.u_reading}, so a use of a required file
+    is told apart from the document's own. A parameter and a global have no body
+    and add none. [calls] are the calls the checked file's bodies make, including
+    those of a file a namespace splices in, as {!call.c_file} says; a file a
+    top-level [require] reaches contributes no calls and no items. An item the
+    compiler never typed, and a body it never reached, add none. *)
 
 val empty : t
 
 val merge : t -> t -> t
-(** [merge earlier later] holds both sets of items and both sets of uses, in
-    that order. *)
+(** [merge earlier later] holds both sets of items and both sets of uses and
+    calls, in that order. *)

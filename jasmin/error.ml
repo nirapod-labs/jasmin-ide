@@ -42,6 +42,42 @@ let message_of_outcome = function
 
 let render_tyerror error = Format.asprintf "%a" Pretyping.pp_tyerror error
 
+(** [text_of_hierror error] is the compiler's own message for [error], without
+    the location and the kind the diagnostic carries in its own fields.
+
+    [Utils.pp_hierror] opens with both (["path", line 5 (9-10): typing
+    error: ...]), so a diagnostic built from its whole rendering would name the
+    file, the line and the kind twice: once in the span and the code every
+    reader prints, and once again in the message. The printer is asked for a
+    message with neither, and the separator it writes between them is
+    dropped. Nothing else is lost: the function the compiler names, the pass
+    ([Utils.hierror.err_sub_kind], which is the only place "param expansion"
+    is said) and the message itself are the compiler's. An internal error
+    says so in the diagnostic's kind rather than in its text. *)
+let text_of_hierror (error : Utils.hierror) =
+  let bare =
+    {
+      error with
+      Utils.err_loc = Utils.Lnone;
+      err_kind = "";
+      err_internal = false;
+    }
+  in
+  let text = Format.asprintf "%a" Utils.pp_hierror bare in
+  (* The printer writes the kind, the function's name and then a colon before
+     the message, and a break after it, so the message starts at the first
+     character that is not part of that separator. *)
+  let length = String.length text in
+  let rec first_of_message index =
+    if index >= length then length
+    else
+      match text.[index] with
+      | ':' | ' ' | '\t' | '\n' | '\r' -> first_of_message (index + 1)
+      | _ -> index
+  in
+  let start = first_of_message 0 in
+  String.sub text start (length - start)
+
 let of_exn (exn : exn) : t =
   match exn with
   | Syntax.ParseError (location, message) ->
@@ -74,9 +110,9 @@ let of_exn (exn : exn) : t =
   | Utils.HiError error ->
       make
         ~file:(file_of_error_location error.Utils.err_loc)
-        ~kind:Typing
+        ~kind:(if error.Utils.err_internal then Internal else Typing)
         ~span:(Error_span.of_error_location error.Utils.err_loc)
-        (Format.asprintf "%a" Utils.pp_hierror error)
+        (text_of_hierror error)
   | Stack_overflow ->
       make ~kind:Internal
         ~span:(Jide_lang.Span.make ~start_byte:0 ~end_byte:0)

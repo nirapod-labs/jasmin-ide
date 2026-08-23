@@ -727,6 +727,24 @@ let test_the_settings_reach_the_checker () =
     | Some (_, _, idirs) -> idirs = [ ("LIB", path_of root "src") ]
     | None -> false)
 
+(* The snapshot a completion reads carries the architecture the document was
+   analysed under, so an intrinsic answer is the document's own. *)
+let test_the_snapshot_carries_the_architecture () =
+  let root =
+    make [ (file_name, Some (lines [ "[jasmin]"; "arch = arm-m4" ])) ]
+  in
+  let file = path_of root "c.jazz" in
+  let uri = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path file) in
+  let engine = Jide_engine.Engine.create () in
+  Jide_engine.Engine.set_root engine (Some root);
+  Jide_engine.Engine.open_document engine ~uri ~version:1
+    ~text:"fn f() -> reg u32 { return 0; }";
+  ignore (Jide_engine.Engine.check engine ~uri);
+  check "snapshot: the architecture is the project's"
+    (match Jide_engine.Engine.snapshot engine ~uri with
+    | Some snapshot -> snapshot.Jide_engine.Engine.arch = arm_m4
+    | None -> false)
+
 (* The include paths have to reach the compiler's own include option, not just
    the engine's record: the compiler is what decides that
    [from LIB require "x.jinc"] names [lib/x.jinc]. Both engines below check the
@@ -869,6 +887,7 @@ let () =
   test_no_project_file_above ();
   test_the_engine_reads_the_project ();
   test_the_engine_reports_an_unreadable_project ();
+  test_the_snapshot_carries_the_architecture ();
   test_an_unknown_architecture_never_reaches_the_settings ();
   test_the_settings_reach_the_checker ();
   test_the_include_paths_reach_the_compiler ();
