@@ -51,3 +51,74 @@ type options = { output : string; seed : string; files : int; corpus : string }
 
 let default_options = { output = ""; seed = "0"; files = 0; corpus = "" }
 
+let parse_arguments arguments =
+  let rec loop options = function
+    | [] -> Ok options
+    | ("-h" | "--help") :: _ -> Error `Help
+    | "--output" :: value :: rest -> loop { options with output = value } rest
+    | "--output" :: [] -> Error (`Message "--output wants a directory")
+    | "--seed" :: value :: rest -> loop { options with seed = value } rest
+    | "--seed" :: [] -> Error (`Message "--seed wants a text")
+    | "--files" :: value :: rest -> (
+        match int_of_string_opt value with
+        | Some files when files >= 0 -> loop { options with files } rest
+        | _ ->
+            Error
+              (`Message (Printf.sprintf "--files wants a count, got %S" value)))
+    | "--files" :: [] -> Error (`Message "--files wants a count")
+    | argument :: rest when String.length argument > 0 && argument.[0] <> '-' ->
+        if options.corpus = "" then loop { options with corpus = argument } rest
+        else Error (`Message ("one corpus directory, not two: " ^ argument))
+    | argument :: _ -> Error (`Message ("unknown option: " ^ argument))
+  in
+  loop default_options arguments
+
+let is_jazz name = Filename.check_suffix name ".jazz"
+
+(* Every .jazz file under the corpus, as (path, path below the corpus), sorted
+   by the path below the corpus so that two hosts emit the same order. *)
+let rec walk relative directory found =
+  match Sys.readdir directory with
+  | exception Sys_error _ -> found
+  | entries ->
+      Array.fold_left
+        (fun found entry ->
+          if String.length entry > 0 && entry.[0] = '.' then found
+          else
+            let path = Filename.concat directory entry in
+            let relative =
+              if relative = "" then entry else Filename.concat relative entry
+            in
+            match Sys.is_directory path with
+            | true -> walk relative path found
+            | false ->
+                if is_jazz entry then (path, relative) :: found else found
+            | exception Sys_error _ -> found)
+        found entries
+
+let collect corpus =
+  walk "" corpus []
+  |> List.sort (fun (_, left) (_, right) -> String.compare left right)
+
+let read path =
+  match In_channel.with_open_bin path In_channel.input_all with
+  | text -> Ok text
+  | exception Sys_error message -> Error message
+
+(* FNV-1a over the seed, the path and the family. A hash rather than the
+   standard library's generator, so a site cannot move when a generator or a
+   library version changes: the set has to be replayable from the seed alone. *)
+let hash text =
+  let offset = Int64.of_string "0xcbf29ce484222325" in
+  let prime = Int64.of_string "0x100000001b3" in
+  let result = ref offset in
+  String.iter
+    (fun character ->
+      result := Int64.logxor !result (Int64.of_int (Char.code character));
+      result := Int64.mul !result prime)
+    text;
+  (* 62 bits, the positive range of an [int] on the 64-bit hosts this runs
+     on; a wider mask would let the conversion turn negative and the site
+     would index behind the array. *)
+  Int64.(to_int (logand !result 0x3fff_ffff_ffff_ffffL))
+
