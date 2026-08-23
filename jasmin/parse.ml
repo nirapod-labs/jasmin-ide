@@ -28,6 +28,33 @@ type t = Recover.t = {
     alone leaves the fields unbound there. The equation keeps the two types
     equal, so every value the driver builds is a [Parse.t] unchanged. *)
 
+(** [after_first first ~dropped diagnostic] places a marker for a dropped item
+    that contains the compiler's first error at that error. The engine sorts a
+    file's diagnostics by span, and the marker starts at the item's first byte,
+    which is before the error the compiler reports; left alone, the marker
+    would be the first diagnostic a reader meets, where the compiler reports
+    the error. The marker still names the item and still follows the error,
+    and it is cut to the item's own end. A marker of an item the error is not
+    inside is returned unchanged. *)
+let after_first (first : Error.t) (dropped : Recover.dropped list)
+    (diagnostic : Jide_lang.Diagnostic.t) : Jide_lang.Diagnostic.t =
+  let owner =
+    List.find_opt
+      (fun stub -> Recover.diagnostic_of_dropped stub = diagnostic)
+      dropped
+  in
+  match owner with
+  | Some (Recover.Dropped { span; _ })
+    when span.Jide_lang.Span.start_byte < first.Error.span.start_byte
+         && first.Error.span.end_byte <= span.Jide_lang.Span.end_byte ->
+      {
+        diagnostic with
+        Jide_lang.Diagnostic.span =
+          Jide_lang.Span.make ~start_byte:first.Error.span.start_byte
+            ~end_byte:span.Jide_lang.Span.end_byte;
+      }
+  | Some _ | None -> diagnostic
+
 let parse ~(name : string) (text : string) : t =
   if String.length text > Scan.max_bytes then
     {
@@ -53,7 +80,10 @@ let parse ~(name : string) (text : string) : t =
         {
           recovered with
           Recover.diagnostics =
-            Error.to_diagnostic first :: recovered.Recover.diagnostics;
+            Error.to_diagnostic first
+            :: List.map
+                 (after_first first recovered.Recover.dropped)
+                 recovered.Recover.diagnostics;
         }
 
 let items (parsed : t) = parsed.Recover.items

@@ -67,6 +67,13 @@ val arch_names : string list
 (** The architecture names the linked Jasmin accepts: exactly the strings
     [jasminc -arch] takes, in the order its option table lists them. *)
 
+val names : arch:string -> string list
+(** [names ~arch] is the name of every intrinsic {!all} lists for [arch], in
+    the same order, without the suffixes. It is what completion offers after
+    [#].
+
+    Raises [Invalid_argument] when [arch] is not one of {!arch_names}. *)
+
 val suffixes_of : arch:string -> string -> string list
 (** [suffixes_of ~arch name] is the suffix list of [name] under [arch], or
     [[]] when [arch]'s table does not name it. *)
@@ -76,6 +83,35 @@ val signature_of :
 (** [signature_of ~arch ~name ~suffix] resolves one concrete intrinsic and
     returns its signature, or [None] when [arch] accepts no such pair. The
     suffix carries no leading underscore; [""] means none was written. *)
+
+val written_of : arch:string -> name:string -> suffix:string -> string option
+(** [written_of ~arch ~name ~suffix] is the spelling a program writes after
+    the [\#] for the intrinsic [name] with [suffix], or [None] when [arch]'s
+    table names no such [name]. An x86 name takes an underscore before a
+    non-empty suffix, as in ["ADD_64"]; an ARM name takes its flag and
+    condition letters on its end, as in ["ADDScc"], and the empty suffix is
+    the bare name. The suffix carries no leading underscore. *)
+
+val resolve : arch:string -> string -> t_signature option
+(** [resolve ~arch written] is the signature of the intrinsic a program
+    writes, [written] being the name after the [\#] with its suffix when it
+    has one: ["ADD_64"], ["MOVZX_u64u32"], ["ADDcc"].
+
+    The split between the name and the suffix is not made here: it is made
+    by the compiler. [Pretyping.tt_prim] is the function [Pretyping] calls
+    for a [\#] expression, and it holds the suffix table, the vector-suffix
+    simplification and the arm rule that strips [S] and [cc], so a name this
+    answers is one the compiler types, and the description is the one
+    [Sopn.asm_op_instr] gives the operation the compiler picked. A name it
+    refuses is one the compiler refuses. The warnings that resolution can
+    print (a deprecated name, a simplified vector suffix) are captured and
+    dropped rather than written to the process's error stream.
+
+    [None] means [arch]'s table names no such intrinsic, which includes
+    every form the compiler types by a rule of its own instead of a table
+    row ([#spill], [#unspill], [#randombytes], [#declassify]): those have no
+    instruction description, so there is no signature to give. It does not
+    raise. *)
 
 val compiler_help : arch:string -> string
 (** The compiler's own rendering of the intrinsic table for [arch], exactly

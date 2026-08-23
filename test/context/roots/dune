@@ -1,0 +1,13 @@
+; Cram tests of the context rule that need no corpus. A file reached through
+; a named include path (`from NAME require`) is checked in the context of the
+; entry that reaches it, and an entry in the project root is found from a
+; subdirectory of it. Both are the context rule docs/user-guide.md describes,
+; over small fixtures each test writes itself, so the tests run on every tree
+; and do not depend on JASMIN_CONTEXT_CORPUS.
+;
+; The binary is declared even though dune would build it anyway: the
+; dependency is what makes a rebuilt server re-run these tests instead of
+; leaving a recorded pass from the previous binary in place.
+
+(cram
+ (deps %{exe:../../../lsp-server/native/main.exe}))

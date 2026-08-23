@@ -468,7 +468,7 @@ let with_loop_and_call =
 fn add(reg u64 a) -> reg u64 { return a; }
 
 fn caller(reg u64 n) -> reg u64 {
-  reg u64 i;
+  inline int i;
   reg u64 s;
   s = 0;
   for i = 0 to n {
@@ -601,7 +601,7 @@ fn add(reg u64 a) -> reg u64 { return a; }
 
 fn caller(reg u64 n) -> reg u64 {
   reg u64 s;
-  reg u64 i;
+  inline int i;
   s = 0;
   if n > 0 {
     s = add(s);

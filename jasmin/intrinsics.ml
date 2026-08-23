@@ -249,11 +249,58 @@ let signature_of ~arch ~name ~suffix =
       match List.assoc_opt name (Sopn.prim_string A.asmOp_sopn) with
       | None -> None
       | Some constructor -> (
-          match resolve constructor ~name ~suffix with
+          match op_of_suffix constructor ~suffix with
           | None -> None
           | Some op ->
               Some
                 (signature_of_description (Sopn.asm_op_instr A.asmOp_sopn op))))
+
+(* The spelling a program writes for one concrete intrinsic. A [PrimX86] name
+   takes an underscore before a non-empty suffix ([ADD_64]); a [PrimARM] name
+   takes its flag and condition letters on its end with nothing between
+   ([ADDScc]), and the empty suffix is the bare name. The constructor decides,
+   so the spelling is the one the table's own name accepts, not a guess made
+   from the architecture. *)
+let written_of ~arch ~name ~suffix =
+  match Arch.of_string arch with
+  | None -> None
+  | Some arch -> (
+      let (module A) = module_of_arch arch in
+      match List.assoc_opt name (Sopn.prim_string A.asmOp_sopn) with
+      | None -> None
+      | Some (Sopn.PrimX86 _) ->
+          Some (if String.equal suffix "" then name else name ^ "_" ^ suffix)
+      | Some (Sopn.PrimARM _) -> Some (name ^ suffix))
+
+(* The written name, resolved by the compiler's own function. [tt_prim] takes
+   the name as the parser keeps it, without the [\#], and returns the
+   operation the compiler types; it reads the suffix table through
+   [extract_size], simplifies a vector suffix the way [simplify_suffix]
+   does and hands an arm name to [Tt_arm_m4.tt_prim], so nothing about the
+   split is written a second time here. The location is the dummy one: a
+   refusal is turned into [None] at once and nothing prints it, and the two
+   warnings the function can emit are captured rather than shown.
+
+   A name the table does not hold reaches the arm rule as well, which
+   answers [Error] for it, and [tt_prim] turns that into a typing error that
+   is caught here. So the only thing this can answer for garbage is [None].
+
+   The description is taken inside the same function the operation is read
+   in: an operation of [A.asm_op] names the module's type, so a value of it
+   cannot leave the [let (module A) = ...] that introduced [A]. *)
+let resolve_in (module A : Arch_full.Arch) (written : string) =
+  let id = Location.mk_loc Location._dummy written in
+  match Warnings.with_capture (fun () -> Pretyping.tt_prim A.asmOp_sopn id) with
+  | exception Pretyping.TyError _ -> None
+  | op, _warnings ->
+      Some (signature_of_description (Sopn.asm_op_instr A.asmOp_sopn op))
+
+let resolve ~arch (written : string) =
+  match Arch.of_string arch with
+  | None -> None
+  | Some arch ->
+      let (module A) = module_of_arch arch in
+      resolve_in (module A) written
 
 (* -------------------------------------------------------------------- *)
 (* The compiler's own rendering.                                          *)
