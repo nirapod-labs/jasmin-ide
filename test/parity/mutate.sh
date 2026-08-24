@@ -259,3 +259,273 @@ split_diagnostic() {
 	[ -n "$message" ] || message=-
 }
 
+# One worker, one private copy of the corpus. Its plan is the manifest
+# filtered to the files it owns, in corpus order.
+worker() {
+	number=$1
+	tree=$work/tree.$number
+	mkdir -p "$tree" || return 2
+	cp -R "$master/." "$tree/" || return 2
+	ran=0
+	while IFS=$tab read -r index family relative label; do
+		[ -n "$index" ] || continue
+		cp "$work/mutants/$index.jazz" "$tree/$relative" || return 2
+		arch=$(arch_for "$relative")
+		(cd "$tree" && "$checker" check --arch "$arch" -- "$relative" \
+			>"$work/c.$index" 2>"$work/c.$index.err")
+		checker_status=$?
+		split_diagnostic 4 \
+			"$(awk -f "$here/checker.awk" "$work/c.$index" | tr '\t' "$unit")"
+		c_line=$line
+		c_column=$column
+		c_kind=$kind
+		c_message=$message
+		"$oracle" -arch "$arch" -until_cstexp "$tree/$relative" \
+			>"$work/o.$index" 2>&1 </dev/null
+		reference_status=$?
+		split_diagnostic 3 \
+			"$(awk -v corpus="$tree/" -f "$here/oracle.awk" "$work/o.$index" | tr '\t' "$unit")"
+		r_line=$line
+		r_column=$column
+		r_message=$message
+		# Whether the compiler's location is anywhere among the checker's
+		# diagnostics, not only first: the checker orders what it prints by
+		# position, and a recovered item's marker can come before the error
+		# the compiler stopped on.
+		contains=na
+		if [ "$reference_status" -ne 0 ] && [ "$r_line" -ne 0 ]; then
+			contains=no
+			pattern=":$r_line:$((r_column + 1)): "
+			if grep -qF -- "$pattern" "$work/c.$index"; then contains=yes; fi
+		fi
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+			"$index" "$family" "$relative" "$arch" \
+			"$checker_status" "$c_line" "$c_column" "$c_kind" "$c_message" \
+			"$reference_status" "$r_line" "$r_column" "$r_message" \
+			"$contains" "$label" >"$work/result.$index"
+		ran=$((ran + 1))
+		cp "$master/$relative" "$tree/$relative" || return 2
+	done <"$work/plan.$number"
+	warn "worker $number: $ran mutants over $(wc -l <"$work/plan.$number" | tr -d ' ') results"
+}
+
+# Each file belongs to exactly one worker: a mutant is written over the file
+# it came from, so two workers on one file would race. Files are dealt
+# round-robin, in corpus order, so a bounded worker count still covers the
+# whole corpus.
+number=1
+while [ "$number" -le "$jobs" ]; do
+	awk -F'\t' -v workers="$jobs" -v worker="$number" '
+		$3 != previous { ordinal++; previous = $3 }
+		ordinal % workers == worker - 1' "$manifest" >"$work/plan.$number" ||
+		die "cannot make the plan for worker $number"
+	number=$((number + 1))
+done
+
+want=$(wc -l <"$manifest" | tr -d ' ')
+covered=$(cat "$work"/plan.* | wc -l | tr -d ' ')
+[ "$covered" -eq "$want" ] ||
+	die "$covered of $want mutants were given to no worker"
+
+number=1
+while [ "$number" -le "$jobs" ]; do
+	worker "$number" &
+	number=$((number + 1))
+done
+wait
+
+# A mutant that wrote no result is a fault of the harness, not a difference.
+results=$work/results.tsv
+: >"$results"
+missing=0
+i=0
+while [ "$i" -lt "$total" ]; do
+	if [ -f "$work/result.$i" ]; then
+		cat "$work/result.$i"
+	else
+		missing=$((missing + 1))
+	fi
+	i=$((i + 1))
+done >"$results"
+[ "$missing" -eq 0 ] || die "$missing of $total mutants wrote no result"
+
+if [ -n "${PARITY_TSV:-}" ]; then
+	cp "$results" "$PARITY_TSV" || die "cannot write PARITY_TSV=$PARITY_TSV"
+fi
+
+# The comparison. Both accept is agreement; both reject is agreement only
+# when the line and the column are equal. A tool that exits above one did not
+# reach a verdict at all, so that mutant is a difference whatever it printed.
+same=0
+differ=0
+accepted=0
+rejected=0
+agreed=0
+faults=0
+contains=0
+preceded=0
+mismatches=$work/mismatches
+differing=$work/differing
+: >"$mismatches"
+: >"$differing"
+while IFS=$tab read -r index family relative arch checker_status c_line \
+	c_column c_kind c_message reference_status r_line r_column r_message \
+	found label; do
+	[ -n "$index" ] || continue
+	expected=accept
+	observed=accept
+	[ "$reference_status" -ne 0 ] && expected="reject at $r_line:$r_column"
+	[ "$checker_status" -ne 0 ] && observed="reject at $c_line:$c_column"
+	# What each side printed first, in its own words: both texts of a
+	# mismatch belong in the log, not only the two locations.
+	checker_text=accept
+	[ "$checker_status" -eq 0 ] || checker_text=$c_kind": "$c_message
+	compiler_text=accept
+	[ "$reference_status" -eq 0 ] || compiler_text=$r_message
+	if [ "$checker_status" -gt 1 ] || [ "$reference_status" -gt 1 ]; then
+		faults=$((faults + 1))
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$relative" "$index" "$family" \
+			"$label" "the compiler exits $reference_status" \
+			"the checker exits $checker_status" "$checker_text" "$compiler_text" \
+			>>"$mismatches"
+		printf '%s\n' "$index" >>"$differing"
+	elif [ "$checker_status" -eq 0 ] && [ "$reference_status" -eq 0 ]; then
+		agreed=$((agreed + 1))
+	elif [ "$checker_status" -eq 0 ]; then
+		accepted=$((accepted + 1))
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$relative" "$index" "$family" \
+			"$label" "$expected" "$observed" "$checker_text" "$compiler_text" \
+			>>"$mismatches"
+		printf '%s\n' "$index" >>"$differing"
+	elif [ "$reference_status" -eq 0 ]; then
+		rejected=$((rejected + 1))
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$relative" "$index" "$family" \
+			"$label" "$expected" "$observed" "$checker_text" "$compiler_text" \
+			>>"$mismatches"
+		printf '%s\n' "$index" >>"$differing"
+	elif [ "$c_line" -eq "$r_line" ] && [ "$c_column" -eq "$r_column" ]; then
+		same=$((same + 1))
+		[ "$found" = yes ] && contains=$((contains + 1))
+	else
+		differ=$((differ + 1))
+		[ "$found" = yes ] && contains=$((contains + 1))
+		[ "$found" = yes ] && preceded=$((preceded + 1))
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$relative" "$index" "$family" \
+			"$label" "$expected" "$observed" "$checker_text" "$compiler_text" \
+			>>"$mismatches"
+		printf '%s\n' "$index" >>"$differing"
+	fi
+done <"$results"
+
+# The raw output of a differing mutant, kept when a caller asks for it.
+if [ -s "$differing" ] && [ -n "${PARITY_KEEP:-}" ]; then
+	mkdir -p "$PARITY_KEEP" || die "cannot make $PARITY_KEEP"
+	while IFS= read -r index; do
+		[ -n "$index" ] || continue
+		for suffix in c c.err o; do
+			[ -f "$work/$suffix.$index" ] || continue
+			cp "$work/$suffix.$index" "$PARITY_KEEP/mutant-$index.$suffix"
+		done
+	done <"$differing"
+fi
+
+# The tables: per group, and per family of mutation.
+tables=$work/tables
+awk -F'\t' -v version="$version" -v files="$files" -v seed="$seed" \
+	-v total="$total" '
+	function group_of(path,   part, parts, at) {
+		parts = split(path, part, "/")
+		if (parts >= 3 && (part[1] == "sct-checker" || part[1] == "safety"))
+			return part[1] "/" part[2]
+		at = index(path, "/")
+		if (at > 0) path = substr(path, 1, at - 1)
+		return path
+	}
+	BEGIN {
+		groups = 0
+	}
+	{
+		g = group_of($3)
+		if (!(g in seen_group)) { seen_group[g] = 1; order[++groups] = g }
+		cases[g]++
+		if ($5 > 1 || $10 > 1) fault[g]++
+		else if ($5 == 0 && $10 == 0) accept[g]++
+		else if ($5 == 0) accepted[g]++
+		else if ($10 == 0) rejected[g]++
+		else if ($6 == $11 && $7 == $12) same[g]++
+		else differ[g]++
+		total_fault += ($5 > 1 || $10 > 1)
+		total_same += ($5 == 1 && $10 == 1 && $6 == $11 && $7 == $12)
+		total_differ += ($5 == 1 && $10 == 1 && ($6 != $11 || $7 != $12))
+		total_accepted += ($5 == 0 && $10 != 0)
+		total_rejected += ($5 != 0 && $10 == 0)
+		total_agreed += ($5 == 0 && $10 == 0)
+
+		f = $2
+		if (!(f in seen_family)) { seen_family[f] = 1; family_order[++families] = f }
+		family[f]++
+		family_fault[f] += ($5 > 1 || $10 > 1)
+		family_same[f] += ($5 == 1 && $10 == 1 && $6 == $11 && $7 == $12)
+		family_accept[f] += ($5 != 0 && $10 == 0)
+		family_reject[f] += ($5 == 0 && $10 != 0)
+		family_differ[f] += ($5 == 1 && $10 == 1 && ($6 != $11 || $7 != $12))
+		family_agree[f] += ($5 == 0 && $10 == 0)
+	}
+	END {
+		printf "%-32s %6s %6s %6s %6s %8s %6s\n", "group", "cases", "same", "differ", "accept", "rejected", "faults"
+		for (i = 1; i <= groups; i++) {
+			g = order[i]
+			printf "%-32s %6d %6d %6d %6d %8d %6d\n", g, cases[g], same[g], \
+				differ[g], accepted[g], rejected[g], fault[g]
+		}
+		printf "%-32s %6d %6d %6d %6d %8d %6d\n", "total", total, total_same, \
+			total_differ, total_accepted, total_rejected, total_fault
+		printf "%-32s %6s %6s %6s %6s %8s %6s\n", "family", "cases", "same", "differ", "accept", "rejected", "faults"
+		for (i = 1; i <= families; i++) {
+			f = family_order[i]
+			printf "%-32s %6d %6d %6d %6d %8d %6d\n", f, family[f], \
+				family_same[f], family_differ[f], family_accept[f], family_reject[f], \
+				family_fault[f]
+		}
+	}' "$results" >"$tables"
+
+say "$version"
+if [ "$files" -eq 0 ]; then
+	say "seed $seed; every corpus file mutated"
+else
+	say "seed $seed; $files files to mutate"
+fi
+say "files mutated: $(awk -F'\t' 'BEGIN { n = 0 } $3 != "" { if ($3 != previous) { n++; previous = $3 } } END { print n }' "$manifest") of $candidates"
+say "cases compared: $total; both accept: $agreed; both reject: $((same + differ))"
+say "the same line and column: $same; a different location: $differ"
+say "accepted where the compiler rejects: $accepted; rejected where it accepts: $rejected"
+say "did not finish: $faults"
+say "agreement: $((agreed + same)) of $total; difference: $((differ + accepted + rejected + faults))"
+say "the compiler's location is somewhere in the checker's output: $contains of $((same + differ)) rejected mutants"
+say "of the $differ at a different location, the compiler's is in the checker's output too: $preceded"
+sed 's/^/'"$name"': /' "$tables"
+if [ -s "$mismatches" ]; then
+	while IFS=$tab read -r relative index family label expected observed \
+		checker_text compiler_text; do
+		say "mismatch $relative mutant $index ($family, $label): expected $expected, observed $observed"
+		say "  the checker's first diagnostic: $checker_text"
+		say "  the compiler's first diagnostic: $compiler_text"
+	done <"$mismatches"
+fi
+
+# A set every member of which both tools accept has no first error to compare:
+# the mutation did not break anything, or the compiler on the other end of the
+# route is not the one this run thinks it is. That is a harness fault, not an
+# agreement, and it exits 2 rather than 0.
+if [ $((same + differ)) -eq 0 ] && [ "$accepted" -eq 0 ] && [ "$rejected" -eq 0 ]
+then
+	say "no mutant changed either verdict: the run compared no first error"
+	exit 2
+fi
+
+if [ -s "$mismatches" ]; then
+	say "the mutants do not agree"
+	exit 1
+fi
+say "every mutant agrees"
+exit 0
