@@ -15,7 +15,6 @@
    never enter the result. *)
 
 open Jasmin
-
 module Names = Map.Make (String)
 
 type answer =
@@ -31,11 +30,12 @@ type frame = {
   vars : Index.declaration Names.t;
 }
 
-let empty_frame = { types = Names.empty; funs = Names.empty; vars = Names.empty }
+let empty_frame =
+  { types = Names.empty; funs = Names.empty; vars = Names.empty }
 
 type env = {
-  frames : frame list;  (* innermost first, the bottom frame last *)
-  namespace : string list;  (* outermost first, for the loaded-once key *)
+  frames : frame list; (* innermost first, the bottom frame last *)
+  namespace : string list; (* outermost first, for the loaded-once key *)
   file : string;
   index : Index.t;
   dir : string;
@@ -46,7 +46,7 @@ type t = {
   entry : string;
   indexes : (string, Index.t) Hashtbl.t;
   answers : (string * int, answer) Hashtbl.t;
-  order : Index.t list;  (* entry first *)
+  order : Index.t list; (* entry first *)
   loaded : (string * string) list;
 }
 
@@ -100,7 +100,10 @@ let find_var env name = find (fun frame -> frame.vars) name env
 let push_var env declaration =
   let frame = current env in
   replace_current env
-    { frame with vars = Names.add declaration.Index.name declaration frame.vars }
+    {
+      frame with
+      vars = Names.add declaration.Index.name declaration frame.vars;
+    }
 
 let push_fun env declaration =
   (* The library refuses a second function of a name anywhere in scope and
@@ -161,7 +164,8 @@ let exit_namespace env =
 
 let record session file span answer =
   let key = (file, span.Jide_lang.Span.start_byte) in
-  if not (Hashtbl.mem session.answers key) then Hashtbl.add session.answers key answer
+  if not (Hashtbl.mem session.answers key) then
+    Hashtbl.add session.answers key answer
 
 let index_of session file text =
   match Hashtbl.find_opt session.indexes file with
@@ -173,7 +177,9 @@ let index_of session file text =
       index
 
 let declaration_at env span =
-  match Index.find_declaration env.index ~name_start:span.Jide_lang.Span.start_byte with
+  match
+    Index.find_declaration env.index ~name_start:span.Jide_lang.Span.start_byte
+  with
   | Some declaration -> declaration
   | None ->
       (* The walk marks every declaration it meets; this arm only keeps a
@@ -201,7 +207,13 @@ let declare session env (kind : Index.kind) ident ~item_span =
 (* ------------------------------------------------------------------ *)
 (* Uses *)
 
-type use_role = Use_call | Use_var | Use_type | Use_prim | Use_annot | Use_include
+type use_role =
+  | Use_call
+  | Use_var
+  | Use_type
+  | Use_prim
+  | Use_annot
+  | Use_include
 
 let use session env (role : use_role) (ident : string Location.located) =
   let name = Location.unloc ident in
@@ -235,15 +247,14 @@ let rec expression session env (pe : Syntax.pexpr) =
   match Location.unloc pe with
   | Syntax.PEParens inner -> expression session env inner
   | PEVar ident -> ignored session env Use_var ident
-  | PEGet (_aligned, _access, _size, ident, index, length) ->
+  | PEGet (_aligned, _access, _size, ident, index, length) -> (
       let env = ignored session env Use_var ident in
       let env = expression session env index in
-      (match length with
+      match length with
       | None -> env
       | Some length -> expression session env length)
   | PEFetch (_aligned, _size, address) -> expression session env address
-  | PEpack (_size, elements) ->
-      List.fold_left (expression session) env elements
+  | PEpack (_size, elements) -> List.fold_left (expression session) env elements
   | PEstring _ | PEBool _ | PEInt _ -> env
   | PECall (callee, arguments) ->
       let env = ignored session env Use_call callee in
@@ -294,10 +305,10 @@ and lvalue session env (lv : Syntax.plvalue) =
   match Location.unloc lv with
   | Syntax.PLIgnore -> env
   | PLVar ident -> ignored session env Use_var ident
-  | PLArray (_aligned, _access, _size, ident, index, length) ->
+  | PLArray (_aligned, _access, _size, ident, index, length) -> (
       let env = ignored session env Use_var ident in
       let env = expression session env index in
-      (match length with
+      match length with
       | None -> env
       | Some length -> expression session env length)
   | PLMem (_aligned, _size, address) -> expression session env address
@@ -314,16 +325,16 @@ and block session env (block : Syntax.pblock) =
   List.fold_left (instruction session) env (Location.unloc block)
 
 and instruction session env
-    ((annotations_, (instr : Syntax.pinstr_r Location.located)) :
-      Syntax.pinstr) =
+    ((annotations_, (instr : Syntax.pinstr_r Location.located)) : Syntax.pinstr)
+    =
   let item_span = span_of_location (Location.loc instr) in
   let env = annotations session env annotations_ in
   match Location.unloc instr with
   | Syntax.PIArrayInit ident -> ignored session env Use_var ident
-  | PIAssign (targets, _operator, value, condition) ->
+  | PIAssign (targets, _operator, value, condition) -> (
       let env = lvalues session env targets in
       let env = expression session env value in
-      (match condition with
+      match condition with
       | None -> env
       | Some condition -> expression session env condition)
   | PIAssert (_message, condition) -> expression session env condition
@@ -353,17 +364,21 @@ and instruction session env
       List.fold_left
         (fun env name ->
           let env = ptype session env (snd stotype) in
-          let declaration = declare session env Index.Variable name ~item_span in
+          let declaration =
+            declare session env Index.Variable name ~item_span
+          in
           push_var env declaration)
         env names
   | PIdeclinit (stotype, inits) ->
       List.fold_left
-        (fun env (init : (string Location.located * Syntax.pexpr) Location.located)
-           ->
+        (fun env
+             (init : (string Location.located * Syntax.pexpr) Location.located) ->
           let name, value = Location.unloc init in
           let before = env in
           let env = ptype session env (snd stotype) in
-          let declaration = declare session env Index.Variable name ~item_span in
+          let declaration =
+            declare session env Index.Variable name ~item_span
+          in
           let env = push_var env declaration in
           (* The initialising expression is typed before the name is in
              scope, as [tt_annot_decl] does. *)
@@ -397,7 +412,9 @@ let rec item session env (located : Syntax.pitem Location.located) : env =
   | Syntax.PParam pp ->
       let env = ptype session env pp.ppa_ty in
       let env = expression session env pp.ppa_init in
-      let declaration = declare session env Index.Parameter pp.ppa_name ~item_span in
+      let declaration =
+        declare session env Index.Parameter pp.ppa_name ~item_span
+      in
       push_var env declaration
   | PGlobal global ->
       let env = annotations session env global.pgd_annot in
@@ -407,7 +424,9 @@ let rec item session env (located : Syntax.pitem Location.located) : env =
         | Syntax.GEexpr value -> expression session env value
         | GEarray values -> List.fold_left (expression session) env values
       in
-      let declaration = declare session env Index.Global global.pgd_name ~item_span in
+      let declaration =
+        declare session env Index.Global global.pgd_name ~item_span
+      in
       push_var env declaration
   | Pexec exec ->
       ignore (use session env Use_call exec.pex_name);
@@ -439,8 +458,9 @@ let rec item session env (located : Syntax.pitem Location.located) : env =
       let local = { env with frames = empty_frame :: env.frames } in
       let local =
         List.fold_left
-          (fun env ((annotations_, (stotype, names)) :
-                     Syntax.pannotations * Syntax.paramdecls) ->
+          (fun env
+               ((annotations_, (stotype, names)) :
+                 Syntax.pannotations * Syntax.paramdecls) ->
             let env = annotations session env annotations_ in
             let env = ptype session env (snd stotype) in
             List.fold_left
@@ -474,7 +494,9 @@ let rec item session env (located : Syntax.pitem Location.located) : env =
       (* The function is declared after its body: pretyping pushes it into
          the environment from before the parameters, so a body cannot call
          itself. *)
-      let declaration = declare session env Index.Function function_.pdf_name ~item_span in
+      let declaration =
+        declare session env Index.Function function_.pdf_name ~item_span
+      in
       push_fun env declaration
 
 and require_file session env ~from written =
@@ -500,7 +522,13 @@ and require_file session env ~from written =
         let resolved = List.fold_left (item session) inner index.Index.items in
         (* The frames the included file built stay; the file it came from is
            back for everything after the require. *)
-        { resolved with file = env.file; index = env.index; dir = env.dir; chain = env.chain })
+        {
+          resolved with
+          file = env.file;
+          index = env.index;
+          dir = env.dir;
+          chain = env.chain;
+        })
 
 (* ------------------------------------------------------------------ *)
 
@@ -546,9 +574,7 @@ let of_file ~idirs ~read file =
 
 let entry (t : t) = t.entry
 let files (t : t) = t.order
-
-let file (t : t) path =
-  Hashtbl.find_opt t.indexes (normalise path)
+let file (t : t) path = Hashtbl.find_opt t.indexes (normalise path)
 
 let answer_at (t : t) ~file ~byte =
   let file = normalise file in

@@ -35,7 +35,9 @@ val of_text :
   t
 (** [of_text ~idirs ~read ~file text] resolves [text] as [file] and every
     file it requires, through [read]. [idirs] are the named include paths a
-    [from NAME] require uses. Nothing here raises. *)
+    [from NAME] require uses. Every [byte] below is a byte of the document as
+    the caller holds it, a leading byte-order mark included. Nothing here
+    raises. *)
 
 val of_file :
   idirs:(string * string) list ->
@@ -46,6 +48,7 @@ val of_file :
     [file], and [None] when it has none. *)
 
 val entry : t -> string
+
 val files : t -> Index.t list
 (** Every file the resolution reached, entry first and in the order it was
     first read. *)
@@ -53,7 +56,8 @@ val files : t -> Index.t list
 val file : t -> string -> Index.t option
 (** [file t path] is the index of [path] when the resolution reached it. *)
 
-val answer_at : t -> file:string -> byte:int -> (Index.occurrence * answer) option
+val answer_at :
+  t -> file:string -> byte:int -> (Index.occurrence * answer) option
 (** [answer_at t ~file ~byte] is the occurrence holding [byte] and what it
     names, when the resolution reached that file and an occurrence holds the
     byte. *)

@@ -75,6 +75,8 @@ type t = {
   file : string;  (** as given to {!of_text} *)
   text : string;  (** the text as given, byte-order mark included *)
   items : Jasmin.Syntax.pprogram;
+      (** The parsed tree. Its locations are byte offsets in [text], like
+          every other range here, so a consumer may walk it directly. *)
   outline : item list;  (** the tree as an outline, namespaces nested *)
   declarations : declaration list;
   occurrences : occurrence list;  (** in source order *)
@@ -83,9 +85,12 @@ type t = {
 
 val of_text : file:string -> string -> t * Jide_lang.Diagnostic.t list
 (** [of_text ~file text] parses [text] and indexes it. A leading UTF-8
-    byte-order mark is removed before the parse and every range is shifted
-    back by it, so a range indexes [text] as the caller holds it. The
-    diagnostics are the parser's, shifted the same way; a file that does not
+    byte-order mark is not part of the program: the parser is given the same
+    text with the three mark bytes replaced by three spaces, so it returns
+    the same tokens at the same byte offsets, and every range in the result
+    (the parsed tree, the outline, the occurrences, the declarations and the
+    parser's diagnostics) indexes [text] as the caller holds it. Nothing is
+    shifted afterwards, so nothing can be forgotten. A file that does not
     parse has no occurrences, no declarations and no items. Nothing here
     raises. *)
 

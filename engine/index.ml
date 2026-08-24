@@ -548,72 +548,28 @@ let compare_require left right =
 
 (* ------------------------------------------------------------------ *)
 
-let with_bom (text : string) =
+(* A document may begin with a UTF-8 byte-order mark, which the lexer refuses
+   as a character and which is not part of the program. The parser is given
+   the same text with the three mark bytes replaced by three spaces, so it
+   sees the same tokens at the same byte offsets: an offset the parser
+   reports is an offset in [text], and the tree it returns, the ranges the
+   walk reads from that tree and the parser's diagnostics all index the
+   caller's text with nothing to shift. Three bytes for three bytes is what
+   keeps the two strings the same length. *)
+let parser_input (text : string) =
   let length = String.length text in
   if
     length >= 3
     && Char.code text.[0] = 0xEF
     && Char.code text.[1] = 0xBB
     && Char.code text.[2] = 0xBF
-  then (3, String.sub text 3 (length - 3))
-  else (0, text)
-
-let shift_span (span : Jide_lang.Span.t) delta =
-  if delta = 0 then span else Jide_lang.Span.shift span delta
-
-let shift_diagnostic (diagnostic : Jide_lang.Diagnostic.t) delta =
-  if delta = 0 then diagnostic
-  else
-    {
-      diagnostic with
-      Jide_lang.Diagnostic.span =
-        shift_span diagnostic.Jide_lang.Diagnostic.span delta;
-    }
-
-let shift_occurrence (occurrence : occurrence) delta =
-  {
-    occurrence with
-    span = shift_span occurrence.span delta;
-    last = shift_span occurrence.last delta;
-  }
-
-let shift_declaration (declaration : declaration) delta =
-  {
-    declaration with
-    name_span = shift_span declaration.name_span delta;
-    item_span = shift_span declaration.item_span delta;
-  }
-
-let rec shift_item (item : item) delta =
-  {
-    item with
-    item_span = shift_span item.item_span delta;
-    item_name_span =
-      Option.map (fun span -> shift_span span delta) item.item_name_span;
-    item_children =
-      List.map (fun child -> shift_item child delta) item.item_children;
-  }
-
-let shift_require (require : require) delta =
-  {
-    require with
-    written_span = shift_span require.written_span delta;
-    item_span = shift_span require.item_span delta;
-    from =
-      Option.map
-        (fun (name, span) -> (name, shift_span span delta))
-        require.from;
-  }
+  then "   " ^ String.sub text 3 (length - 3)
+  else text
 
 let of_text ~(file : string) (text : string) : t * Jide_lang.Diagnostic.t list =
-  let bom, body = with_bom text in
-  let parsed = Jide_jasmin.Adapter.parse ~name:file body in
+  let parsed = Jide_jasmin.Adapter.parse ~name:file (parser_input text) in
   let items = parsed.Jide_jasmin.Parse.items in
-  let diagnostics =
-    List.map
-      (fun diagnostic -> shift_diagnostic diagnostic bom)
-      parsed.Jide_jasmin.Parse.diagnostics
-  in
+  let diagnostics = parsed.Jide_jasmin.Parse.diagnostics in
   let state =
     {
       file;
@@ -624,22 +580,9 @@ let of_text ~(file : string) (text : string) : t * Jide_lang.Diagnostic.t list =
     }
   in
   let outline = List.map (item state) items in
-  let occurrences =
-    unique compare_occurrence
-      (List.map
-         (fun occurrence -> shift_occurrence occurrence bom)
-         !(state.occurrences))
-  in
-  let declarations =
-    unique compare_declaration
-      (List.map
-         (fun declaration -> shift_declaration declaration bom)
-         !(state.declarations))
-  in
-  let requires =
-    List.sort compare_require
-      (List.map (fun require -> shift_require require bom) !(state.requires))
-  in
+  let occurrences = unique compare_occurrence !(state.occurrences) in
+  let declarations = unique compare_declaration !(state.declarations) in
+  let requires = List.sort compare_require !(state.requires) in
   ( { file; text; items; outline; declarations; occurrences; requires },
     diagnostics )
 

@@ -326,11 +326,14 @@ let test_equal_declaration () =
         not (Jide_engine.Index.equal_declaration function_ parameter)
     | _ -> false)
 
-(* A byte-order mark is removed for the parse, so every range still indexes
-   the text as the caller holds it. *)
+(* A byte-order mark is not part of the program: the parser is given the same
+   text with the three mark bytes replaced by three spaces, so every range,
+   the tree's included, still indexes the text as the caller holds it. *)
 let test_a_byte_order_mark_shifts_nothing () =
   let text = "\xEF\xBB\xBF" ^ function_text in
   let index, diagnostics = of_text ~file:"/work/bom.jazz" text in
+  let plain, _ = of_text ~file:"/work/plain.jazz" function_text in
+  let shift = String.length text - String.length function_text in
   check "bom: the file parses" (diagnostics = []);
   check "bom: the ranges index the caller's text"
     (List.for_all
@@ -344,6 +347,38 @@ let test_a_byte_order_mark_shifts_nothing () =
      with
     | Some start, Some declaration ->
         declaration.name_span.Jide_lang.Span.start_byte = start + 3
+    | _ -> false);
+  check "bom: the outline names the item three bytes on"
+    (match
+       (plain.Jide_engine.Index.outline, index.Jide_engine.Index.outline)
+     with
+    | [ plain_item ], [ item ] -> (
+        match
+          ( plain_item.Jide_engine.Index.item_name_span,
+            item.Jide_engine.Index.item_name_span )
+        with
+        | Some plain_span, Some span ->
+            span.Jide_lang.Span.start_byte
+            = plain_span.Jide_lang.Span.start_byte + shift
+            && span.Jide_lang.Span.end_byte
+               = plain_span.Jide_lang.Span.end_byte + shift
+        | _ -> false)
+    | _ -> false);
+  check "bom: the outline's item ends three bytes on"
+    (match
+       (plain.Jide_engine.Index.outline, index.Jide_engine.Index.outline)
+     with
+    | [ plain_item ], [ item ] ->
+        item.Jide_engine.Index.item_span.Jide_lang.Span.end_byte
+        = plain_item.Jide_engine.Index.item_span.Jide_lang.Span.end_byte + shift
+    | _ -> false);
+  check "bom: the detail is cut from the bytes it names"
+    (match
+       ( declaration_named plain "f" Jide_engine.Index.Function,
+         declaration_named index "f" Jide_engine.Index.Function )
+     with
+    | Some plain_declaration, Some declaration ->
+        declaration.detail = plain_declaration.detail
     | _ -> false)
 
 let test_a_file_that_does_not_parse () =
