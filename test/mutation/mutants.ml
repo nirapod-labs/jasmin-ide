@@ -122,3 +122,113 @@ let hash text =
      would index behind the array. *)
   Int64.(to_int (logand !result 0x3fff_ffff_ffff_ffffL))
 
+let site ~seed ~relative family sites =
+  let candidates = Array.of_list sites in
+  let count = Array.length candidates in
+  if count = 0 then None
+  else
+    let key = seed ^ "\000" ^ relative ^ "\000" ^ Mutant.family_name family in
+    Some candidates.(hash key mod count)
+
+(* [spread maximum files] keeps at most [maximum] of [files], spread evenly
+   over the list, so a bounded run measures the whole corpus and not its
+   first files. *)
+let spread maximum files =
+  let total = List.length files in
+  if maximum <= 0 || total <= maximum then files
+  else
+    let array = Array.of_list files in
+    List.init maximum (fun index -> array.(index * total / maximum))
+
+let write path text =
+  Out_channel.with_open_bin path (fun channel ->
+      Out_channel.output_string channel text)
+
+let emitted_families = [ Mutant.Delete; Mutant.Duplicate; Mutant.Swap ]
+
+let run options =
+  let output = options.output in
+  (try if not (Sys.file_exists output) then Sys.mkdir output 0o755
+   with Sys_error message ->
+     prerr_endline ("mutants: cannot make " ^ output ^ ": " ^ message);
+     exit 2);
+  if not (Sys.is_directory output) then (
+    prerr_endline ("mutants: not a directory: " ^ output);
+    exit 2);
+  if
+    (not (Sys.file_exists options.corpus))
+    || not (Sys.is_directory options.corpus)
+  then (
+    prerr_endline ("mutants: no corpus directory: " ^ options.corpus);
+    exit 2);
+  let found = collect options.corpus in
+  if found = [] then (
+    prerr_endline ("mutants: no .jazz file under " ^ options.corpus);
+    exit 2);
+  let files = spread options.files found in
+  let manifest = Filename.concat output "manifest.tsv" in
+  let channel =
+    try Out_channel.open_bin manifest
+    with Sys_error message ->
+      prerr_endline ("mutants: cannot write " ^ manifest ^ ": " ^ message);
+      exit 2
+  in
+  let index = ref 0 in
+  let per_family = Hashtbl.create 8 in
+  let unreadable = ref 0 in
+  List.iter
+    (fun (path, relative) ->
+      match read path with
+      | Error _ -> incr unreadable
+      | Ok text ->
+          let tokens = Array.of_list (Token.tokenize text) in
+          if Array.length tokens >= 1 then
+            List.iter
+              (fun family ->
+                match
+                  site ~seed:options.seed ~relative family
+                    (Mutant.sites ~every:1 tokens family)
+                with
+                | None -> ()
+                | Some chosen ->
+                    let mutation =
+                      Mutant.make ~source:text tokens family chosen
+                    in
+                    let number = !index in
+                    incr index;
+                    let mutant_path =
+                      Filename.concat output (Printf.sprintf "%d.jazz" number)
+                    in
+                    write mutant_path mutation.Mutant.text;
+                    Out_channel.output_string channel
+                      (Printf.sprintf "%d\t%s\t%s\t%s\n" number
+                         (Mutant.family_name family)
+                         relative mutation.Mutant.label);
+                    let seen =
+                      match Hashtbl.find_opt per_family family with
+                      | Some count -> count
+                      | None -> 0
+                    in
+                    Hashtbl.replace per_family family (seen + 1))
+              emitted_families)
+    files;
+  Out_channel.close channel;
+  Printf.printf "mutants: %d of %d files, %d mutants" (List.length files)
+    (List.length found) !index;
+  List.iter
+    (fun family ->
+      let count =
+        match Hashtbl.find_opt per_family family with
+        | Some count -> count
+        | None -> 0
+      in
+      Printf.printf ", %s %d" (Mutant.family_name family) count)
+    emitted_families;
+  Printf.printf "\n%!";
+  if !unreadable > 0 then
+    Printf.printf "mutants: %d files could not be read\n%!" !unreadable;
+  if !index = 0 then (
+    prerr_endline "mutants: no mutant was emitted";
+    exit 2);
+  0
+
