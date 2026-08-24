@@ -40,6 +40,22 @@ let mentions (result : Jide_jasmin.Adapter.check_result) needle =
         (String.lowercase_ascii needle))
     result.diagnostics
 
+(* Whether one of the files reported as holding an error holds one that says
+   [needle]. Those diagnostics are not on the document: their spans index the
+   file, so the check returns them with it. *)
+let required_mentions (result : Jide_jasmin.Adapter.check_result)
+    ~(file : string) needle =
+  List.exists
+    (fun (required : Jide_jasmin.Adapter.required) ->
+      String.equal required.file file
+      && List.exists
+           (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+             contains
+               (String.lowercase_ascii diagnostic.message)
+               (String.lowercase_ascii needle))
+           required.diagnostics)
+    result.required
+
 (* Whether a span can index [text]: both offsets inside it, the end not
    before the start. A diagnostic whose span does not pass this indexes some
    other file, and a caller that places it would reject it or highlight
@@ -144,6 +160,12 @@ fn library(reg u32 a) -> reg u32 {
 }
 |}
 
+let library_plain = {|
+fn library(reg u32 a) -> reg u32 {
+  return a;
+}
+|}
+
 let requiring path =
   "require \"" ^ path
   ^ "\"\n\nfn entry(reg u32 a) -> reg u32 {\n  return a;\n}\n"
@@ -209,9 +231,9 @@ let test_continue_after_failed_item () =
   let result, environment =
     Loop.type_items
       ~resolve:(fun _ -> None)
-      ~budget:200 ~dropped:[] ~recovered:[] ~file
-      ~length:(String.length first_item_fails)
-      ~items:parsed.items ~idirs:[]
+      ~budget:200 ~dropped:[] ~recovered:[] ~context:[] ~file
+      ~text:first_item_fails ~items:parsed.items ~idirs:[] ~floor:None
+      ~preprocess:false
   in
   check "continue: only the failed item produces a diagnostic"
     (List.length result.Jide_jasmin.Check.diagnostics = 1);
@@ -369,10 +391,36 @@ let test_required_file () =
        result.warnings);
   remove_file library
 
+(* A syntax error in the document ends the compiler's run before it types
+   anything, so a file whose [require] comes at or after that error is never
+   read and its errors are never printed. A require after the first syntax
+   error is still typed by the recovered tree, and its file's errors are kept,
+   as typing errors after that point are. *)
+let test_required_file_after_a_syntax_error () =
+  let library = write_temp_file ~suffix:".jinc" library_with_type_error in
+  let before = Printf.sprintf "param int N = 1\nrequire %S\n" library
+  and after =
+    Printf.sprintf "fn g( {}\n\nparam int N = 1;\nrequire %S\n" library
+  in
+  let broken = check_text "require at the syntax error" before in
+  check "syntax first: the syntax error is reported"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         diagnostic.code = Some "parse")
+       broken.Jide_jasmin.Adapter.diagnostics);
+  check "syntax first: the file the compiler never reads has no errors"
+    (broken.required = []);
+  let later = check_text "require after the syntax error" after in
+  check "syntax first: a require after the error still reports its file"
+    (required_mentions later ~file:library "implicitly cast");
+  remove_file library
+
 (* A required file with an error of its own is not placed on the document,
-   whose bytes its offsets do not describe. The require item says the file has
-   one instead, and a call to a name the broken file declares is that same
-   failure seen again and is not reported a second time. *)
+   whose bytes its offsets do not describe. It is returned against the file it
+   is in, with that file's own name and text, which is where the compiler
+   prints it. The require item does not summarise it: the summary named the
+   file and never showed the error. A call to a name the broken file declares
+   is that same failure seen again and is not reported a second time. *)
 let test_required_file_error () =
   let library = write_temp_file ~suffix:".jinc" library_with_type_error in
   let body =

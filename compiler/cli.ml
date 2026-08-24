@@ -10,17 +10,28 @@ let read_opt path =
   match read path with text -> Some text | exception Sys_error _ -> None
 
 (* The files the compiler would enter before [file] when the file is not an
-   entry, outermost first: the first .jazz file under its directory that
-   requires it, directly or through other files, and the files in between. A
-   .jazz file is an entry by default (design 8.4), so it is checked on its own
-   and its directory is not walked; a file no entry requires is alone, which
-   is the empty list. *)
+   entry, outermost first: the first .jazz file that requires it, directly or
+   through other files, and the files in between. The entries are the .jazz
+   files under the project root, which is the directory of the nearest
+   jasmin.project at or above the file. With no project file above it the
+   search stays in the file's own directory, because there is no root to
+   bound a walk up the tree. A .jazz file is an entry by default (design 8.4),
+   so it is checked on its own and nothing is searched; a file no entry
+   requires is alone, which is the empty list. *)
 let context_of ~(idirs : (string * string) list) (file : string) : string list =
   if Filename.check_suffix file ".jazz" then []
   else
-    let entries =
-      Jide_engine.Context.entries_of_directory (Filename.dirname file)
+    let project =
+      Option.map Filename.dirname
+        (Jide_engine.Project.find_above
+           (Filename.dirname (Jide_engine.Context.absolute file)))
     in
+    let directory =
+      match Jide_engine.Context.search_root ?project file with
+      | Some directory -> directory
+      | None -> Filename.dirname file
+    in
+    let entries = Jide_engine.Context.entries_of_directory directory in
     let context =
       Jide_engine.Context.of_file ~entries ~idirs ~read:read_opt file
     in
@@ -41,8 +52,20 @@ let check_file ~out (request : Request.t) file =
     | exception Sys_error message ->
         ("", [ Report.internal ("cannot read the file: " ^ message) ], [])
   in
-  List.iter (fun line -> out line) required;
-  List.iter (fun line -> out line) (Report.lines ~file ~text diagnostics);
+  (* The compiler reads a required file when typing reaches its [require],
+     so an error in it comes before the document's own typing errors. A
+     syntax error in the document comes before both, because the compiler
+     parses the whole document before it types anything. *)
+  let syntax =
+    List.exists
+      (fun (diagnostic : Diagnostic.t) ->
+        diagnostic.severity = Diagnostic.Error && diagnostic.code = Some "parse")
+      diagnostics
+  in
+  let own = Report.lines ~file ~text diagnostics in
+  List.iter
+    (fun line -> out line)
+    (if syntax then own @ required else required @ own);
   out (Report.summary ~file diagnostics);
   required <> []
   || List.exists

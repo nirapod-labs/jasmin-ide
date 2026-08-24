@@ -199,7 +199,7 @@ let test_recovered_region_suppresses () =
     Loop.type_items
       ~resolve:(fun _ -> None)
       ~budget:200 ~dropped:[] ~recovered:[] ~context:[] ~file
-      ~text:with_type_error ~items:parsed.items ~idirs:[]
+      ~text:with_type_error ~items:parsed.items ~idirs:[] ~preprocess:false
   in
   check "region: the error is reported without a recovered region"
     (List.length plain.Jide_jasmin.Check.diagnostics = 1);
@@ -211,6 +211,7 @@ let test_recovered_region_suppresses () =
           ~budget:200 ~dropped:[]
           ~recovered:[ diagnostic.Jide_lang.Diagnostic.span ]
           ~context:[] ~file ~text:with_type_error ~items:parsed.items ~idirs:[]
+          ~preprocess:false
       in
       check "region: the error inside the recovered region is dropped"
         (suppressed.Jide_jasmin.Check.diagnostics = [])
@@ -452,6 +453,36 @@ fn f(reg u32 a) -> reg u32 {
       | exception _ -> check "hostile: nothing escapes" false)
     hostile
 
+(* A compiler error the library raises as an exception renders the location
+   and the kind itself. The diagnostic carries the location in its span and
+   the kind in its code, so its message is the compiler's text without
+   either: a check prints a diagnostic once, and an editor that has the span
+   does not need the path and the line in the text as well. *)
+let test_compiler_error_text () =
+  let text =
+    {|fn f(stack u64 a) -> reg u64 {
+  reg u64 r;
+  r = 1;
+  return r;
+}
+|}
+  in
+  match (check_text text).Jide_jasmin.Adapter.diagnostics with
+  | [ diagnostic ] ->
+      check "compiler error: the kind is the diagnostic's code"
+        (diagnostic.code = Some "typing");
+      check "compiler error: the message is the compiler's own text"
+        (diagnostic.message
+       = "a has kind stack, only reg or reg ptr are allowed in parameter of \
+          non inlined function");
+      check "compiler error: the location is the span, not the message"
+        (diagnostic.span = Jide_lang.Span.make ~start_byte:15 ~end_byte:16)
+  | other ->
+      check
+        ("compiler error: one diagnostic, got "
+        ^ string_of_int (List.length other))
+        false
+
 let () =
   test_typing_over_recovered ();
   test_failed_item_does_not_cascade ();
@@ -466,6 +497,7 @@ let () =
   test_annotation_error_mapping ();
   test_nameless_stub_suppresses_nothing ();
   test_nothing_escapes ();
+  test_compiler_error_text ();
   if !failures = 0 then print_endline "all typing tests passed"
   else (
     Printf.printf "%d typing test(s) failed\n" !failures;

@@ -9,13 +9,15 @@
 # below is checked once per architecture the folder names, and the check's
 # verdict and first diagnostic are compared with the reference:
 #
-#   JASMINC set     `jasminc -arch <architecture> -until_typing`, run here;
+#   JASMINC set     `jasminc -arch <architecture> -until_cstexp`, run here;
 #   JASMINC unset   the release's `negative.expected`, which records the first
 #                   diagnostic of every negative case. A case it does not
 #                   name is one the release expects to be accepted at the end
-#                   of preprocessing, and a record that holds a compilation
-#                   error is one that gets past typing and is accepted there
-#                   too. No compiler runs.
+#                   of preprocessing. A record of a pass after the checkpoint
+#                   (stack allocation and the rest) says the case passed the
+#                   boundary, so it is accepted there; a record inside the
+#                   boundary is a rejection, and a record with no kind is
+#                   read as one. No compiler runs.
 #
 # With a record list the walk is replaced by that list, one
 # `<label> <path> <architecture>` line per check, tab separated; a path is
@@ -29,14 +31,23 @@
 #   PARITY_KEEP  a directory to copy the raw output of a differing check to.
 #   PARITY_JOBS  how many checks run at once, default 4.
 #
-# Exit status: 0 when every comparison agrees, 1 when one differs, 2 when the
+# Exit status: 0 when every comparison inside the checkpoint agrees, 1 when one
+# differs, 2 when the
 # script cannot run (bad arguments, no corpus, no checker, neither an oracle
 # nor a record) or is interrupted before it prints a verdict.
+#
+# The report keeps its totals and adds a split by the reference's verdict at
+# the checkpoint: the checks the reference rejects there, where the gate asks
+# for the same verdict and the same first diagnostic, and the checks it
+# accepts there, where it rejected nothing and the gate asks only that the
+# checker accepts too. With JASMINC the checkpoint is the one named below;
+# without it there is no checkpoint and the split says so.
 
 set -u
 
 name=parity
 tab=$(printf '\t')
+us=$(printf '\037')
 
 say() { printf '%s: %s\n' "$name" "$*"; }
 warn() { printf '%s: %s\n' "$name" "$*" >&2; }
@@ -99,6 +110,21 @@ case $jobs in
 '' | *[!0-9]*) die "PARITY_JOBS is not a number: $jobs" ;;
 esac
 [ "$jobs" -ge 1 ] || die "PARITY_JOBS is below one: $jobs"
+
+# The checkpoint the reference is stopped at: the first one the compiler
+# reaches after `Compile.preprocess`, that is after parameter substitution,
+# the copy-and-fix-length pass and `Typing.check_prog`. `main_compiler.ml`
+# prints the `Typing` checkpoint before `Compile.preprocess` runs, so
+# `-until_typing` stops one pass early, at the end of pretyping, and the whole
+# main typing pass falls outside it. `-until_cstexp` is the next checkpoint
+# and names the step whose message is "param expansion".
+stop_after=-until_cstexp
+
+# The split compare.awk prints is by the reference's verdict at that
+# checkpoint, so it names one only when a compiler runs. Without a compiler
+# the reference is the release's record, which is not stopped anywhere, and
+# the split says that instead of calling the record's verdict a boundary.
+if [ "$recorded" -eq 1 ]; then checkpoint=; else checkpoint=$stop_after; fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/parity.XXXXXX") || die "cannot make a work directory"
 trap 'rm -rf "$work"' EXIT
@@ -188,30 +214,34 @@ fi
 # The plan: the checks, and, when no compiler is named, the expectation each
 # one carries from the release's record in the four columns after the group.
 # An empty record means the release expects the case to be accepted; a record
-# that holds a compilation error is a case that reached a later pass, so it
-# is accepted at the end of preprocessing too.
+# that holds a compilation error is read as accepted at the end of
+# preprocessing too, which is a rule of thumb rather than the boundary: that
+# kind covers parameter substitution, a pass inside it, as well as the passes
+# after it.
 plan=$work/plan.tsv
 if [ "$recorded" -eq 1 ]; then
-	awk -F'\t' -v OFS='\t' -v expect_file="$expected" '
+	awk -F'\t' -v OFS="$us" -v expect_file="$expected" '
 		FILENAME == expect_file {
-			if (NF >= 5) {
+			if (NF >= 9) {
 				ordinals[$1]++
-				block[$1, ordinals[$1]] = $3 "\t" $4 "\t" $5
+				block[$1, ordinals[$1]] = $3 "\t" $4 "\t" $5 "\t" $6 "\t" $7 "\t" $8 "\t" $9
 			}
 			next
 		}
 		{
 			record = record_for($2, $3)
 			if (record == "") {
-				print $0, 0, 0, 0, ""
+				print $1, $2, $3, $4, 0, 0, 0, "", ""
 				next
 			}
 			split(record, part, "\t")
-			if (part[3] ~ /^(internal )?compilation error/) {
-				print $0, 0, 0, 0, ""
+			# A record of a pass after the checkpoint says the program passed
+			# the boundary, so the release accepts the check there.
+			if (part[7] == "beyond") {
+				print $1, $2, $3, $4, 0, 0, 0, "", ""
 				next
 			}
-			print $0, 1, part[1], part[2], part[3]
+			print $1, $2, $3, $4, 1, part[1], part[2], part[3], part[4]
 		}
 		function record_for(wanted, wanted_arch,   many) {
 			many = ordinals[wanted]
@@ -223,7 +253,7 @@ if [ "$recorded" -eq 1 ]; then
 			return block[wanted, 1]
 		}' "$expected" "$list" >"$plan"
 else
-	awk -F'\t' -v OFS='\t' '{ print $0, "", "", "", "" }' "$list" >"$plan"
+	awk -F'\t' -v OFS="$us" '{ print $1, $2, $3, $4, "", "", "", "", "" }' "$list" >"$plan"
 fi
 
 # run_check <index> <label> <relative path> <arch> <group> [<status> <line>
@@ -254,9 +284,9 @@ run_check() {
 
 	if [ "$recorded" -eq 1 ]; then
 		reference_status=$6
-		reference_first=$(printf '%s\t%s\t%s' "$7" "$8" "$9")
+		reference_first=$(printf '%s\t%s\t%s\t%s' "$7" "$8" "$9" "${10}")
 	else
-		"$oracle" -arch "$arch" -until_typing "$corpus/$relative" \
+		"$oracle" -arch "$arch" "$stop_after" "$corpus/$relative" \
 			>"$work/o.$index" 2>&1
 		reference_status=$?
 		reference_first=$(awk -v corpus="$corpus/" -f "$here/oracle.awk" "$work/o.$index")
@@ -270,8 +300,8 @@ run_check() {
 
 index=0
 running=0
-while IFS=$tab read -r label relative arch group reference_status reference_line \
-	reference_column reference_message ||
+while IFS=$us read -r label relative arch group reference_status reference_line \
+	reference_column reference_message reference_kind ||
 	[ -n "${relative:-}" ]; do
 	[ -n "${relative:-}" ] || continue
 	index=$((index + 1))
@@ -280,7 +310,7 @@ while IFS=$tab read -r label relative arch group reference_status reference_line
 	if [ "$recorded" -eq 1 ]; then
 		run_check "$index" "$label" "$relative" "$arch" "$group" \
 			"$reference_status" "$reference_line" "$reference_column" \
-			"${reference_message:-}" </dev/null &
+			"${reference_message:-}" "${reference_kind:-}" </dev/null &
 	else
 		run_check "$index" "$label" "$relative" "$arch" "$group" </dev/null &
 	fi
@@ -314,13 +344,14 @@ if [ -n "${PARITY_TSV:-}" ]; then
 	cp "$results" "$PARITY_TSV" || die "cannot write PARITY_TSV=$PARITY_TSV"
 fi
 
-# The tables. compare.awk reads the results and the expectations, prints
-# them, and writes the harness's own exit status to $work/status.
+# The tables and the split by the reference's verdict. compare.awk reads the
+# results and the expectations, prints them, and writes the harness's own exit
+# status to $work/status.
 report=$work/report.txt
 awk -v corpus="$corpus" -v reference="$reference" -v version="$version" \
 	-v checker="$checker" -v expect_file="$expected" -v pending="$pending" \
 	-v from_record="$recorded" -v differ="$work/differ" \
-	-v status_file="$work/status" \
+	-v status_file="$work/status" -v checkpoint="$checkpoint" \
 	-f "$here/compare.awk" "$expected" "$results" >"$report" ||
 	die "the comparison did not run"
 

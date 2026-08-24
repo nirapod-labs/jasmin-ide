@@ -20,6 +20,8 @@
    the total. A name that moved between groups, appeared twice, or vanished
    fails one of them. *)
 
+open Jasmin
+
 let failures = ref 0
 
 let check name condition =
@@ -69,35 +71,20 @@ let printed_class (constructor : _ Sopn.prim_constructor) =
       | Sopn.PVv _ :: _ | Sopn.PVsv _ :: _ -> 4
       | Sopn.PVvv _ :: _ -> 5)
 
-(* The class of one of our own entries, read back from its suffixes. This is
-   the part that would catch a wrong suffix rendering: a [PVp] printed as
-   ["64"] and a [PVs] printed as ["s64"] must land in different groups, and
-   they do only if the rendering round-trips through the classifier. *)
-let class_of_suffixes = function
-  | [] -> 0
-  | suffix :: _ -> (
-      (* A plain size suffix is the compiler's [PVp]; one that starts with
-         "s" or "u" and is otherwise digits is [PVs]; a vector suffix is
-         one carrying the "_ve_sz" or "ve_sz_ve_sz" shape; and an
-         extension suffix names two sizes joined by a second sign. *)
-      let is_digits s =
-        String.length s > 0 && String.for_all (fun c -> c >= '0' && c <= '9') s
-      in
-      match String.split_on_char '_' suffix with
-      | [ one ] when is_digits one -> 1
-      | [ one ]
-        when String.length one > 1
-             && (one.[0] = 's' || one.[0] = 'u')
-             && is_digits (String.sub one 1 (String.length one - 1)) ->
-          2
-      | [ one; two ]
-        when (String.length one > 1 && (one.[0] = 's' || one.[0] = 'u'))
-             && String.length two > 1
-             && (two.[0] = 's' || two.[0] = 'u') ->
-          3
-      | [ one ] -> 4
-      | [ _; _ ] -> 5
-      | _ -> 4)
+(* The group each name of [arch]'s table is printed under, read from the
+   table's own constructor. The suffix strings do not decide it: a zero or sign
+   extension such as ["u16u8"] has no underscore, so a classifier that reads the
+   strings files it with the plain sizes. *)
+let printed_classes (arch : string) =
+  let arch =
+    match Jide_jasmin.Arch.of_string arch with
+    | Some arch -> arch
+    | None -> failwith ("test: unknown arch " ^ arch)
+  in
+  let (module A) = Jide_jasmin.Arch.module_of arch Jide_jasmin.Arch.Linux in
+  List.map
+    (fun (name, constructor) -> (name, printed_class constructor))
+    (Sopn.prim_string A.asmOp_sopn)
 
 (* One architecture's checks. *)
 let check_arch (arch : string) =
@@ -105,6 +92,7 @@ let check_arch (arch : string) =
   let help = Jide_jasmin.Intrinsics.compiler_help ~arch in
   let groups = printed_groups help in
   let label name = arch ^ ": " ^ name in
+  let classes = printed_classes arch in
 
   (* The printer writes all seven headers, always. *)
   check (label "seven groups") (List.length groups = 7);
@@ -130,7 +118,9 @@ let check_arch (arch : string) =
     let table = Hashtbl.create 16 in
     List.iter
       (fun (entry : Jide_jasmin.Intrinsics.t) ->
-        let class_ = class_of_suffixes entry.suffixes in
+        let class_ =
+          Option.value (List.assoc_opt entry.name classes) ~default:(-1)
+        in
         let previous =
           Option.value (Hashtbl.find_opt table class_) ~default:[]
         in
@@ -166,6 +156,7 @@ let check_arch (arch : string) =
 (* The suffix lists must be a function of the name under one architecture:
    two lookups agree. *)
 let check_lookup (arch : string) (entries : Jide_jasmin.Intrinsics.t list) =
+  let classes = printed_classes arch in
   List.iter
     (fun (entry : Jide_jasmin.Intrinsics.t) ->
       let again = Jide_jasmin.Intrinsics.suffixes_of ~arch entry.name in
@@ -186,17 +177,29 @@ let check_lookup (arch : string) (entries : Jide_jasmin.Intrinsics.t list) =
           | Some _ -> ()
           | None -> check (arch ^ ": " ^ written ^ " resolves") false)
         entry.suffixes;
-      match
+      (* The bare name. The compiler reads it with the default suffix: for a
+         name of the x86 constructor, the first suffix the table lists, or the
+         bare operation when the list is empty; for an ARM name, the plain
+         mnemonic, which resolves exactly when the table lists the empty
+         suffix. *)
+      let bare =
         Jide_jasmin.Intrinsics.signature_of ~arch ~name:entry.name ~suffix:""
-      with
-      | Some _ when entry.suffixes = [] -> ()
-      | Some _ ->
-          check (arch ^ ": " ^ entry.name ^ " without a suffix resolves") false
-      | None when List.mem "" entry.suffixes -> ()
-      | None ->
-          (* A name whose suffix list omits the empty string is one the
-             compiler cannot write bare, as far as this table can tell. *)
-          ())
+      in
+      if List.assoc_opt entry.name classes = Some 6 then
+        check
+          (arch ^ ": " ^ entry.name
+         ^ " bare resolves exactly when the empty suffix is listed")
+          (bare <> None = List.mem "" entry.suffixes)
+      else
+        match entry.suffixes with
+        | [] ->
+            check (arch ^ ": " ^ entry.name ^ " bare resolves") (bare <> None)
+        | first :: _ ->
+            check
+              (arch ^ ": " ^ entry.name ^ " bare takes the default suffix")
+              (bare
+              = Jide_jasmin.Intrinsics.signature_of ~arch ~name:entry.name
+                  ~suffix:first))
     entries
 
 (* A suffix the architecture does not list must not resolve, or the

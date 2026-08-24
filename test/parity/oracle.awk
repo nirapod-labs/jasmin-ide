@@ -28,8 +28,11 @@ function close_group() {
 	sub(/ $/, "", message)
 	while ((at = index(message, corpus)) > 0)
 		message = substr(message, 1, at - 1) substr(message, at + length(corpus))
+	kind = ""
+	if (match(message, /^(internal )?(parse|typing|annotation|pretyping|compilation) error|^typing|^unexpected annotation/))
+		kind = substr(message, RSTART, RLENGTH)
 	sub(/^(parse|typing|annotation|pretyping|compilation|internal) error:?[ ]*/, "", message)
-	result = sprintf("%d\t%d\t%s", start_line, start_column, message)
+	result = sprintf("%d\t%d\t%s\t%s", start_line, start_column, message, kind)
 }
 BEGIN {
 	open = 0
@@ -60,6 +63,6 @@ END {
 	if (found) print result
 	else if (other != "") {
 		gsub(/[ \t]+/, " ", other)
-		printf "0\t0\t%s\n", other
-	} else printf "0\t0\t\n"
+		printf "0\t0\t%s\t\n", other
+	} else printf "0\t0\t\t\n"
 }
