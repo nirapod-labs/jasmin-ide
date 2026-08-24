@@ -434,16 +434,23 @@ let test_required_file_error () =
       library
   in
   let result = check_text "required error" body in
-  check "required error: one diagnostic, the require item's"
-    (List.length result.Jide_jasmin.Adapter.diagnostics = 1);
-  check "required error: it says the required file has errors"
+  check "required error: the document has no diagnostics"
+    (result.Jide_jasmin.Adapter.diagnostics = []);
+  check "required error: the file is reported under its own name"
     (List.exists
-       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
-         contains diagnostic.message "has errors"
-         && contains diagnostic.message library)
-       result.diagnostics);
-  check "required error: the include's own message is not placed"
-    (not (mentions result "implicitly cast"));
+       (fun (required : Jide_jasmin.Adapter.required) ->
+         String.equal required.file library)
+       result.required);
+  check "required error: it carries the file's own message"
+    (required_mentions result ~file:library "implicitly cast");
+  check "required error: its span indexes the file's own text"
+    (List.for_all
+       (fun (required : Jide_jasmin.Adapter.required) ->
+         List.for_all
+           (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+             indexes required.text diagnostic.span)
+           required.diagnostics)
+       result.required);
   check "required error: the call to it is not reported as unknown"
     (not (mentions result "unknown function"));
   let direct =
@@ -501,8 +508,146 @@ let test_required_file_missing () =
          && contains diagnostic.message "no-such.jinc")
        result.diagnostics)
 
-(* Two files that require each other are a diagnostic too, not a recursion
-   that ends in a stack overflow. *)
+(* A required file that does not even parse is a failure of the check, not a
+   clean result: the document may be well formed only because the file is
+   not, so the file's own parse diagnostics are returned against it. The
+   names the broken file would have declared are not reported a second time
+   as unknown names of the document, which would put a diagnostic on a
+   correct line of it. *)
+let test_required_file_syntax_error () =
+  let broken = "fn library(reg u32 a -> reg u32 {\n  return a;\n}\n" in
+  let resolve path =
+    if Filename.basename path = "syntax-error.jinc" then Some broken else None
+  in
+  let body =
+    "require \"syntax-error.jinc\"\n\n\
+     fn entry(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = library(a);\n\
+    \  return x;\n\
+     }\n"
+  in
+  let result = check_with ~resolve body in
+  check "required syntax error: the document has no diagnostic"
+    (result.Jide_jasmin.Adapter.diagnostics = []);
+  check "required syntax error: the file is reported under its own name"
+    (List.exists
+       (fun (required : Jide_jasmin.Adapter.required) ->
+         String.equal required.file "syntax-error.jinc")
+       result.required);
+  check "required syntax error: it carries the parse diagnostic"
+    (required_mentions result ~file:"syntax-error.jinc" "unexpected token");
+  check "required syntax error: the name it did not declare is not reported"
+    (not (mentions result "unknown"));
+  check "required syntax error: its span indexes the file's own text"
+    (List.for_all
+       (fun (required : Jide_jasmin.Adapter.required) ->
+         List.for_all
+           (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+             indexes required.text diagnostic.span)
+           required.diagnostics)
+       result.required);
+  let direct =
+    Jide_jasmin.Adapter.check x86_64 linux ~file:"syntax-error.jinc"
+      ~text:broken ~idirs:[]
+  in
+  check "required syntax error: the error itself is real"
+    (List.exists
+       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+         diagnostic.code = Some "parse")
+       direct.diagnostics)
+
+(* A required file with a typing error in one item and a parse error in
+   another has both reported against itself: the parse error is not dropped
+   because the typing error was recorded first. *)
+let test_required_file_typing_and_syntax_error () =
+  let broken =
+    "fn library(reg u32 a) -> reg u32 {\n\
+    \  reg bool b;\n\
+    \  b = a;\n\
+    \  return a;\n\
+     }\n\n\
+     fn other(reg u32 a -> reg u32 {\n\
+    \  return a;\n\
+     }\n"
+  in
+  let resolve path =
+    if Filename.basename path = "both-errors.jinc" then Some broken else None
+  in
+  let result = check_with ~resolve (requiring "both-errors.jinc") in
+  check "required both: the document has no diagnostic"
+    (result.Jide_jasmin.Adapter.diagnostics = []);
+  check "required both: the parse error is reported against the file"
+    (required_mentions result ~file:"both-errors.jinc" "unexpected token");
+  check "required both: the typing error is reported against the file"
+    (required_mentions result ~file:"both-errors.jinc" "implicitly cast");
+  check "required both: the file is the only one reported"
+    (List.for_all
+       (fun (required : Jide_jasmin.Adapter.required) ->
+         String.equal required.file "both-errors.jinc")
+       result.required)
+
+(* One file required twice, once by the name beside the document and once
+   through a [..] spelling of it, is one file. The compiler's [enter_file]
+   answers [None] for a path its namespace has already loaded and reads
+   nothing, so the second [require] adds no item; a checker that reads the
+   file again splices its declarations twice and they collide with each
+   other. The release's `tests/success/require/common/file2.jazz` requires
+   one file both ways. *)
+let test_required_file_twice () =
+  let library = write_temp_file ~suffix:".jinc" library_plain in
+  let spelled =
+    Filename.concat (Filename.dirname library)
+      ("nowhere/../" ^ Filename.basename library)
+  in
+  let body =
+    Printf.sprintf
+      "require %S\n\
+       require %S\n\n\
+       fn entry(reg u32 a) -> reg u32 {\n\
+      \  reg u32 x;\n\
+      \  x = library(a);\n\
+      \  return x;\n\
+       }\n"
+      library spelled
+  in
+  let result = check_text "required twice" body in
+  check "required twice: the document has no diagnostics"
+    (result.Jide_jasmin.Adapter.diagnostics = []);
+  remove_file library
+
+(* The same two requires inside a namespace, where the file is spliced into
+   the namespace's own items: read twice, its namespaced declarations would
+   collide there. *)
+let test_required_file_twice_inside_namespace () =
+  let library = write_temp_file ~suffix:".jinc" library_plain in
+  let spelled =
+    Filename.concat (Filename.dirname library)
+      ("nowhere/../" ^ Filename.basename library)
+  in
+  let body =
+    Printf.sprintf
+      "namespace N {\n\
+      \  require %S\n\
+      \  require %S\n\n\
+      \  fn g(reg u32 a) -> reg u32 {\n\
+      \    return a;\n\
+      \  }\n\
+       }\n\n\
+       fn entry(reg u32 a) -> reg u32 {\n\
+      \  reg u32 x;\n\
+      \  x = N::library(a);\n\
+      \  return x;\n\
+       }\n"
+      library spelled
+  in
+  let result = check_text "required twice in a namespace" body in
+  check "required twice in a namespace: the document has no diagnostics"
+    (result.Jide_jasmin.Adapter.diagnostics = []);
+  remove_file library
+
+(* Two files that require each other are accepted, as the compiler accepts
+   them: each file is loaded once, so the loop ends without a diagnostic. *)
 let test_required_file_cycle () =
   let resolve path =
     match Filename.basename path with
@@ -527,19 +672,13 @@ let test_required_file_cycle () =
       \  return a;\n\
        }\n"
   in
-  check "cycle: one diagnostic"
-    (List.length result.Jide_jasmin.Adapter.diagnostics = 1);
-  check "cycle: it says the file requires itself"
-    (List.exists
-       (fun (diagnostic : Jide_lang.Diagnostic.t) ->
-         contains diagnostic.message "requires itself")
-       result.diagnostics)
+  check "cycle: no diagnostic, as the compiler accepts a cycle"
+    (result.Jide_jasmin.Adapter.diagnostics = [])
 
 (* Two files that require each other, spelled with [./] on every name. The
-   path is normalised before it is compared with the chain, so the same two
-   files are the same two files however the require spelled them: one
-   diagnostic that says the file requires itself, not a pile of markers
-   whose first one blames the nesting bound. *)
+   path is normalised before it is compared with the loaded files, so the two
+   files are loaded once however the require spelled them: no diagnostic, and
+   the nesting bound is not reached. *)
 let test_dot_prefixed_cycle () =
   let asked = ref [] in
   let resolve path =
