@@ -232,3 +232,25 @@ let run options =
     exit 2);
   0
 
+let main () =
+  let arguments = Array.to_list Sys.argv |> List.tl in
+  match parse_arguments arguments with
+  | Ok options ->
+      if options.output = "" then (
+        prerr_endline "mutants: --output is required";
+        prerr_endline usage;
+        2)
+      else if options.corpus = "" then (
+        prerr_endline "mutants: a corpus directory is required";
+        prerr_endline usage;
+        2)
+      else run options
+  | Error `Help ->
+      print_endline usage;
+      0
+  | Error (`Message message) ->
+      prerr_endline ("mutants: " ^ message);
+      prerr_endline usage;
+      2
+
+let () = exit (main ())
