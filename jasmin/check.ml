@@ -4,12 +4,15 @@ type required = {
   file : string;
   text : string;
   diagnostics : Jide_lang.Diagnostic.t list;
+  site : int option;
 }
 (** The diagnostics of one file reached through a [require]. Every span in
     [diagnostics] indexes [text], the bytes of [file], and not the document
     the caller asked about: a caller that prints them names [file] with them,
     which is the place the compiler itself reports them at. [file] is the path
-    the compiler prints, not the normalised one the loop compares with. *)
+    the compiler prints, not the normalised one the loop compares with.
+    [site] is the byte of the document's item whose typing first reached the
+    file, [None] for a file of the context chain. *)
 
 type result = {
   diagnostics : Jide_lang.Diagnostic.t list;
@@ -311,6 +314,21 @@ module Make (A : Arch_full.Arch) = struct
     | environment -> Ok environment
     | exception exn -> Error exn
 
+  (** The compiler's own preprocessing, [Compile.preprocess], run over the
+      declarations the environment holds once the document is typed: the
+      program the compiler hands it. Parameter substitution, the
+      copy-and-fix-length pass and [Typing.check_prog] are inside the
+      compiler's preprocessing and reject programs that pretyping accepts, so
+      the verdict up to the end of preprocessing needs them. The program is
+      not used afterwards; only its failure is. *)
+  let preprocess_error (environment : environment) : Error.t option =
+    match
+      Compile.preprocess A.pointer_data A.msf_size A.asmOp
+        (Pretyping.Env.decls environment)
+    with
+    | _program -> None
+    | exception exn -> Some (Error.of_exn exn)
+
   type loop = {
     file : string;
         (** The one spelling every comparison uses: [normalise_path] of the
@@ -350,11 +368,17 @@ module Make (A : Arch_full.Arch) = struct
             types. Only the document's loop collects them: the facts of an
             included file carry that file's offsets, which do not index the
             document the caller asked about. *)
-    required_diagnostics : (string * string * Jide_lang.Diagnostic.t) list ref;
+    required_diagnostics :
+      (string * string * Jide_lang.Diagnostic.t * int option) list ref;
         (** The diagnostics of the files reached through a [require], newest
-            first, each with the name that file is printed by and the text its
-            span indexes. They are reported against the file they belong to,
-            never against the document. *)
+            first, each with the name that file is printed by, the text its
+            span indexes, and the byte of the document's item whose typing
+            reached the file, [None] for a file of the context chain, which
+            the compiler enters before the document. They are reported against
+            the file they belong to, never against the document. *)
+    in_document : bool;
+        (** False while the context chain is typed, and true for the document
+            and every file a require of the document reaches. *)
     awaiting : string list;
         (** The rest of the context chain from the file this loop types: the
             file it has to reach, then the ones below it, the document last.
@@ -382,6 +406,11 @@ module Make (A : Arch_full.Arch) = struct
             a diamond, a file reached through two chains of requires, which
             libjade's ML-KEM unit is full of, from being typed twice and every
             declaration it makes reported as already declared. *)
+    sites : (string * Jide_lang.Span.t * string) list ref;
+        (** For each file a require read: its normalised path, the span of the
+            document's item that reached it, and the name the require wrote.
+            A failure found after typing is placed on the item that read its
+            file, the way a failure of typing is. *)
   }
   (** Everything one pass over one item stream learns. A required file is
       typed by the same pass with its own [file] and its own recovered
@@ -451,6 +480,15 @@ module Make (A : Arch_full.Arch) = struct
     if not (already_loaded loop ~namespace path) then
       loop.loaded := (namespace, path) :: !(loop.loaded)
 
+  (** [reachable_site ~floor site] is false for a required file's diagnostic
+      the compiler could not report: when the document has a syntax error,
+      which [floor] is the first byte of, the compiler stops at it before it
+      types anything, so a file whose [require] item starts at or before that
+      byte is never read. A file the context chain reaches ([None]) is entered
+      before the document and is kept. *)
+  let reachable_site ~(floor : int option) (site : int option) =
+    match (floor, site) with Some floor, Some site -> site > floor | _ -> true
+
   (** [type_items ~file ~text ~items ~idirs ~context] types the items of one
       file one by one and returns the diagnostics, plus the environment the
       loop leaves behind when it started at all.
@@ -490,8 +528,8 @@ module Make (A : Arch_full.Arch) = struct
   let rec type_items ~(resolve : lookup) ~(budget : int)
       ~(dropped : Recover.dropped list) ~(recovered : Jide_lang.Span.t list)
       ~(context : string list) ~(file : string) ~(text : string)
-      ~(items : Syntax.pprogram) ~(idirs : (string * string) list) :
-      result * environment option =
+      ~(items : Syntax.pprogram) ~(idirs : (string * string) list)
+      ~(floor : int option) ~(preprocess : bool) : result * environment option =
     let length = String.length text in
     let initial =
       match List.fold_left Pretyping.Env.add_from Pretyping.Env.empty idirs with
@@ -541,6 +579,7 @@ module Make (A : Arch_full.Arch) = struct
                 diagnostics = ref [];
                 facts = ref Facts.empty;
                 required_diagnostics = ref [];
+                in_document = true;
                 awaiting = [];
                 reached = false;
                 kept = ref 0;
@@ -548,6 +587,7 @@ module Make (A : Arch_full.Arch) = struct
                 stopped = ref false;
                 include_errors = ref 0;
                 loaded = ref [ ("", document) ];
+                sites = ref [];
               }
             in
             type_context loop ~chain:[ document ] ~document
@@ -560,12 +600,24 @@ module Make (A : Arch_full.Arch) = struct
                   loop.diagnostics := Error.of_exn exn :: !(loop.diagnostics);
                   None
             in
+            (match environment with
+            | Some environment
+              when preprocess && !(loop.diagnostics) = []
+                   && !(loop.include_errors) = 0 -> (
+                match preprocess_error environment with
+                | Some error -> placed_preprocess loop error
+                | None -> ())
+            | _ -> ());
             ( {
                 empty with
                 diagnostics =
                   List.rev_map Error.to_diagnostic !(loop.diagnostics);
                 facts = !(loop.facts);
-                required = required_of_errors !(loop.required_diagnostics);
+                required =
+                  required_of_errors
+                    (List.filter
+                       (fun (_, _, _, site) -> reachable_site ~floor site)
+                       !(loop.required_diagnostics));
               },
               environment ))
 
@@ -575,26 +627,26 @@ module Make (A : Arch_full.Arch) = struct
       diagnostics for it. The spans of each entry index that entry's own text,
       and its [file] is the name the compiler prints it by. *)
   and required_of_errors
-      (errors : (string * string * Jide_lang.Diagnostic.t) list) : required list
-      =
+      (errors : (string * string * Jide_lang.Diagnostic.t * int option) list) :
+      required list =
     let errors = List.rev errors in
     let files =
       List.fold_left
-        (fun (files : (string * string) list) (file, text, _) ->
-          if List.exists (fun (held, _) -> String.equal held file) files then
+        (fun (files : (string * string * int option) list) (file, text, _, site) ->
+          if List.exists (fun (held, _, _) -> String.equal held file) files then
             files
-          else files @ [ (file, text) ])
+          else files @ [ (file, text, site) ])
         [] errors
     in
     List.map
-      (fun (file, text) ->
+      (fun (file, text, site) ->
         let diagnostics =
           List.filter_map
-            (fun (held, _, diagnostic) ->
+            (fun (held, _, diagnostic, _) ->
               if String.equal held file then Some diagnostic else None)
             errors
         in
-        { file; text; diagnostics })
+        { file; text; diagnostics; site })
       files
 
   (** Record one diagnostic of a file reached through a [require] against
@@ -603,8 +655,12 @@ module Make (A : Arch_full.Arch) = struct
       include cannot return more lines than a broken document can. *)
   and record_required loop ~(file : string) ~(text : string)
       (diagnostic : Jide_lang.Diagnostic.t) =
+    let site =
+      if loop.in_document then Some !(loop.origin).Jide_lang.Span.start_byte
+      else None
+    in
     loop.required_diagnostics :=
-      (file, text, diagnostic) :: !(loop.required_diagnostics);
+      (file, text, diagnostic, site) :: !(loop.required_diagnostics);
     incr loop.kept;
     if !(loop.kept) >= loop.budget then loop.stopped := true
 
@@ -633,6 +689,7 @@ module Make (A : Arch_full.Arch) = struct
                 name = file;
                 text;
                 place = false;
+                in_document = false;
                 awaiting = rest @ [ document ];
                 reached = false;
               }
@@ -703,23 +760,41 @@ module Make (A : Arch_full.Arch) = struct
     match type_item snapshot item with
     | Ok next ->
         (* What this item typed left behind, read from the front of the typed
-           list. Only the document's loop collects facts: an included file's
-           ranges index that file, not the document. *)
-        (if loop.place then
-           let decls =
-             added
-               ~before:(Pretyping.Env.decls snapshot)
-               ~after:(Pretyping.Env.decls next)
-           in
-           match Collect.of_item ~file:loop.file ~env:next ~item ~decls with
-           | collected -> loop.facts := Facts.merge !(loop.facts) collected
-           | exception exn ->
-               (* A fact the adapter cannot read is a failure of this server,
-                  never of the user's file: it is reported as such instead of
-                  ending the check. *)
+           list. The document's own items give its facts whole. A file a
+           top-level [require] reaches gives its uses and nothing else: its
+           items and calls index that file, not the document, and the
+           document's consumers read only the items, but each use names its own
+           file ([u_file]) and namespace ([u_reading]), so it is compared
+           exactly. *)
+        (let decls =
+           added
+             ~before:(Pretyping.Env.decls snapshot)
+             ~after:(Pretyping.Env.decls next)
+         in
+         match Collect.of_item ~file:loop.file ~env:next ~item ~decls with
+         | collected ->
+             let collected =
+               if loop.place then collected
+               else { collected with Facts.items = []; Facts.calls = [] }
+             in
+             loop.facts := Facts.merge !(loop.facts) collected
+         | exception exn ->
+             (* A fact the adapter cannot read is a failure of this server,
+                never of the user's file: it is reported as such instead of
+                ending the check. A required file's failure has no span of its
+                own in the document, so it is placed on the item being typed,
+                and it is not counted as an error of the required file. *)
+             if loop.place then (
                let error = Error.of_exn exn in
                if Error.belongs_to ~file:loop.file error then
-                 keep loop ~in_recovered_item error);
+                 keep loop ~in_recovered_item error)
+             else
+               note loop
+                 (Error.make ~file:(Some loop.document) ~kind:Error.Internal
+                    ~span:!(loop.origin)
+                    (Printf.sprintf
+                       "the facts of the required file `%s' cannot be read"
+                       loop.file)));
         loop.environment := next;
         None
     | Error exn ->
@@ -885,11 +960,10 @@ module Make (A : Arch_full.Arch) = struct
            ~span:(span_of_writer loop ~file ~at)
            message)
     in
-    if List.mem path chain then (
-      report (Printf.sprintf "the required file `%s' requires itself" written);
-      forget_names loop prefix;
-      ([], []))
-    else if already_loaded loop ~namespace:prefix path then
+    (* A file the namespace has loaded is skipped whether it closes a cycle or
+       not, and without a diagnostic: the compiler's loader does the same, so
+       a cycle or a self-require is accepted. *)
+    if already_loaded loop ~namespace:prefix path then
       (* The compiler's [enter_file] answers [None] here: the file this
          namespace already read is not read again, so nothing is spliced a
          second time and nothing its first read reported is reported again. *)
@@ -907,6 +981,8 @@ module Make (A : Arch_full.Arch) = struct
           ([], [])
       | Some text ->
           remember_loaded loop ~namespace:prefix path;
+          loop.sites :=
+            (path, span_of_writer loop ~file ~at, written) :: !(loop.sites);
           let parsed = Parse.parse ~name:path text in
           let failed = Parse.failed parsed in
           if failed then (
@@ -1016,11 +1092,7 @@ module Make (A : Arch_full.Arch) = struct
                  for, not one it requires. *)
               loop.reached <- true
           | _ -> (
-              if List.mem path chain then
-                report
-                  (Printf.sprintf "the required file `%s' requires itself"
-                     written)
-              else if List.length chain > max_include_depth then
+              if List.length chain > max_include_depth then
                 report
                   (Printf.sprintf "the required file `%s' is nested too deeply"
                      written)
@@ -1042,6 +1114,8 @@ module Make (A : Arch_full.Arch) = struct
                     let recorded = List.length !(loop.required_diagnostics) in
                     let environment = !(loop.environment) in
                     remember_loaded loop ~namespace:"" path;
+                    loop.sites :=
+                      (path, !(loop.origin), written) :: !(loop.sites);
                     let include_loop =
                       {
                         loop with
@@ -1122,6 +1196,31 @@ module Make (A : Arch_full.Arch) = struct
                         (Printf.sprintf "the required file `%s' has errors"
                            written)))
       names
+
+  (** A failure of preprocessing is placed the way a failure of typing is. One
+      the document owns is kept with its span. One in an included file is not
+      placed at its offsets, which index that file; the require item that read
+      the file says it has errors instead. *)
+  and placed_preprocess loop (error : Error.t) =
+    match error.Error.file with
+    | Some failed when not (String.equal failed loop.document) -> (
+        match
+          List.find_opt
+            (fun (path, _, _) -> String.equal path failed)
+            !(loop.sites)
+        with
+        | Some (_, span, written) ->
+            note loop
+              (Error.make ~file:(Some loop.document) ~kind:Error.Typing ~span
+                 (Printf.sprintf "the required file `%s' has errors" written))
+        | None ->
+            note loop
+              {
+                error with
+                Error.file = Some loop.document;
+                span = Jide_lang.Span.make ~start_byte:0 ~end_byte:0;
+              })
+    | _ -> note loop error
 
   and keep loop ~(in_recovered_item : bool) (error : Error.t) =
     (* Only the document's own errors have spans the caller can place. With

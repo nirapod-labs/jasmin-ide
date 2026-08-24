@@ -39,6 +39,48 @@ let context_of ~(idirs : (string * string) list) (file : string) : string list =
     | _document :: context -> List.rev context
     | [] -> []
 
+(* The lines of the files a [require] reached, as the compiler prints them. *)
+let required_lines (entries : Jide_jasmin.Adapter.required list) =
+  List.concat_map
+    (fun (required : Jide_jasmin.Adapter.required) ->
+      Report.lines ~file:required.file ~text:required.text required.diagnostics)
+    entries
+
+(* The order the compiler meets the errors in. It parses the whole document
+   before it types anything, so a syntax error in the document comes first.
+   Otherwise it types the items in order and reads a required file when it
+   reaches the [require], so a required file whose [require] comes at or
+   before the document's first error is met before that error, and one after
+   it is met after; a file of the context chain is entered before the
+   document. Errors are printed in that order, so the first line is the
+   compiler's first error. *)
+let ordered ~text ~(own : string list) (diagnostics : Diagnostic.t list)
+    (required : Jide_jasmin.Adapter.required list) =
+  let errors =
+    List.filter
+      (fun (diagnostic : Diagnostic.t) ->
+        diagnostic.severity = Diagnostic.Error)
+      diagnostics
+  in
+  let syntax =
+    List.exists
+      (fun (diagnostic : Diagnostic.t) -> diagnostic.code = Some "parse")
+      errors
+  in
+  let first =
+    List.fold_left
+      (fun low (diagnostic : Diagnostic.t) ->
+        min low diagnostic.span.Jide_lang.Span.start_byte)
+      (String.length text + 1)
+      errors
+  in
+  let leads (entry : Jide_jasmin.Adapter.required) =
+    (not syntax)
+    && match entry.site with None -> true | Some site -> site <= first
+  in
+  let leading, trailing = List.partition leads required in
+  required_lines leading @ own @ required_lines trailing
+
 let check_file ~out (request : Request.t) file =
   let text, diagnostics, required =
     match read file with
@@ -48,24 +90,12 @@ let check_file ~out (request : Request.t) file =
             ~context:(context_of ~idirs:request.idirs file)
             request.arch request.call_conv ~file ~text ~idirs:request.idirs
         in
-        (text, Report.of_check ~file ~text result, Report.required_lines result)
+        (text, Report.of_check ~file ~text result, result.required)
     | exception Sys_error message ->
         ("", [ Report.internal ("cannot read the file: " ^ message) ], [])
   in
-  (* The compiler reads a required file when typing reaches its [require],
-     so an error in it comes before the document's own typing errors. A
-     syntax error in the document comes before both, because the compiler
-     parses the whole document before it types anything. *)
-  let syntax =
-    List.exists
-      (fun (diagnostic : Diagnostic.t) ->
-        diagnostic.severity = Diagnostic.Error && diagnostic.code = Some "parse")
-      diagnostics
-  in
   let own = Report.lines ~file ~text diagnostics in
-  List.iter
-    (fun line -> out line)
-    (if syntax then own @ required else required @ own);
+  List.iter (fun line -> out line) (ordered ~text ~own diagnostics required);
   out (Report.summary ~file diagnostics);
   required <> []
   || List.exists

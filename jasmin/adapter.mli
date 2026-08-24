@@ -44,6 +44,11 @@ type required = {
       (** What the compiler reported in [file] itself, at the place it
           reported it: an error in a file reached through a [require] is
           never printed at the require item instead. *)
+  site : int option;
+      (** The byte of the document's item whose typing reached [file] first,
+          which is where in the document's order the compiler meets its
+          errors; [None] for a file of the context chain, which the compiler
+          enters before the document. *)
 }
 (** A file reached through a [require] that holds an error, and that error.
     The caller prints each diagnostic against [text] and with [file] as its
@@ -84,7 +89,10 @@ val check :
   idirs:(string * string) list ->
   check_result
 (** [check ~resolve ~context arch call_conv ~file ~text ~idirs] parses and
-    types [text] as [file]. [resolve] answers with the bytes of a file a
+    types [text] as [file]. When [text] parses without an error, the compiler's
+    own preprocessing (parameter substitution, then the final typing pass) runs
+    over what typed, so a program the compiler rejects before its checkpoint
+    is rejected here too. [resolve] answers with the bytes of a file a
     [require] item names, or [None] when it has none; the engine passes its
     open buffers first and falls back to disk, which is what the default does.
 

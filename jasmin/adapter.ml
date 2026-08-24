@@ -15,6 +15,7 @@ type required = Check.required = {
   file : string;
   text : string;
   diagnostics : Jide_lang.Diagnostic.t list;
+  site : int option;
 }
 
 type check_result = Check.result = {
