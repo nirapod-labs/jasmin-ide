@@ -270,8 +270,8 @@ awk -F'\t' -v counts="$pins_counts" '
 			if (value == "PIN") { record_unfilled++; continue }
 			if (value ~ /^[0-9a-f]+$/ && length(value) == 40) { record_filled++; continue }
 			record_other++
-			printf "violation: pins: %s: the record %s holds %s, which is neither the placeholder PIN nor a full 40-character commit SHA\n", \
-				env_path[i], name, (value == "" ? "an empty value" : value)
+			printf "violation: pins: %s:%s: the record %s holds %s, which is neither the placeholder PIN nor a full 40-character commit SHA\n", \
+				env_path[i], env_line[i], name, (value == "" ? "an empty value" : value)
 		}
 
 		for (i = 1; i <= n_use; i++) {
@@ -307,9 +307,9 @@ agreement=$tmp/agreement.violations
 : >"$agreement"
 
 awk -F'\t' '
-	$1 == "env" { value[$2 SUBSEP $3] = $4; names[$2] = names[$2] " " $3 }
+	$1 == "env" { value[$2 SUBSEP $4] = $5; names[$2] = names[$2] " " $4 }
 	$1 == "uses" {
-		ref = $4
+		ref = $5
 		at = index(ref, "@")
 		if (at == 0) next
 		action = substr(ref, 1, at - 1)
@@ -325,38 +325,110 @@ awk -F'\t' '
 		}
 		if (prefix == "") {
 			printf "violation: agreement: %s:%s: %s has no <NAME>_ACTION entry in this workflow env block\n", \
-				$2, $3, action
+				$2, $4, action
 			next
 		}
 		if (value[$2 SUBSEP (prefix "_VERSION")] == "")
 			printf "violation: agreement: %s:%s: %s has no %s_VERSION entry in this workflow env block\n", \
-				$2, $3, action, prefix
+				$2, $4, action, prefix
 		sha = value[$2 SUBSEP (prefix "_SHA")]
 		if (sha == "")
 			printf "violation: agreement: %s:%s: %s has no %s_SHA entry in this workflow env block\n", \
-				$2, $3, action, prefix
+				$2, $4, action, prefix
 		else if (sha != revision)
 			printf "violation: agreement: %s:%s: %s names %s on its uses line while %s_SHA is %s\n", \
-				$2, $3, action, revision, prefix, sha
+				$2, $4, action, revision, prefix, sha
 	}
 ' "$facts" >"$agreement" || rule_failed
 
+#
+#
+
 awk -F'\t' '
-	$1 == "topperm" { value[$2] = $3; present[$2] = 1 }
+	$1 == "file" {
+		if (!($2 in seen)) { seen[$2] = 1; pathorder[++np] = $2 }
+	}
+	$1 == "topblock" {
+		if (!($2 in seen)) { seen[$2] = 1; pathorder[++np] = $2 }
+		blockline[$2] = $3
+	}
+	$1 == "topkey" {
+		if (!($2 in seen)) { seen[$2] = 1; pathorder[++np] = $2 }
+		entry = $2 SUBSEP $4
+		topline[entry] = $3
+		topvalue[entry] = $5
+		topseen[entry] = 1
+		toporder[++nt] = entry
+	}
+	$1 == "jobperm" {
+		if ($6 != "write") next
+		key = $5
+		if (key == "id-token" || key == "attestations") next
+		entry = $2 SUBSEP $3 SUBSEP key
+		jpline[entry] = $4
+		joborder[++nj] = entry
+	}
+	$1 == "jobrun" { runs[$2 SUBSEP $3] = runs[$2 SUBSEP $3] " " $5 }
 	END {
-		for (path in present) {
-			if (value[path] == "read") continue
-			if (value[path] == "nokey")
-				printf "violation: permissions: %s: declares no top-level `permissions: contents: read`\n", path
-			else
-				printf "violation: permissions: %s: the top-level permissions block grants contents: %s, not read\n", \
-					path, value[path]
+		for (i = 1; i <= np; i++) {
+			path = pathorder[i]
+			entry = path SUBSEP "contents"
+			if (!(entry in topseen)) {
+				if (path in blockline)
+					printf "violation: permissions: %s:%s: the top-level permissions block declares no contents: read\n", \
+						path, blockline[path]
+				else
+					printf "violation: permissions: %s:1: declares no top-level permissions block, so every job takes the workflow default\n", path
+			} else if (topvalue[entry] != "read") {
+				printf "violation: permissions: %s:%s: the top-level permissions block grants contents: %s, not read\n", \
+					path, topline[entry], topvalue[entry]
+			}
+		}
+		for (i = 1; i <= nt; i++) {
+			entry = toporder[i]
+			split(entry, parts, SUBSEP)
+			key = parts[2]
+			if (key == "contents" || key == "id-token" || key == "attestations") continue
+			if (topvalue[entry] != "write") continue
+			printf "violation: permissions: %s:%s: the top-level permissions block grants %s: write, which every job that declares no block of its own inherits\n", \
+				parts[1], topline[entry], key
+		}
+		for (i = 1; i <= nj; i++) {
+			entry = joborder[i]
+			split(entry, parts, SUBSEP)
+			path = parts[1]; job = parts[2]; key = parts[3]
+			if (key == "contents") {
+				if (index(runs[path SUBSEP job], "gh release create") > 0) continue
+				printf "violation: permissions: %s:%s: job %s grants contents: write and runs no `gh release create`, so no step of it writes to the repository\n", \
+					path, jpline[entry], job
+				continue
+			}
+			printf "violation: permissions: %s:%s: job %s grants %s: write, which is not a scope this directory grants to a job\n", \
+				path, jpline[entry], job, key
 		}
 	}
 ' "$facts" >>"$found" || rule_failed
 
+#
+#
+#
+
 awk -F'\t' '
-	$1 == "jobperm" { perm[$2 SUBSEP $3 SUBSEP $4] = $5 }
+	$1 == "topkey" {
+		if ($4 != "id-token" && $4 != "attestations") next
+		entry = $2 SUBSEP $4
+		topline[entry] = $3
+		topvalue[entry] = $5
+		toporder[++nt] = entry
+	}
+	$1 == "jobpermblock" { own[$2 SUBSEP $3] = 1 }
+	$1 == "jobperm" {
+		if ($5 != "id-token" && $5 != "attestations") next
+		entry = $2 SUBSEP $3 SUBSEP $5
+		jpline[entry] = $4
+		jobvalue[entry] = $6
+		joborder[++nj] = entry
+	}
 	$1 == "jobenv" { env[$2 SUBSEP $3] = $4 }
 	END {
 		for (entry in perm) {
