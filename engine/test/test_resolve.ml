@@ -94,6 +94,36 @@ let test_a_name_resolves_to_its_declaration () =
     (is_resolved_to resolved ~file ~text:variables ~within:"reg u32 b;"
        ~name:"b" ~declaration:b)
 
+(* A document may begin with a UTF-8 byte-order mark. It is not part of the
+   program, so a document that carries one resolves to exactly what the same
+   text resolves to without it, and the mark itself names nothing. *)
+let test_a_byte_order_mark_resolves () =
+  let file = "/work/bom.jazz" in
+  let text = "\xEF\xBB\xBF" ^ variables in
+  let resolved = resolve file text in
+  let index = index_of resolved file in
+  let b = declaration_named index "b" Jide_engine.Index.Variable in
+  let a = declaration_named index "a" Jide_engine.Index.Parameter in
+  check "bom: the file is the entry"
+    (String.equal (Jide_engine.Resolve.entry resolved) file);
+  check "bom: a read of b is the declared b"
+    (is_resolved_to resolved ~file ~text ~within:"b = a;" ~name:"b"
+       ~declaration:b);
+  check "bom: a read of a is the declared a"
+    (is_resolved_to resolved ~file ~text ~within:"= a;" ~name:"a" ~declaration:a);
+  check "bom: the return is the declared b"
+    (is_resolved_to resolved ~file ~text ~within:"return b;" ~name:"b"
+       ~declaration:b);
+  check "bom: the declaration itself resolves to itself"
+    (is_resolved_to resolved ~file ~text ~within:"reg u32 b;" ~name:"b"
+       ~declaration:b);
+  check "bom: no occurrence of the document is left unresolved"
+    (List.for_all
+       (fun (_, answer) -> answer <> Jide_engine.Resolve.Unresolved)
+       (Jide_engine.Resolve.answers resolved file));
+  check "bom: a byte inside the mark holds no occurrence"
+    (Jide_engine.Resolve.answer_at resolved ~file ~byte:1 = None)
+
 let order =
   "fn order(reg u32 a) -> reg u32 {\n\
   \  reg u32 early;\n\
@@ -442,6 +472,7 @@ let test_identity_across_files () =
 
 let () =
   test_a_name_resolves_to_its_declaration ();
+  test_a_byte_order_mark_resolves ();
   test_define_before_use_and_block_scope ();
   test_calls_follow_the_same_rule ();
   test_a_for_variable_must_exist ();
