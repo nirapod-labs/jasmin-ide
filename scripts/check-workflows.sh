@@ -430,27 +430,76 @@ awk -F'\t' '
 		joborder[++nj] = entry
 	}
 	$1 == "jobenv" { env[$2 SUBSEP $3] = $4 }
+	$1 == "uses" {
+		if (tolower($5) !~ /attest/) next
+		key = $2 SUBSEP $3
+		if (!(key in attest)) { attest[key] = 1; attestorder[++na] = key }
+		attestline[key] = $4
+	}
 	END {
-		for (entry in perm) {
+		for (i = 1; i <= nt; i++) {
+			entry = toporder[i]
+			if (topvalue[entry] != "write") continue
 			split(entry, parts, SUBSEP)
-			if (parts[3] != "id-token") continue
-			if (perm[entry] != "write") continue
-			if (parts[2] !~ /^publish/)
-				printf "violation: token: %s: job %s grants id-token: write and is not a publishing job\n", \
-					parts[1], parts[2]
-			else if (env[parts[1] SUBSEP parts[2]] != "publish")
-				printf "violation: token: %s: job %s grants id-token: write outside the publish environment\n", \
-					parts[1], parts[2]
+			printf "violation: token: %s:%s: the top-level permissions block grants %s: write, which every job that declares no permissions block of its own inherits\n", \
+				parts[1], topline[entry], parts[2]
+		}
+		for (i = 1; i <= nj; i++) {
+			entry = joborder[i]
+			if (jobvalue[entry] != "write") continue
+			split(entry, parts, SUBSEP)
+			path = parts[1]; job = parts[2]; key = parts[3]
+			line = jpline[entry]
+			provenance = ((path SUBSEP job) in attest) && env[path SUBSEP job] == "release"
+			if (key == "id-token") {
+				if (job ~ /^publish/ && env[path SUBSEP job] == "publish") continue
+				if (provenance) continue
+				if (job ~ /^publish/)
+					printf "violation: token: %s:%s: job %s grants id-token: write outside the publish environment\n", \
+						path, line, job
+				else if ((path SUBSEP job) in attest)
+					printf "violation: token: %s:%s: job %s runs an attestation action and grants id-token: write outside the release environment\n", \
+						path, line, job
+				else
+					printf "violation: token: %s:%s: job %s grants id-token: write and is neither a publishing job nor the provenance job\n", \
+						path, line, job
+			} else {
+				if (provenance) continue
+				if ((path SUBSEP job) in attest)
+					printf "violation: token: %s:%s: job %s runs an attestation action and grants attestations: write outside the release environment\n", \
+						path, line, job
+				else
+					printf "violation: token: %s:%s: job %s grants attestations: write and runs no attestation action\n", \
+						path, line, job
+			}
+		}
+		for (i = 1; i <= na; i++) {
+			key = attestorder[i]
+			split(key, parts, SUBSEP)
+			path = parts[1]; job = parts[2]
+			if ((path SUBSEP job) in own) {
+				token = jobvalue[path SUBSEP job SUBSEP "id-token"]
+				written = jobvalue[path SUBSEP job SUBSEP "attestations"]
+			} else {
+				token = topvalue[path SUBSEP "id-token"]
+				written = topvalue[path SUBSEP "attestations"]
+			}
+			if (token != "write")
+				printf "violation: token: %s:%s: job %s runs an attestation action and holds no id-token: write, so the attestation cannot be signed\n", \
+					path, attestline[key], job
+			if (written != "write")
+				printf "violation: token: %s:%s: job %s runs an attestation action and holds no attestations: write, so the attestation cannot be written\n", \
+					path, attestline[key], job
 		}
 	}
 ' "$facts" >>"$found" || rule_failed
 
 awk -F'\t' '
 	$1 == "dupkey" { printf "violation: content: %s:%s: the key %s appears twice in one mapping\n", $2, $3, $4 }
-	$1 == "unchecked" { printf "violation: extract: %s: %s\n", $2, $3 }
+	$1 == "unchecked" { printf "violation: extract: %s:%s: %s\n", $2, $3, $4 }
 ' "$facts" >>"$found" || rule_failed
 
-awk -F'\t' '
+awk -F'\t' -v notes="$notes" '
 	FILENAME == ARGV[1] { target[$1] = 1; next }
 	$1 != "runline" { next }
 	{
@@ -463,7 +512,16 @@ awk -F'\t' '
 			fragment = substr(rest, RSTART, RLENGTH)
 			rest = substr(rest, RSTART + RLENGTH)
 			sub(/^[;&|( \t]*make[ \t]+/, "", fragment)
-			if (fragment ~ /^-/) next
+			if (fragment ~ /^-C/) {
+				printf "%s:%s: make -C runs a Makefile outside this repository, whose targets this checker cannot read\n", \
+					$2, $3 > notes
+				continue
+			}
+			if (fragment ~ /^-/) {
+				printf "%s:%s: make %s is an option, so the target it applies to is not checked\n", \
+					$2, $3, fragment > notes
+				continue
+			}
 			name = fragment
 			sub(/[ \t].*$/, "", name)
 			if (name == "") next
@@ -575,6 +633,13 @@ else
 	cat "$pins" "$agreement" >"$tmp/all"
 fi
 cat "$found" >>"$tmp/all"
+
+if [ -s "$notes" ]; then
+	while IFS= read -r note; do
+		printf 'check-workflows: not checked: %s\n' "$note"
+	done <"$notes"
+fi
+
 cat "$tmp/all"
 
 if [ -s "$tmp/all" ]; then
