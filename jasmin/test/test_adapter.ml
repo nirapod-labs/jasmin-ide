@@ -969,8 +969,13 @@ let test_require_inside_namespace_type_error () =
          && diagnostic.span.Jide_lang.Span.end_byte
             > diagnostic.span.Jide_lang.Span.start_byte)
        result.diagnostics);
-  (* The same file at top level is the same answer, which is the parity this
-     test exists to keep. *)
+  (* The same file at top level is the same file: it too is reported against
+     the file, with the file's own message, which is the parity this test
+     exists to keep. The namespace path still summarises the failure on its
+     item instead, because the file's items are spliced into the namespace's
+     single item and their offsets reach the loop with nothing to map them to;
+     attributing that path is a separate change, and the two answers are
+     recorded apart here rather than pretending they agree. *)
   let top_level =
     check_with ~resolve
       (Printf.sprintf
@@ -982,10 +987,9 @@ let test_require_inside_namespace_type_error () =
           }\n"
          file)
   in
-  check "namespace type error: the top-level require agrees"
-    (List.length top_level.Jide_jasmin.Adapter.diagnostics = 1
-    && mentions top_level "has errors"
-    && mentions top_level file)
+  check "namespace type error: the top-level require attributes the file"
+    (top_level.Jide_jasmin.Adapter.diagnostics = []
+    && required_mentions top_level ~file "not_a_function")
 
 (* The suppression a namespace require installs is for the fabricated
    cascade: the unresolved names an unreadable file would have declared. It
@@ -1037,11 +1041,12 @@ let test_require_inside_namespace_suppression_scope () =
 (* A namespaced require of a file that requires another one, and the file
    that one requires does not type. The failure is two levels down, so the
    error the namespace fails on names the deeper file, not the file the
-   document named. One diagnostic per require item of the chain has to say
-   what it read, the deeper file first, which is the answer the same two
-   files give when the document requires them at top level. Without the
-   deeper require's record reaching the site list, the error names a file no
-   require item was recorded as having read and the document is silent. *)
+   document named. The namespace's items are spliced into one item, so the
+   deeper file's offsets have nothing to map them to and the two require
+   items each say what they read, the deeper file first. The same two files
+   required from the top of the document take the attributed path instead:
+   the deeper file's error is returned against that file, and neither the
+   document nor the file that read it says anything of its own. *)
 let test_require_inside_namespace_two_levels () =
   let outer = "namespaced-outer.jinc" in
   let inner = "namespaced-inner.jinc" in
@@ -1087,8 +1092,13 @@ let test_require_inside_namespace_two_levels () =
     (not (mentions result "unknown function"));
   check "two levels: every span indexes the document"
     (all_placed namespaced result);
-  (* The same two files required from the top of the document are the oracle:
-     they give one diagnostic per require item, the deeper file first. *)
+  (* The same two files required from the top of the document answer the
+     attributed way: the deeper file holds the error, so the document is
+     silent and `required` names that file once. The namespace path above
+     still summarises on the two require items, because its files' items are
+     spliced into one item and their offsets reach the loop with nothing to
+     map them to; that path is a separate change. The two answers are
+     recorded apart here rather than pretending they agree. *)
   let top_level =
     check_with ~resolve
       (Printf.sprintf
@@ -1100,13 +1110,15 @@ let test_require_inside_namespace_two_levels () =
           }\n"
          outer)
   in
-  check "two levels: the top-level require agrees on the count"
-    (List.length top_level.Jide_jasmin.Adapter.diagnostics
-    = List.length result.Jide_jasmin.Adapter.diagnostics);
-  check "two levels: the top-level require agrees on the deeper file"
-    (names inner top_level);
-  check "two levels: the top-level require agrees on the file that read it"
-    (names outer top_level)
+  check "two levels: the top-level require leaves the document silent"
+    (top_level.Jide_jasmin.Adapter.diagnostics = []);
+  check "two levels: the top-level require attributes the deeper file"
+    (required_mentions top_level ~file:inner "not_a_function");
+  check "two levels: the file that read it holds no error of its own"
+    (List.for_all
+       (fun (required : Jide_jasmin.Adapter.required) ->
+         String.equal required.file inner)
+       top_level.required)
 
 (* A require written inside a namespaced include is an item of that include,
    so its offsets index the include and not the document. The failure is
@@ -1274,6 +1286,117 @@ let test_unknown_include_name_inside_namespace () =
          | Some text -> contains text "namespace N"
          | None -> false)
        outer.diagnostics)
+
+(* The compiler's own preprocessing runs after the pretyping the checker does
+   item by item, and it rejects programs pretyping accepts: parameter
+   substitution, then the final typing pass. A check reports the compiler's
+   failure, once. The fixtures are the release's own negative cases. *)
+let test_preprocessing_rejects () =
+  let result =
+    check_text "preprocess: a global of the wrong size" "u64[4] g = {1};\n"
+  in
+  check "preprocess: one diagnostic for the wrong size"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 1);
+  check "preprocess: it is the parameter substitution's"
+    (mentions result "param expansion");
+  check "preprocess: it names the global"
+    (mentions result "array size mismatch for global variable g");
+  check "preprocess: the span is the global's name"
+    (match result.Jide_jasmin.Adapter.diagnostics with
+    | [ diagnostic ] -> diagnostic.span.Jide_lang.Span.start_byte = 7
+    | _ -> false);
+  let typing =
+    check_text "preprocess: a for loop over a u32"
+      "export fn main(reg ui32 a b) -> reg ui32 {\n\
+      \  for a = 0 to b {\n\
+      \  }\n\
+      \  return a;\n\
+       }\n"
+  in
+  check "preprocess: one diagnostic for the loop"
+    (List.length typing.Jide_jasmin.Adapter.diagnostics = 1);
+  check "preprocess: the final typing pass says it"
+    (mentions typing "while int is expected")
+
+(* A required file that preprocessing rejects is not placed on the document,
+   and the require item says the file has errors, as for a typing error. *)
+let test_required_file_preprocess_error () =
+  let library = write_temp_file ~suffix:".jinc" "u64[4] g = {1};\n" in
+  let result = check_text "required preprocess error" (requiring library) in
+  check "required preprocess: one diagnostic, the require item's"
+    (List.length result.Jide_jasmin.Adapter.diagnostics = 1);
+  check "required preprocess: it says the required file has errors"
+    (mentions result "has errors" && mentions result library);
+  check "required preprocess: the file's own message is not placed"
+    (not (mentions result "param expansion"));
+  remove_file library
+
+(* A file two requires name is typed once, as the compiler's loader does: the
+   second require names the same file under another spelling, and it adds no
+   declarations, so the function it declares is not defined twice. *)
+let test_required_file_twice () =
+  let library =
+    write_temp_file ~suffix:".jinc"
+      "fn add(reg u32 a y) -> reg u32 {\n\
+      \  reg u32 r;\n\
+      \  r = a + y;\n\
+      \  return r;\n\
+       }\n"
+  in
+  let directory = Filename.dirname library in
+  let spelled = directory ^ "/./" ^ Filename.basename library in
+  let body =
+    "require \"" ^ library ^ "\"\nrequire \"" ^ spelled
+    ^ "\"\n\n\
+       export fn main(reg u32 x y) -> reg u32 {\n\
+      \  reg u32 r;\n\
+      \  r = add(x, y);\n\
+      \  return r;\n\
+       }\n"
+  in
+  let result = check_text "required twice" body in
+  check "required twice: no diagnostics"
+    (result.Jide_jasmin.Adapter.diagnostics = []);
+  remove_file library
+
+(* The compiler reads nothing for a file it has loaded and reports nothing for
+   it, so a document that requires itself is accepted: the file is loaded
+   before its own items are read. *)
+let test_self_require_is_accepted () =
+  let asked = ref [] in
+  let resolve path =
+    asked := path :: !asked;
+    None
+  in
+  let result =
+    check_with ~resolve
+      "require \"probe.jazz\"\n\n\
+       fn entry(reg u32 a) -> reg u32 {\n\
+      \  return a;\n\
+       }\n"
+  in
+  check "self require: no diagnostic"
+    (result.Jide_jasmin.Adapter.diagnostics = []);
+  check "self require: the document is not read again" (!asked = [])
+
+(* A compiler error inside a dropped item is the first diagnostic, at its own
+   location; the marker for the item follows it. The fixture is the release's
+   own negative case fail/x86-64/string.jazz. *)
+let test_error_inside_dropped_item_leads () =
+  let result = check_text "string" "u8[0] z = \"\\xgg\";\n" in
+  match result.Jide_jasmin.Adapter.diagnostics with
+  | [ first; marker ] ->
+      check "string: the first diagnostic is the compiler's error"
+        (contains first.message "ill-formed string");
+      check "string: it is at the string, column 10"
+        (first.span.Jide_lang.Span.start_byte = 10);
+      check "string: the marker for the item follows it"
+        (contains marker.message "could not be parsed"
+        && marker.span.Jide_lang.Span.start_byte = 10)
+  | other ->
+      check
+        ("string: two diagnostics, got " ^ string_of_int (List.length other))
+        false
 
 let test_arch_names () =
   check "arch names"
