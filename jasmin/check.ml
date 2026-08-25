@@ -722,10 +722,10 @@ module Make (A : Arch_full.Arch) = struct
       document is then checked on its own, which is what the engine does for
       a file no entry requires. *)
   and type_context loop ~(chain : string list) ~(document : string)
-      ~(context : string list) =
+      ~(context : (string * string) list) =
     match context with
     | [] -> ()
-    | file :: rest -> (
+    | (file, printed) :: rest -> (
         match loop.resolve file with
         | None -> ()
         | Some text ->
@@ -734,11 +734,11 @@ module Make (A : Arch_full.Arch) = struct
               {
                 loop with
                 file;
-                name = file;
+                name = printed;
                 text;
                 place = false;
                 in_document = false;
-                awaiting = rest @ [ document ];
+                awaiting = List.map fst rest @ [ document ];
                 reached = false;
               }
             in
@@ -1016,9 +1016,31 @@ module Make (A : Arch_full.Arch) = struct
          namespace already read is not read again, so nothing is spliced a
          second time and nothing its first read reported is reported again. *)
       ([], [])
-    else if List.length chain > max_include_depth then (
+    else if
+      (not loop.in_document)
+      &&
+      match List.rev chain with
+      | document :: _ -> String.equal document path
+      | [] -> false
+    then
+      (* The context chain reaches the document inside a namespace. The
+         document is not a file this namespace requires of itself: it is the
+         file the caller types afterwards, on its own items, so nothing is
+         spliced here and nothing is reported. *)
+      ([], [])
+    else if List.mem path chain then (
+      (* The file is on the chain that reached it, but this namespace has not
+         loaded it: it is being read inside a namespace it opened itself, so
+         every read opens one more namespace and reads it again. The
+         compiler's loader has no bound and never finishes such a program,
+         so there is no verdict to agree with; the require is refused here
+         instead of recursing without end. A chain of distinct files has no
+         bound, as in the compiler. *)
       report
-        (Printf.sprintf "the required file `%s' is nested too deeply" written);
+        (Printf.sprintf
+           "the required file `%s' requires itself inside a namespace it \
+            opens, so its namespaces nest without end"
+           written);
       forget_names loop prefix;
       ([], []))
     else
@@ -1116,7 +1138,10 @@ module Make (A : Arch_full.Arch) = struct
              normalised paths instead; this one is only ever printed. *)
           let printed =
             lexical
-              (include_path ~base:(Filename.dirname loop.name) ~from written)
+              (include_path
+                 ~base:(Filename.dirname loop.name)
+                 ~from:(Option.map absolute_directory from)
+                 written)
           in
           (* A failure of the chain itself is the document's: its item names a
              file that cannot be read, whatever depth the failure was found
@@ -1140,11 +1165,13 @@ module Make (A : Arch_full.Arch) = struct
                  for, not one it requires. *)
               loop.reached <- true
           | _ -> (
-              if List.length chain > max_include_depth then
-                report
-                  (Printf.sprintf "the required file `%s' is nested too deeply"
-                     written)
-              else if already_loaded loop ~namespace:"" path then (
+              if
+                (* A top-level require of a file on the chain is a cycle, and
+                   the file is loaded already: the check below skips it, as the
+                   compiler's loader does. A chain of distinct files has no
+                   bound. *)
+                already_loaded loop ~namespace:"" path
+              then (
                 if
                   (* Entered before: nothing is read and nothing is typed, as
                      [Env.enter_file] answers [None]. *)
@@ -1338,6 +1365,14 @@ module Make (A : Arch_full.Arch) = struct
     match
       Warnings.with_capture (fun () ->
           Options.apply ();
+          (* The compiler binds the named include paths of [JASMINPATH] after
+             the ones it is given, and warns when the value is ill-formed;
+             the warning is printed inside the capture, so it is the
+             compiler's own text. *)
+          if jasmin_path () = None then
+            Utils.warning Utils.Always Location.i_dummy
+              "ill-formed value for the JASMINPATH environment variable";
+          let idirs = with_jasmin_path idirs in
           let parsed = Parse.parse ~name:file text in
           let parse_diagnostics = Parse.diagnostics parsed in
           let budget =
