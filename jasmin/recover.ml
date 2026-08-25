@@ -83,7 +83,12 @@ type dropped =
           (** The namespace the item was in, qualified ([A::B]), or [None] at
               the top level. A reference to the item from outside the
               namespace is written with this in front of its name. *)
-      span : Jide_lang.Span.t;
+      span : Jide_lang.Span.t;  (** The bytes the hole replaced. *)
+      at : Jide_lang.Span.t;
+          (** The token the parse stopped at inside those bytes, which is
+              where the hole is reported. The first byte of [span] would name
+              a byte the user did write, the item's own keyword, while the
+              fault is the token the parser could not shift. *)
     }
 
 (** The kind as the item's keyword spells it, which is what a diagnostic
@@ -102,16 +107,22 @@ let kind_name = function
     meets and stops there, so a file with a second broken item would lose it
     from the tree and from the diagnostics at once: a stub is present in both
     or it is present in neither. The message names the item, so two holes in
-    one file are two distinguishable markers. *)
+    one file are two distinguishable markers.
+
+    The marker is placed on the token the parse stopped at, not on the first
+    byte of the hole: a hole that begins at byte zero would otherwise be
+    reported at line 1, column 1, before the compiler's own error, which is
+    the position a reader (and every tool that reads the first diagnostic)
+    would take as the first error in the file. *)
 let diagnostic_of_dropped = function
-  | Dropped { kind; name; span } ->
+  | Dropped { kind; name; at; _ } ->
       let what =
         match name with
         | Some name -> Printf.sprintf "the %s `%s'" (kind_name kind) name
         | None -> Printf.sprintf "an item"
       in
       Jide_lang.Diagnostic.make ~code:"parse" ~source:"jasmin"
-        ~severity:Jide_lang.Diagnostic.Error span
+        ~severity:Jide_lang.Diagnostic.Error at
         (what ^ " could not be parsed and is not in the tree")
 
 type counters = {
@@ -315,9 +326,19 @@ let reposition ~counters checkpoint ~position ~lead =
             | Some _ -> refuse ()))
   | _ -> refuse ()
 
+(** The bytes of the token at [failure], or the empty span at the end of the
+    buffer when the failure is there. *)
+let stop_of_scan scan ~(failure : int) : Jide_lang.Span.t =
+  if failure >= Scan.count scan then
+    let at = String.length (Scan.text scan) in
+    Scan.span scan ~start_byte:at ~end_byte:at
+  else
+    let entry = Scan.token scan (max 0 failure) in
+    Scan.span scan ~start_byte:entry.start_byte ~end_byte:entry.end_byte
+
 (** The name a broken item had, read from the tokens of the broken region so
     the stub can carry it. *)
-let dropped_of scan ~from ~upto =
+let dropped_of scan ~from ~upto ~at =
   let upto = min upto (Scan.count scan) in
   let kind_of = function
     | Parser.FN -> Some Function
@@ -405,6 +426,7 @@ let dropped_of scan ~from ~upto =
       kind;
       name;
       namespace = None;
+      at;
       span =
         Scan.span scan
           ~start_byte:(Scan.start_byte scan from)
@@ -491,6 +513,8 @@ type frame = {
   mutable start : boundary;
   mutable fence : int;
   mutable repairs : int;
+  mutable stopped : int option;
+      (** The token the parse first stopped at in this item. *)
 }
 (** A broken item: the boundary it begins at and the fence it ends at. *)
 
@@ -564,7 +588,7 @@ let namespace_of (environment : Syntax.pprogram I.env) =
     is where the item after it begins, so the two abut as they do in a parse
     that was never interrupted. A stub that covers earlier ones, an item that
     was repaired and then dropped as a whole, replaces them. *)
-let note_dropped ?namespace run ~from ~upto =
+let note_dropped ?namespace run ~failure ~from ~upto =
   let scan = run.scan in
   let start_byte = Scan.start_byte scan from in
   let end_byte =
@@ -574,7 +598,15 @@ let note_dropped ?namespace run ~from ~upto =
   if start_byte < end_byte then (
     let span = Scan.span scan ~start_byte ~end_byte in
     let stub =
-      match dropped_of scan ~from ~upto with
+      (* The marker goes on the token the parse first stopped at in this
+         item, which may be the first token after the stub: an item that ran
+         into the fence stopped there. *)
+      let failure =
+        match failure with
+        | Some failure when failure >= from -> failure
+        | Some _ | None -> upto
+      in
+      match dropped_of scan ~from ~upto ~at:(stop_of_scan scan ~failure) with
       | Dropped fields -> Dropped { fields with span; namespace }
     in
     run.dropped <-
@@ -886,11 +918,13 @@ and failure run cursor =
             start = cursor.boundary;
             fence = find_fence run cursor.boundary ~limit;
             repairs = 0;
+            stopped = None;
           }
         in
         cursor.frames <- frame :: cursor.frames;
         frame
   in
+  if frame.stopped = None then frame.stopped <- Some at;
   if
     run.counters.recoveries < max_recoveries
     && frame.repairs < max_repairs_per_item
@@ -983,72 +1017,80 @@ and repair run cursor frame =
      parser at the depth the rest of the buffer closes is taken: the text
      after the fault is the text as it was, so that depth is the true one. *)
   let token_repair () =
-    let deleted =
-      if
-        survives run cursor.checkpoint ~from:(at + 1) ~braces:cursor.braces
-          ~level ~fence:frame.fence
-      then [ (None, cursor.checkpoint, cursor.braces) ]
-      else []
-    in
-    let replaced =
-      match entry.Scan.token with
-      | (Parser.RBRACE | Parser.SEMICOLON) as written -> (
-          let token =
-            if written = Parser.RBRACE then Parser.SEMICOLON else Parser.RBRACE
-          in
-          match
-            offer cursor.checkpoint
-              (token, entry.Scan.start_pos, entry.Scan.end_pos)
-          with
-          | `Need checkpoint
-            when survives run checkpoint ~from:(at + 1)
-                   ~braces:(cursor.braces + brace_delta token)
-                   ~level ~fence:frame.fence ->
-              [ (Some token, checkpoint, cursor.braces + brace_delta token) ]
-          | _ -> [])
-      | _ -> []
-    in
-    let options = deleted @ replaced in
-    let consistent (_, _, braces) = braces = run.after.(at + 1) in
-    let chosen =
-      match List.find_opt consistent options with
-      | Some option -> Some option
-      | None -> ( match options with option :: _ -> Some option | [] -> None)
-    in
-    match chosen with
-    | None -> false
-    | Some (written, checkpoint, braces) ->
-        run.counters.token_repairs <- run.counters.token_repairs + 1;
-        (* The token's own bytes, not the trivia after it, which belongs to
-           the item that may begin there. *)
-        run.recovered <-
-          Scan.span run.scan ~start_byte:entry.Scan.start_byte
-            ~end_byte:entry.Scan.end_byte
-          :: run.recovered;
-        cursor.index <- at + 1;
-        cursor.braces <- braces;
-        (match written with
-        | Some token ->
-            cursor.checkpoint <- checkpoint;
-            cursor.look <- may_precede_item token
-        | None -> (
-            (* The token after a deleted one is read with the state before
-               it. If that state is a boundary, the item that begins there
-               starts where the deleted token ended, the end of the token
-               before it in the buffer. *)
-            cursor.look <- false;
-            match
-              if at + 1 < run.count && at_boundary checkpoint then
-                normalise checkpoint
-              else None
-            with
-            | Some environment ->
-                set_boundary cursor ~at:(at + 1)
-                  ~checkpoint:(I.input_needed environment)
-                  ~working:(resume_at run environment ~target:(at + 1))
-                  ~level:braces
-            | None -> cursor.look <- true));
-        true
+    (* Inside a body, or a stray token between two items. A header with one
+       token wrong is not mended: the item is dropped for a stub, as every
+       other broken header is. *)
+    cursor.braces > level
+    || at = cursor.boundary.at
+       &&
+       let deleted =
+         if
+           survives run cursor.checkpoint ~from:(at + 1) ~braces:cursor.braces
+             ~level ~fence:frame.fence
+         then [ (None, cursor.checkpoint, cursor.braces) ]
+         else []
+       in
+       let replaced =
+         match entry.Scan.token with
+         | (Parser.RBRACE | Parser.SEMICOLON) as written -> (
+             let token =
+               if written = Parser.RBRACE then Parser.SEMICOLON
+               else Parser.RBRACE
+             in
+             match
+               offer cursor.checkpoint
+                 (token, entry.Scan.start_pos, entry.Scan.end_pos)
+             with
+             | `Need checkpoint
+               when survives run checkpoint ~from:(at + 1)
+                      ~braces:(cursor.braces + brace_delta token)
+                      ~level ~fence:frame.fence ->
+                 [ (Some token, checkpoint, cursor.braces + brace_delta token) ]
+             | _ -> [])
+         | _ -> []
+       in
+       let options = deleted @ replaced in
+       let consistent (_, _, braces) = braces = run.after.(at + 1) in
+       let chosen =
+         match List.find_opt consistent options with
+         | Some option -> Some option
+         | None -> (
+             match options with option :: _ -> Some option | [] -> None)
+       in
+       match chosen with
+       | None -> false
+       | Some (written, checkpoint, braces) ->
+           run.counters.token_repairs <- run.counters.token_repairs + 1;
+           (* The token's own bytes, not the trivia after it, which belongs to
+              the item that may begin there. *)
+           run.recovered <-
+             Scan.span run.scan ~start_byte:entry.Scan.start_byte
+               ~end_byte:entry.Scan.end_byte
+             :: run.recovered;
+           cursor.index <- at + 1;
+           cursor.braces <- braces;
+           (match written with
+           | Some token ->
+               cursor.checkpoint <- checkpoint;
+               cursor.look <- may_precede_item token
+           | None -> (
+               (* The token after a deleted one is read with the state before
+                  it. If that state is a boundary, the item that begins there
+                  starts where the deleted token ended, the end of the token
+                  before it in the buffer. *)
+               cursor.look <- false;
+               match
+                 if at + 1 < run.count && at_boundary checkpoint then
+                   normalise checkpoint
+                 else None
+               with
+               | Some environment ->
+                   set_boundary cursor ~at:(at + 1)
+                     ~checkpoint:(I.input_needed environment)
+                     ~working:(resume_at run environment ~target:(at + 1))
+                     ~level:braces
+               | None -> cursor.look <- true));
+           true
   in
   braces () || statement () || token_repair ()
 
@@ -1169,7 +1211,7 @@ and drop run cursor frame =
   let environment = normalise frame.start.checkpoint in
   note_dropped
     ?namespace:(Option.bind environment namespace_of)
-    run ~from:frame.start.at ~upto;
+    run ~failure:frame.stopped ~from:frame.start.at ~upto;
   run.counters.recoveries <- run.counters.recoveries + 1;
   run.counters.item_restarts <- run.counters.item_restarts + 1;
   let level = frame.start.level in

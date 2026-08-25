@@ -1252,6 +1252,31 @@ module Make (A : Arch_full.Arch) = struct
       incr loop.kept;
       if !(loop.kept) >= loop.budget then loop.stopped := true)
 
+  (** [reachable ~parse typed] keeps the typing diagnostics the compiler could
+      report. The compiler parses the whole file before it types anything, so
+      a syntax error ends its run: a typing diagnostic that starts at or
+      before the first syntax error would be the first error the file shows,
+      and the compiler never reports one there. Typing diagnostics after the
+      first syntax error are kept, because recovery types the items past it. *)
+  let start_of (diagnostic : Jide_lang.Diagnostic.t) =
+    diagnostic.Jide_lang.Diagnostic.span.Jide_lang.Span.start_byte
+
+  (** The first byte any of [diagnostics] starts at, or [None] for none. *)
+  let first_byte (diagnostics : Jide_lang.Diagnostic.t list) =
+    match diagnostics with
+    | [] -> None
+    | first :: rest ->
+        Some
+          (List.fold_left
+             (fun low d -> min low (start_of d))
+             (start_of first) rest)
+
+  let reachable ~(parse : Jide_lang.Diagnostic.t list)
+      (typed : Jide_lang.Diagnostic.t list) : Jide_lang.Diagnostic.t list =
+    match first_byte parse with
+    | None -> typed
+    | Some floor -> List.filter (fun d -> start_of d > floor) typed
+
   (** [check ~resolve ~file ~text ~idirs ~context] parses and types one
       document. [context] is the chain of files the compiler enters before it
       when the file is not an entry, outermost first, and the empty list is a
@@ -1270,12 +1295,19 @@ module Make (A : Arch_full.Arch) = struct
           let budget =
             max 0 (max_diagnostics - List.length parse_diagnostics)
           in
+          let floor = first_byte parse_diagnostics in
           let typed, _environment =
             type_items ~resolve ~budget ~dropped:(Parse.dropped parsed)
               ~recovered:(Parse.recovered parsed) ~context ~file ~text
-              ~items:(Parse.items parsed) ~idirs
+              ~items:(Parse.items parsed) ~idirs ~floor
+              ~preprocess:(parse_diagnostics = [])
           in
-          { typed with diagnostics = parse_diagnostics @ typed.diagnostics })
+          {
+            typed with
+            diagnostics =
+              parse_diagnostics
+              @ reachable ~parse:parse_diagnostics typed.diagnostics;
+          })
     with
     | outcome, printed -> (
         match Warnings.parse ~file printed with
