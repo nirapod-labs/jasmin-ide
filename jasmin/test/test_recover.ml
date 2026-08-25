@@ -1456,7 +1456,21 @@ let test_namespace_fence () =
     replace_nth text ~needle:"namespace" ~replacement:"         " 0
   in
   check "namespace fence: a header without its keyword keeps its items inside"
-    (names (parse no_keyword) = clean)
+    (names (parse no_keyword) = clean);
+  (* A [}] written twice closes the enclosing namespace one block early; the
+     items after it parse at the top level, and only the namespace's own [}]
+     at the end is left with nothing to close. The second [}] of the pair is
+     the one taken out, and the items keep the namespace they are in. *)
+  let nested =
+    "namespace B {\n\
+    \  namespace C { u32 x = 2; }\n\
+    \  namespace C { u16 x = 3; }\n\
+     }\n"
+  in
+  let doubled = replace_nth nested ~needle:"2; }\n" ~replacement:"2; }}" 0 in
+  check "namespace fence: a [}] written twice keeps the items after it inside"
+    (names (parse doubled) = names (parse nested)
+    && Jide_jasmin.Parse.dropped (parse doubled) = [])
 
 let test_no_exception_escapes () =
   let hostile =

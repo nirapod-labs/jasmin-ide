@@ -288,3 +288,19 @@ let find ~original ~(outline : Outline.entry list) ~(mutation : Mutant.t) =
                   )))
     tried
 
+let show_requirement (requirement : requirement) =
+  Printf.sprintf "%s %s %s" requirement.kind requirement.name
+    (String.concat " or "
+       (List.map
+          (fun (start, stop) -> Printf.sprintf "%d..%d" start stop)
+          requirement.extents))
+
+(** One line for a proven case. *)
+let describe witness =
+  Printf.sprintf
+    "witness: %s; %s token %d of it gives the same text; here %s, there %s"
+    witness.how
+    (family_name witness.family)
+    witness.site
+    (show_requirement witness.ours)
+    (show_requirement witness.theirs)

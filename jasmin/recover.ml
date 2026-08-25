@@ -47,6 +47,12 @@
     parser resumes at the fence in the boundary's state, and the item there
     begins where the token before it ends, as in an uninterrupted parse.
 
+    One fault is seen only later: a [}] written twice can close a namespace
+    early, the items after it parse at the top level, and the error is the
+    namespace's own [}] at the end, with nothing left to close. Then the
+    second [}] of the latest such pair is taken out and the parse read again
+    from there, when nothing was repaired in between.
+
     A dropped item leaves a [Dropped] stub carrying its name, so an outline
     can still list it. The stub is not a [Syntax.pitem]: that type belongs to
     the compiler and adding a constructor to it would stop typing from
@@ -545,6 +551,10 @@ type cursor = {
           behind the failure can be returned to. *)
   mutable frames : frame list;
       (** Broken items being repaired, innermost first. *)
+  mutable doubled : (int * checkpoint * int * int) option;
+      (** The last [}] that closed a namespace right after another [}], with
+          nothing between the two: its index, the state before it, the depth
+          there, and the number of recoveries made by then. *)
 }
 (** Where the parse is. [checkpoint] waits for the token at [index]. *)
 
@@ -842,6 +852,21 @@ let rec drive run cursor : Syntax.pprogram =
         let token = (Scan.token run.scan index).Scan.token in
         match offer cursor.checkpoint (Scan.triple run.scan index) with
         | `Need next ->
+            if
+              token = Parser.RBRACE && index > 0 && cursor.boundary.at = index
+              && cursor.braces = cursor.boundary.level
+              &&
+              let before = Scan.token run.scan (index - 1) in
+              before.Scan.token = Parser.RBRACE
+              && before.Scan.end_byte
+                 = (Scan.token run.scan index).Scan.start_byte
+            then
+              cursor.doubled <-
+                Some
+                  ( index,
+                    cursor.checkpoint,
+                    cursor.braces,
+                    run.counters.recoveries );
             cursor.checkpoint <- next;
             cursor.index <- index + 1;
             cursor.braces <- cursor.braces + brace_delta token;
@@ -906,6 +931,38 @@ and at_fence run cursor frame =
 
 and failure run cursor =
   let at = cursor.index in
+  (* A [}] with nothing left to close, after a [}] written twice closed a
+     namespace: the second of the two closed one block too many. It is taken
+     out and the parse read again from there, when nothing was repaired in
+     between, so the later [}] closes the namespace instead. *)
+  match cursor.doubled with
+  | Some (twice, checkpoint, braces, recoveries)
+    when at < run.count
+         && (Scan.token run.scan at).Scan.token = Parser.RBRACE
+         && cursor.braces = 0 && cursor.frames = [] && cursor.boundary.at = at
+         && recoveries = run.counters.recoveries
+         && run.counters.recoveries < max_recoveries ->
+      cursor.doubled <- None;
+      run.counters.recoveries <- run.counters.recoveries + 1;
+      run.counters.token_repairs <- run.counters.token_repairs + 1;
+      let entry = Scan.token run.scan twice in
+      run.recovered <-
+        Scan.span run.scan ~start_byte:entry.Scan.start_byte
+          ~end_byte:entry.Scan.end_byte
+        :: run.recovered;
+      let working =
+        match normalise checkpoint with
+        | Some environment -> resume_at run environment ~target:(twice + 1)
+        | None -> checkpoint
+      in
+      cursor.index <- twice + 1;
+      cursor.braces <- braces;
+      cursor.look <- false;
+      set_boundary cursor ~at:(twice + 1) ~checkpoint ~working ~level:braces;
+      drive run cursor
+  | _ -> failure_at run cursor at
+
+and failure_at run cursor at =
   let frame =
     match cursor.frames with
     | frame :: _ when frame.start.at = cursor.boundary.at -> frame
@@ -1291,6 +1348,7 @@ let recover ~name ~text : t =
           statements = [];
           history = [ (0, initial, 0) ];
           frames = [];
+          doubled = None;
         }
       in
       let items = try drive run cursor with _ -> [] in
