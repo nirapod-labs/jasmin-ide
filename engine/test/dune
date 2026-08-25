@@ -1,3 +1,24 @@
 (test
  (name test_engine)
- (libraries jide_engine))
+ (modules test_engine)
+ (libraries jide_engine jide_jasmin jide_lang))
+
+(test
+ (name test_project)
+ (modules test_project)
+ (libraries jide_engine jide_jasmin jide_lang unix))
+
+(test
+ (name test_context)
+ (modules test_context)
+ (libraries jide_engine jide_jasmin jide_lang))
+
+(test
+ (name test_index)
+ (modules test_index)
+ (libraries jide_engine jide_jasmin jide_lang))
+
+(test
+ (name test_resolve)
+ (modules test_resolve)
+ (libraries jide_engine jide_jasmin jide_lang))
