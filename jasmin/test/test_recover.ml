@@ -331,7 +331,7 @@ let test_every_dropped_item_is_reported () =
   let dropped = Jide_jasmin.Parse.diagnostics parsed in
   check "two holes: the compiler's error, then one per stub"
     (List.length dropped = 3);
-  check "two holes: the stub diagnostics are the two after the first"
+  check "two holes: the stubs are reported at the tokens they stopped on"
     (match dropped with
     | _ :: rest ->
         List.map
@@ -340,8 +340,8 @@ let test_every_dropped_item_is_reported () =
           rest
         = List.map
             (function
-              | Jide_jasmin.Recover.Dropped { span; _ } ->
-                  span.Jide_lang.Span.start_byte)
+              | Jide_jasmin.Recover.Dropped { at; _ } ->
+                  at.Jide_lang.Span.start_byte)
             (Jide_jasmin.Parse.dropped parsed)
     | [] -> false);
   check "two holes: each names the item it stands for"
@@ -515,6 +515,56 @@ let test_stub_span () =
            (Jide_jasmin.Parse.recovered (parse first_item_broken)))
   | other ->
       check ("stub: one stub, got " ^ string_of_int (List.length other)) false
+
+(* A hole is reported where the parse stopped, not on the first byte of the
+   item the hole replaced. The two are the same only when the item's own
+   keyword is the token that could not be shifted; a broken first item is
+   otherwise reported at line 1, column 1, which is before the compiler's own
+   error and is the position a reader — and anything that reads the first
+   diagnostic — takes as the first error in the file.
+
+   The text is the header of a function with its opening parenthesis written
+   twice, which is a single-token fault inside the first item, so the
+   compiler stops on the second parenthesis and the item it belongs to starts
+   at byte zero. *)
+let broken_first_header =
+  "export fn test((reg u64 in) -> reg u64\n{\n  return;\n}\n"
+
+let test_hole_is_reported_where_the_parse_stopped () =
+  let text = broken_first_header in
+  let parsed = parse text in
+  let stopped = index_of text "((reg" + 1 in
+  check "hole: the fault is at the second parenthesis" (stopped = 15);
+  check "hole: the compiler stops there"
+    (match compiler_diagnostic text with
+    | Some diagnostic ->
+        diagnostic.Jide_lang.Diagnostic.span.Jide_lang.Span.start_byte = stopped
+    | None -> false);
+  (* The engine sorts the diagnostics by position before it prints them, so
+     the first line of a check is the minimum of this list. The marker of the
+     hole and the compiler's own error now share that position; anything
+     earlier would be a position the program never wrote a fault at. *)
+  check "hole: the first diagnostic is the token the parse stopped at"
+    (match
+       List.sort Jide_lang.Diagnostic.compare
+         (Jide_jasmin.Parse.diagnostics parsed)
+     with
+    | (first : Jide_lang.Diagnostic.t) :: _ ->
+        first.span.Jide_lang.Span.start_byte = stopped
+    | [] -> false);
+  (* The stub still stands for the whole item, so an outline places it where
+     its bytes are and typing knows what the hole took away. *)
+  check "hole: the stub still covers the item's bytes"
+    (match Jide_jasmin.Parse.dropped parsed with
+    | [ Jide_jasmin.Recover.Dropped { span; _ } ] ->
+        span.Jide_lang.Span.start_byte = 0
+        && span.Jide_lang.Span.end_byte = String.length text
+    | _ -> false);
+  check "hole: the stub names the token it is reported at"
+    (match Jide_jasmin.Parse.dropped parsed with
+    | [ Jide_jasmin.Recover.Dropped { at; _ } ] ->
+        at.Jide_lang.Span.start_byte = stopped
+    | _ -> false)
 
 (* The guard against grammar drift: the tokens the driver restarts at are the
    grammar's own FIRST sets, read from Menhir's inspection API. *)
@@ -1439,6 +1489,7 @@ let () =
   test_statement_faults ();
   test_token_matching ();
   test_stub_span ();
+  test_hole_is_reported_where_the_parse_stopped ();
   test_guard_top ();
   test_guard_statement ();
   test_guard_type ();

@@ -19,6 +19,9 @@ let read_opt path =
    so it is checked on its own and nothing is searched; a file no entry
    requires is alone, which is the empty list. *)
 let context_of ~(idirs : (string * string) list) (file : string) : string list =
+  (* The walk reads a [from NAME require] through the same bindings the check
+     uses, [JASMINPATH]'s included. *)
+  let idirs = Jide_jasmin.Adapter.with_jasmin_path idirs in
   if Filename.check_suffix file ".jazz" then []
   else
     let project =

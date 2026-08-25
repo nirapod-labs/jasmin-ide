@@ -1227,7 +1227,8 @@ and drop run cursor frame =
         ~working ~level;
       (if upto < frame.fence then (
          frame.start <- cursor.boundary;
-         frame.repairs <- 0)
+         frame.repairs <- 0;
+         frame.stopped <- None)
        else
          let rec pop = function
            | [] -> []
@@ -1241,9 +1242,14 @@ and drop run cursor frame =
 and give_up run cursor =
   let boundary = cursor.boundary in
   let environment = normalise boundary.checkpoint in
+  let stopped =
+    match cursor.frames with
+    | frame :: _ when frame.start.at = boundary.at -> frame.stopped
+    | _ -> Some cursor.index
+  in
   note_dropped
     ?namespace:(Option.bind environment namespace_of)
-    run ~from:boundary.at ~upto:run.count;
+    run ~failure:stopped ~from:boundary.at ~upto:run.count;
   cursor.frames <- [];
   match environment with
   | None -> []
