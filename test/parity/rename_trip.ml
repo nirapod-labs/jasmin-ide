@@ -121,3 +121,66 @@ let read (path : string) : string option =
   | text -> Some text
   | exception _ -> None
 
+let write (path : string) (text : string) =
+  Out_channel.with_open_bin path (fun channel -> output_string channel text)
+
+let is_directory path =
+  match Sys.is_directory path with ok -> ok | exception Sys_error _ -> false
+
+let rec mkdir_p path =
+  if not (Sys.file_exists path) then (
+    mkdir_p (Filename.dirname path);
+    Sys.mkdir path 0o755)
+
+let rec remove_tree path =
+  if is_directory path then (
+    Array.iter
+      (fun name -> remove_tree (Filename.concat path name))
+      (Sys.readdir path);
+    Sys.rmdir path)
+  else if Sys.file_exists path then Sys.remove path
+
+let is_source name =
+  Filename.check_suffix name ".jazz" || Filename.check_suffix name ".jinc"
+
+(* Every source under a directory, as paths relative to it, sorted, so two
+   runs read the files in one order. Hidden directories are not read. *)
+let sources root =
+  let rec walk relative acc =
+    let directory =
+      if relative = "" then root else Filename.concat root relative
+    in
+    match Sys.readdir directory with
+    | exception Sys_error _ -> acc
+    | names ->
+        Array.fold_left
+          (fun acc name ->
+            if name = "" || name.[0] = '.' then acc
+            else
+              let child =
+                if relative = "" then name else Filename.concat relative name
+              in
+              if is_directory (Filename.concat root child) then walk child acc
+              else if is_source name then child :: acc
+              else acc)
+          acc names
+  in
+  List.sort String.compare (walk "" [])
+
+let scratch_directory () =
+  let base = Filename.get_temp_dir_name () in
+  let rec attempt n =
+    let path =
+      Filename.concat base
+        (Printf.sprintf "rename-trip-%d-%d" (Unix.getpid ()) n)
+    in
+    if Sys.file_exists path then attempt (n + 1)
+    else (
+      mkdir_p path;
+      path)
+  in
+  attempt 0
+
+(* ------------------------------------------------------------------ *)
+(* Words *)
+
