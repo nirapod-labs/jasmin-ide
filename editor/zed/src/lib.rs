@@ -199,13 +199,7 @@ fn accept_download(path: &str, expected_hex: &str) -> Result<(), String> {
 /// is deleted and reported, and no other release is tried against the same
 /// expected digest.
 fn download_server(language_server_id: &LanguageServerId, platform: &str) -> zed::Result<String> {
-    let Some(expected) = expected_digest(platform) else {
-        return Err(format!(
-            "This build of the Jasmin IDE extension records no SHA-256 for the {platform} \
-             language server, so it will not download one. Set `lsp.{SERVER_ID}.binary.path` \
-             to a `{SERVER_BINARY}` build of your own."
-        ));
-    };
+    let expected = download_digest(platform)?;
     if RELEASE_REPOSITORY.is_empty() {
         return Err(format!(
             "This build of the Jasmin IDE extension names no repository to download the \
@@ -243,7 +237,7 @@ fn download_server(language_server_id: &LanguageServerId, platform: &str) -> zed
             problems.push(format!("{name} could not be downloaded: {error}"));
             continue;
         }
-        if let Err(error) = digest::verify_file(&name, expected) {
+        if let Err(error) = accept_download(&name, expected) {
             return Err(failed(language_server_id, error));
         }
         if let Err(error) = make_file_executable(&name) {
@@ -465,5 +459,172 @@ mod tests {
     #[test]
     fn a_digest_known_for_one_platform_is_not_used_for_another() {
         assert_eq!(expected_digest("linux-aarch64"), None);
+    }
+
+    /// The SHA-256 of `abc`, the FIPS 180-4 vector the digest tests use, so a
+    /// matching file needs no other fixture.
+    const SHA256_OF_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    /// The path only the setting can supply, and the one only `PATH` can, so a
+    /// test tells the four places apart by their contents.
+    const SETTING: &str = "/opt/jasmin/bin/jasmin-lsp";
+    const ON_PATH: &str = "/usr/local/bin/jasmin-lsp";
+
+    #[test]
+    fn the_setting_is_used_before_the_other_three_places() {
+        let source = choose_source(
+            Some(SETTING.to_string()),
+            Some(ON_PATH.to_string()),
+            || panic!("the setting must end the lookup before the platform is asked"),
+            |_| panic!("the setting must end the lookup before the cache is read"),
+        )
+        .expect("a configured path is a source");
+        assert_eq!(source, ServerSource::Setting(SETTING.to_string()));
+    }
+
+    #[test]
+    fn the_path_is_used_when_no_setting_names_a_server() {
+        let source = choose_source(
+            None,
+            Some(ON_PATH.to_string()),
+            || panic!("a binary on PATH must end the lookup before the platform is asked"),
+            |_| panic!("a binary on PATH must end the lookup before the cache is read"),
+        )
+        .expect("a binary on PATH is a source");
+        assert_eq!(source, ServerSource::Path(ON_PATH.to_string()));
+    }
+
+    #[test]
+    fn a_checked_download_is_used_before_the_release_is_fetched_again() {
+        let cached = asset_name(VERSION, "linux-x86_64");
+        let source = choose_source(
+            None,
+            None,
+            || Ok("linux-x86_64"),
+            |platform| {
+                assert_eq!(platform, "linux-x86_64");
+                Some(asset_name(VERSION, platform))
+            },
+        )
+        .expect("a cached copy is a source");
+        assert_eq!(source, ServerSource::Cached(cached));
+    }
+
+    #[test]
+    fn the_versioned_release_is_the_last_place_tried() {
+        let source = choose_source(
+            None,
+            None,
+            || Ok("macos-aarch64"),
+            |platform| {
+                assert_eq!(platform, "macos-aarch64");
+                None
+            },
+        )
+        .expect("the release is a source");
+        assert_eq!(source, ServerSource::Release("macos-aarch64"));
+        assert_eq!(
+            asset_name(VERSION, "macos-aarch64"),
+            format!("jasmin-lsp-{VERSION}-macos-aarch64")
+        );
+    }
+
+    #[test]
+    fn an_unsupported_platform_is_reported_only_after_the_setting_and_path() {
+        let unsupported = || {
+            Err(
+                "Jasmin IDE has no released language server for Windows on x86-64. Released \
+                 platforms: linux-x86_64, linux-aarch64, macos-aarch64."
+                    .to_string(),
+            )
+        };
+
+        let source = choose_source(Some(SETTING.to_string()), None, unsupported, |_| {
+            panic!("no download is considered for a configured path")
+        })
+        .expect("a configured path works on a platform with no released server");
+        assert_eq!(source, ServerSource::Setting(SETTING.to_string()));
+
+        let error = choose_source(None, None, unsupported, |_| {
+            panic!("no download is considered for an unsupported platform")
+        })
+        .expect_err("an unsupported platform is an error once the first two places are empty");
+        assert!(error.contains("Windows on x86-64"), "{error}");
+        assert!(error.contains("macos-aarch64"), "{error}");
+    }
+
+    #[test]
+    fn a_cached_copy_that_fails_its_digest_is_deleted_and_the_release_used_instead() {
+        let path = scratch_file("cached-copy.bin", b"a server that is not the released one");
+        assert!(
+            !cached_copy_is_usable(&path, SHA256_OF_ABC),
+            "a copy whose digest does not match is not usable"
+        );
+        assert!(
+            std::fs::metadata(&path).is_err(),
+            "the refused copy is deleted, so the release download replaces it"
+        );
+
+        let source = choose_source(None, None, || Ok("linux-x86_64"), |_| None)
+            .expect("the release is what is left once the cache is refused");
+        assert_eq!(source, ServerSource::Release("linux-x86_64"));
+    }
+
+    #[test]
+    fn a_cached_copy_that_matches_its_digest_is_used() {
+        let path = scratch_file("matching-copy.bin", b"abc");
+        assert!(cached_copy_is_usable(&path, SHA256_OF_ABC));
+        assert!(
+            std::fs::metadata(&path).is_ok(),
+            "a matching copy is kept for the next start"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_platform_with_no_compiled_digest_is_never_downloaded() {
+        let error = download_digest("macos-x86_64")
+            .expect_err("a platform whose release digest is not recorded is refused");
+        assert!(error.contains("records no SHA-256"), "{error}");
+        assert!(error.contains("macos-x86_64"), "{error} names the platform");
+        assert!(
+            error.contains("lsp.jasmin-lsp.binary.path"),
+            "{error} says how to use a build of one's own"
+        );
+    }
+
+    #[test]
+    fn a_downloaded_file_that_fails_its_digest_is_refused_and_deleted() {
+        let path = scratch_file("downloaded.bin", b"a substituted language server");
+        let error = accept_download(&path, SHA256_OF_ABC)
+            .expect_err("a download whose digest does not match is refused");
+        assert!(error.contains("was refused"), "{error}");
+        assert!(
+            error.contains(SHA256_OF_ABC),
+            "{error} names the expected digest"
+        );
+        assert!(
+            std::fs::metadata(&path).is_err(),
+            "a refused download is deleted rather than made executable"
+        );
+    }
+
+    #[test]
+    fn a_downloaded_file_that_matches_its_digest_is_accepted() {
+        let path = scratch_file("accepted.bin", b"abc");
+        assert!(accept_download(&path, &SHA256_OF_ABC.to_uppercase()).is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Writes `contents` to a fresh file under the system temporary directory
+    /// and returns its path, so the tests write nothing into the source tree and
+    /// do not collide with each other.
+    fn scratch_file(name: &str, contents: &[u8]) -> String {
+        let directory =
+            std::env::temp_dir().join(format!("jasmin-ide-lookup-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("a temporary directory for the lookup tests");
+        let path = directory.join(name);
+        std::fs::write(&path, contents).expect("the test file");
+        path.to_str().expect("a UTF-8 path").to_string()
     }
 }
