@@ -260,6 +260,81 @@ let test_shrunk_cover () =
     | first :: _ -> first.Outline.kind = "namespace"
     | [] -> false)
 
+(* The prover. Three hand-checked cases: one no parser can meet, a mutant
+   that is itself a valid program, and one a parser can meet, which must find
+   no witness. Each witness is checked here again, outside the prover: the
+   compiler's parser accepts it and the mutation takes it to the same bytes. *)
+let original_outline source =
+  Outline.of_items
+    (Jasmin.Parseio.parse_program ~name:"selftest.jazz"
+       (Jasmin.Utils.IO.input_string source))
+
+let witness_holds (mutation : Mutant.t) (witness : Witness.t) =
+  let tokens = Array.of_list (tokens_of witness.Witness.text) in
+  (match
+     Jasmin.Parseio.parse_program ~name:"w.jazz"
+       (Jasmin.Utils.IO.input_string witness.Witness.text)
+   with
+  | _ -> true
+  | exception _ -> false)
+  && String.equal
+       (Mutant.make ~source:witness.Witness.text tokens witness.Witness.family
+          witness.Witness.site)
+         .Mutant.text
+       mutation.Mutant.text
+
+let test_witness () =
+  (* [fn f() {\n}\n\nfn g() {\n}\n] without the [}] at byte 9: [g] must
+     start at byte 9 of the mutant (the end of the deleted [}], mapped).
+     Written right after the [{], the same [}] gives the same mutant and asks
+     for byte 8. *)
+  let source = "fn f() {\n}\n\nfn g() {\n}\n" in
+  let tokens = Array.of_list (tokens_of source) in
+  let deletion = Mutant.delete ~source tokens 5 in
+  check "witness: the hand-checked deletion is the [}] at byte 9"
+    (deletion.edit_start = 9 && deletion.text = "fn f() {\n\n\nfn g() {\n}\n");
+  (match
+     Witness.find ~original:source ~outline:(original_outline source)
+       ~mutation:deletion
+   with
+  | Some witness ->
+      check "witness: a deletion elsewhere"
+        (witness.Witness.family = Mutant.Delete
+        && witness.Witness.text = "fn f() {}\n\n\nfn g() {\n}\n");
+      check "witness: it asks for the same item at another start"
+        (witness.Witness.difference = Witness.Extent
+        && witness.Witness.ours.Witness.extents = [ (9, 21) ]
+        && witness.Witness.theirs.Witness.extents = [ (8, 21) ]);
+      check "witness: checked again, it parses and gives the same bytes"
+        (witness_holds deletion witness)
+  | None -> check "witness: the deletion is proven" false);
+  (* A doubled namespace name makes a valid program, which the compiler reads
+     with the doubled name; the same text followed by a function, cut there,
+     is a witness. *)
+  let source = "namespace a {\n  fn f() {\n  }\n}\n" in
+  let tokens = Array.of_list (tokens_of source) in
+  let copy = Mutant.duplicate ~source tokens 1 in
+  (match
+     Witness.find ~original:source ~outline:(original_outline source)
+       ~mutation:copy
+   with
+  | Some witness ->
+      check "witness: a valid mutant is proven by a truncation"
+        (witness.Witness.family = Mutant.Truncate
+        && witness.Witness.difference = Witness.Name
+        && witness.Witness.theirs.Witness.name = "aa::f"
+        && witness_holds copy witness)
+  | None -> check "witness: the valid mutant is proven" false);
+  (* A [}] written [;]: the parser can close the body there and keep [g], and
+     no other text the compiler accepts gives this mutant. No witness. *)
+  let source = "fn f() {\n}\nfn g() {\n}\n" in
+  let tokens = Array.of_list (tokens_of source) in
+  let swap = Mutant.swap ~source tokens 5 in
+  check "witness: a case a parser can meet has none"
+    (Witness.find ~original:source ~outline:(original_outline source)
+       ~mutation:swap
+    = None)
+
 let test_parse () =
   let program =
     "fn a(reg u32 x) -> reg u32 { return x; }\n\
@@ -307,6 +382,7 @@ let run () =
   test_comparison ();
   test_boundary ();
   test_shrunk_cover ();
+  test_witness ();
   test_parse ();
   test_isolation ();
   if !failures = 0 then (

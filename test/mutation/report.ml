@@ -14,6 +14,9 @@ type case = {
   comparison : Outline.comparison;
   enclosing : (string * bool) option;
       (** The item the edit fell inside, and whether it is still there. *)
+  proof : Witness.t option;
+      (** For a case whose outline changed, the witness that no parser could
+          have kept it (see {!Witness}); [None] otherwise. *)
 }
 
 type totals = {
@@ -36,6 +39,12 @@ let single_token case = Mutant.is_single_token case.mutation.family
 let outline_unchanged case =
   returned case && case.comparison.Outline.identity_ok
   && case.comparison.Outline.span_ok
+
+(** A case whose outline changed and that a witness proves no parser could
+    have kept. Only a case that returned an outline can be proven: a hang or
+    a crash is a failure of the parser under test whatever the text. *)
+let proven case =
+  returned case && (not (outline_unchanged case)) && case.proof <> None
 
 let within_two case =
   match errors case with Some count -> count <= 2 | None -> false
@@ -152,6 +161,7 @@ let criteria cases =
   let total = List.length cases in
   let quiet = List.length (List.filter returned cases) in
   let unchanged = List.length (List.filter outline_unchanged cases) in
+  let impossible = List.length (List.filter proven cases) in
   let compared =
     List.length
       (List.filter (fun case -> case.comparison.Outline.away > 0) cases)
@@ -178,7 +188,10 @@ let criteria cases =
     List.length (List.filter (fun (_, present) -> present) enclosing)
   in
   let holds_quiet = total > 0 && quiet = total in
-  let holds_outline = total > 0 && unchanged = total in
+  (* The outline criterion holds when every case keeps its outline or is
+     proven impossible for any parser; a changed outline with no witness
+     fails it. *)
+  let holds_outline = total > 0 && unchanged + impossible = total in
   (* The two-error criterion holds from 95%: a single bad mutation in a
      hundred is inside it. The other two hold only at 100%. *)
   let holds_two = single_total > 0 && percent two single_total >= 95.0 in
@@ -189,7 +202,13 @@ let criteria cases =
       (if holds then "PASS" else "FAIL")
   in
   line "no exception or hang" quiet total holds_quiet;
-  line "outline away from the edit unchanged" unchanged total holds_outline;
+  Printf.printf "  %-34s %6d/%-6d %6.1f%%\n"
+    "outline away from the edit unchanged" unchanged total
+    (percent unchanged total);
+  Printf.printf "  %-34s %6d/%-6d         (a witness each, listed below)\n"
+    "  the rest proven impossible" impossible (total - unchanged);
+  line "outline: unchanged or impossible" (unchanged + impossible) total
+    holds_outline;
   Printf.printf "  %-34s %6d/%-6d %6.1f%%  %s  (needs 95%%)\n"
     "at most two errors (single token)" two single_total
     (percent two single_total)
@@ -252,6 +271,8 @@ let causes cases =
   Printf.printf "## why a case is outside the criteria\n\n";
   Printf.printf "  %-40s %6d\n" "the mutant produced no item at all" !no_items;
   Printf.printf "  %-40s %6d\n" "the mutant's outline differs" !differs;
+  Printf.printf "  %-40s %6d\n" "  of these, proven impossible"
+    (List.length (List.filter proven cases));
   Printf.printf "  %-40s %6d\n" "the check raised, hung or crashed" !unquiet;
   Printf.printf "  %-40s %6d\n" "more than two errors (single token)" !too_many;
   Printf.printf
@@ -266,7 +287,8 @@ let failure case =
   | Isolate.Crashed { detail; _ } -> Some ("crash: " ^ detail)
   | Isolate.Returned _ ->
       let reasons = ref [] in
-      if not case.comparison.Outline.identity_ok then
+      if proven case then ()
+      else if not case.comparison.Outline.identity_ok then
         reasons :=
           ("outline changed: " ^ case.comparison.Outline.detail) :: !reasons
       else if not case.comparison.Outline.span_ok then
@@ -376,3 +398,48 @@ let summary ~ran cases =
   Printf.printf "  %d mutations, %d errors in all, %.1f s of wall clock\n"
     (List.length cases) (total_errors cases) ran;
   Printf.printf "\n"
+
+(** The cases proven impossible, by the mutation that makes the witness and
+    by what the two criteria disagree on, then one line each. *)
+let impossible cases =
+  let proofs =
+    List.filter_map
+      (fun case ->
+        match case.proof with
+        | Some witness when proven case -> Some (case, witness)
+        | _ -> None)
+      cases
+  in
+  Printf.printf "## cases proven impossible for any parser\n\n";
+  if proofs = [] then Printf.printf "  none\n\n"
+  else
+    let classes =
+      List.sort_uniq compare
+        (List.map
+           (fun (_, (witness : Witness.t)) ->
+             (Witness.family_name witness.family, witness.difference))
+           proofs)
+    in
+    Printf.printf "  %-12s %-36s %6s\n" "witness by"
+      "what the two outlines need" "cases";
+    List.iter
+      (fun (family, difference) ->
+        let count =
+          List.length
+            (List.filter
+               (fun (_, (witness : Witness.t)) ->
+                 Witness.family_name witness.family = family
+                 && witness.difference = difference)
+               proofs)
+        in
+        Printf.printf "  %-12s %-36s %6d\n" family
+          (Witness.difference_name difference)
+          count)
+      classes;
+    Printf.printf "  %-12s %-36s %6d\n\n" "total" "" (List.length proofs);
+    List.iter
+      (fun (case, witness) ->
+        Printf.printf "  %s: %s: %s\n" case.path case.mutation.Mutant.label
+          (Witness.describe witness))
+      proofs;
+    Printf.printf "\n"

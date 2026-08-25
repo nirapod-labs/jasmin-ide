@@ -5,7 +5,11 @@
     criteria of the recovery gate with the distribution behind them:
 
     - no exception or hang;
-    - the outline of the items away from the edit unchanged;
+    - the outline of the items away from the edit unchanged, or the case
+      proven impossible for any parser: a second text the compiler's parser
+      accepts gives the same mutated bytes under a mutation of one of the
+      four families and asks for an outline no parse can give together with
+      the first ({!Witness}); a changed outline with no witness fails;
     - at most two errors per single-token mutation.
 
     The corpus is an argument. Nothing about this host or about this lab is
@@ -36,6 +40,9 @@ let usage =
       "  --call-conv NAME    calling convention (default linux)";
       "  --list-all          print every case outside the criteria";
       "  --selftest          run the harness's own checks and exit";
+      "  --plant-defect      the negative control: move by one byte every item";
+      "                      the mutant has after the edit, a defect a parser";
+      "                      could avoid, which the run must report";
       "  -h, --help          print this text";
       "";
       "exit status: 0 when the three criteria hold, 1 when one does not,";
@@ -52,6 +59,7 @@ type options = {
   call_conv_name : string;
   list_all : bool;
   selftest : bool;
+  plant : bool;
 }
 
 let default_options =
@@ -65,6 +73,7 @@ let default_options =
     call_conv_name = "linux";
     list_all = false;
     selftest = false;
+    plant = false;
   }
 
 type parsed = Run of options | Help | Invalid of string
@@ -114,6 +123,7 @@ let parse_arguments arguments =
     | "--call-conv" :: [] -> Invalid "--call-conv wants a name"
     | "--list-all" :: rest -> loop { options with list_all = true } rest
     | "--selftest" :: rest -> loop { options with selftest = true } rest
+    | "--plant-defect" :: rest -> loop { options with plant = true } rest
     | argument :: rest when String.length argument > 0 && argument.[0] <> '-' ->
         loop { options with corpora = options.corpora @ [ argument ] } rest
     | argument :: _ -> Invalid (Printf.sprintf "unknown option: %s" argument)
@@ -268,6 +278,24 @@ let run options =
                     Probe.run ~arch ~call_conv ~file:base.path
                       mutation.Mutant.text)
               in
+              let outcome =
+                match outcome with
+                | Isolate.Returned { elapsed; result } when options.plant ->
+                    let moved =
+                      List.map
+                        (fun (entry : Outline.entry) ->
+                          if entry.start_byte >= mutation.Mutant.edit_start then
+                            { entry with start_byte = entry.start_byte + 1 }
+                          else entry)
+                        result.Probe.outline
+                    in
+                    Isolate.Returned
+                      {
+                        elapsed;
+                        result = { result with Probe.outline = moved };
+                      }
+                | other -> other
+              in
               let comparison =
                 match outcome with
                 | Isolate.Returned { result; _ } ->
@@ -306,6 +334,23 @@ let run options =
                       Some (item.Outline.kind ^ " " ^ item.Outline.name, present)
                 else None
               in
+              (* A changed outline is searched for a witness that no parser
+                 could have kept it. The search reads only the original and
+                 the mutation, never the outline under test. A search that
+                 raises finds no witness, which fails the case: the safe
+                 side. *)
+              let proof =
+                match outcome with
+                | Isolate.Returned _
+                  when not
+                         (comparison.Outline.identity_ok
+                        && comparison.Outline.span_ok) -> (
+                    try
+                      Witness.find ~original:base.text ~outline:base.outline
+                        ~mutation
+                    with _ -> None)
+                | _ -> None
+              in
               cases :=
                 {
                   Report.path = base.display;
@@ -313,6 +358,7 @@ let run options =
                   outcome;
                   comparison;
                   enclosing;
+                  proof;
                 }
                 :: !cases)
             chosen)
@@ -351,6 +397,7 @@ let run options =
   let quiet, unchanged, two = Report.criteria cases in
   Report.families cases;
   Report.causes cases;
+  Report.impossible cases;
   Report.failures ~limit:(if options.list_all then 0 else 25) cases;
   Report.files ~skipped (List.map (fun base -> base.display) sampled_list);
   Report.summary ~ran cases;

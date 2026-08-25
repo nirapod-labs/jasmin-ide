@@ -675,10 +675,68 @@ let test_required_file_cycle () =
   check "cycle: no diagnostic, as the compiler accepts a cycle"
     (result.Jide_jasmin.Adapter.diagnostics = [])
 
+(* A chain of distinct required files has no bound in the compiler: twelve
+   files, each requiring the next, the last declaring the parameter the
+   document uses, type clean, at the top level and inside a namespace. A file
+   that requires itself inside a namespace it opens would open one more
+   namespace on every read, which the compiler never finishes; that one
+   require is refused, and the check ends. *)
+let test_a_long_chain_of_requires () =
+  let length = 12 in
+  let link ~inside index =
+    let next = Printf.sprintf "link%d.jinc" (index + 1) in
+    let require =
+      if inside then
+        Printf.sprintf "namespace N%d {\n  require %S\n}\n" index next
+      else Printf.sprintf "require %S\n" next
+    in
+    if index = length then "param int DEPTH = 12;\n" else require
+  in
+  let resolve ~inside path =
+    let name = Filename.basename path in
+    match Scanf.sscanf name "link%d.jinc%!" (fun index -> Some index) with
+    | exception (Scanf.Scan_failure _ | Failure _ | End_of_file) -> None
+    | Some index when index >= 1 && index <= length -> Some (link ~inside index)
+    | _ -> None
+  in
+  let top =
+    check_with ~resolve:(resolve ~inside:false)
+      "require \"link1.jinc\"\n\n\
+       export fn entry() -> reg u64 {\n\
+      \  reg u64 r;\n\
+      \  r = DEPTH;\n\
+      \  return r;\n\
+       }\n"
+  in
+  check "long chain: twelve top-level requires type clean"
+    (top.Jide_jasmin.Adapter.diagnostics = [] && top.required = []);
+  let nested =
+    check_with ~resolve:(resolve ~inside:true)
+      "namespace N0 {\n\
+      \  require \"link1.jinc\"\n\
+       }\n\n\
+       export fn entry() -> reg u64 {\n\
+      \  reg u64 r;\n\
+      \  r = N0::N1::N2::N3::N4::N5::N6::N7::N8::N9::N10::N11::DEPTH;\n\
+      \  return r;\n\
+       }\n"
+  in
+  check "long chain: twelve nested namespaces type clean"
+    (nested.Jide_jasmin.Adapter.diagnostics = [] && nested.required = []);
+  let looping =
+    check_with
+      ~resolve:(fun path ->
+        if Filename.basename path = "self.jinc" then
+          Some "namespace N {\n  require \"self.jinc\"\n}\n"
+        else None)
+      "require \"self.jinc\"\n"
+  in
+  check "long chain: a file read again in its own namespace is refused"
+    (mentions looping "nest without end")
+
 (* Two files that require each other, spelled with [./] on every name. The
    path is normalised before it is compared with the loaded files, so the two
-   files are loaded once however the require spelled them: no diagnostic, and
-   the nesting bound is not reached. *)
+   files are loaded once however the require spelled them: no diagnostic. *)
 let test_dot_prefixed_cycle () =
   let asked = ref [] in
   let resolve path =
@@ -707,8 +765,6 @@ let test_dot_prefixed_cycle () =
   in
   check "dot cycle: no diagnostic, as the compiler accepts a cycle"
     (result.Jide_jasmin.Adapter.diagnostics = []);
-  check "dot cycle: it does not blame the nesting bound"
-    (not (mentions result "nested too deeply"));
   check "dot cycle: the path asked for has no [.] left in it"
     (List.for_all
        (fun path -> (not (contains path "/./")) && not (contains path "/../"))
@@ -1471,6 +1527,7 @@ let () =
   test_parse_warning ();
   test_required_file ();
   test_required_file_error ();
+  test_a_long_chain_of_requires ();
   test_required_file_after_a_syntax_error ();
   test_required_file_from_a_lookup ();
   test_required_file_missing ();
