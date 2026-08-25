@@ -1503,6 +1503,20 @@ let () =
   test_initialize_options_set_the_delay ();
   test_configuration_sets_the_delay ();
   test_nothing_is_published_after_shutdown ();
+  test_definition_answer ();
+  test_definition_without_an_answer ();
+  test_references_answer ();
+  test_references_without_an_answer ();
+  test_hover_answer ();
+  test_hover_without_an_answer ();
+  test_document_symbols ();
+  test_document_symbols_without_items ();
+  test_positions_outside_the_text ();
+  test_navigation_for_an_unopened_document ();
+  test_a_navigation_request_checks_stale_text ();
+  test_a_dropped_check_still_answers ();
+  test_navigation_rejects_bad_params ();
+  test_other_protocol_requests_are_still_unknown ();
   if !failures = 0 then print_endline "all server tests passed"
   else (
     Printf.printf "%d server test(s) failed\n" !failures;
