@@ -198,6 +198,41 @@ let include_directory ~(idirs : (string * string) list)
       | Some directory -> Ok (Some directory)
       | None -> Error name)
 
+(** The value of [JASMINPATH], read the way the compiler reads it
+    ([Compile.get_jasminpath]): [NAME=PATH] entries separated by [:], each
+    split at its first [=]. [None] when the variable is set but an entry has
+    no [=], which the compiler warns about and then reads as no entry at all;
+    [Some []] when the variable is not set. *)
+let jasmin_path () : (string * string) list option =
+  let pair entry =
+    match String.index_opt entry '=' with
+    | None -> None
+    | Some index ->
+        Some
+          ( String.sub entry 0 index,
+            String.sub entry (index + 1) (String.length entry - index - 1) )
+  in
+  let rec all acc = function
+    | [] -> Some (List.rev acc)
+    | entry :: rest -> (
+        match pair entry with
+        | None -> None
+        | Some binding -> all (binding :: acc) rest)
+  in
+  match Sys.getenv_opt "JASMINPATH" with
+  | None -> Some []
+  | Some value -> all [] (String.split_on_char ':' value)
+
+(** [with_jasmin_path idirs] is [idirs] followed by the bindings of
+    [JASMINPATH], the order the compiler binds them in ([Compile.parse_file]):
+    a name bound by [idirs] is looked up there first. A binding [idirs]
+    already holds is not repeated, so applying this twice changes nothing;
+    one that binds a name [idirs] binds elsewhere is kept, and the compiler's
+    own binding then refuses it. An ill-formed value adds nothing. *)
+let with_jasmin_path (idirs : (string * string) list) =
+  let extra = Option.value ~default:[] (jasmin_path ()) in
+  idirs @ List.filter (fun binding -> not (List.mem binding idirs)) extra
+
 (** A name is a file name as the compiler resolves it: relative to the file
     that requires it, or to the directory an idir binds when the item names
     a [from]. [from] is already resolved by {!include_directory}, so it is
@@ -211,7 +246,9 @@ let include_path ~(base : string) ~(from : string option) (name : string) :
     it, absolute when [path] was and relative when it was. The fold is
     lexical, like the engine's own resolution: nothing here asks the
     filesystem, so a symbolic link is not resolved and two paths that name one
-    file through different links stay different. *)
+    file through different links stay different. A relative path keeps the
+    [..] that climb out of its start, as the compiler's own normalisation
+    does, so [../lib/x.jinc] is printed the way the compiler prints it. *)
 let lexical (path : string) : string =
   let absolute = String.length path > 0 && path.[0] = '/' in
   let parts = String.split_on_char '/' path in
@@ -219,7 +256,10 @@ let lexical (path : string) : string =
     | [] -> List.rev stack
     | ("" | ".") :: rest -> fold stack rest
     | ".." :: rest -> (
-        match stack with [] -> fold stack rest | _ :: stack -> fold stack rest)
+        match stack with
+        | [] -> fold (if absolute then [] else [ ".." ]) rest
+        | ".." :: _ -> fold (".." :: stack) rest
+        | _ :: stack -> fold stack rest)
     | part :: rest -> fold (part :: stack) rest
   in
   let body = String.concat "/" (fold [] parts) in
@@ -234,9 +274,14 @@ let normalise_path (path : string) : string =
     lexical (Filename.concat (Sys.getcwd ()) path)
   else lexical path
 
-(** How many required files one document may nest. A cycle is caught by the
-    chain before this, and this bounds a tree of distinct files. *)
-let max_include_depth = 8
+(** The directory a [-I NAME=PATH] binds, as the compiler prints the files
+    found through it: the compiler's loader takes a relative [PATH] from the
+    process's working directory and keeps it absolute, so a file reached by a
+    [from NAME require] is printed with an absolute path. *)
+let absolute_directory (directory : string) : string =
+  if Filename.is_relative directory then
+    lexical (Filename.concat (Sys.getcwd ()) directory)
+  else lexical directory
 
 (* The bytes of one location, so a diagnostic can be placed on the text it
    is about. *)
@@ -591,7 +636,10 @@ module Make (A : Arch_full.Arch) = struct
               }
             in
             type_context loop ~chain:[ document ] ~document
-              ~context:(List.map normalise_path context);
+              ~context:
+                (List.map
+                   (fun file -> (normalise_path file, lexical file))
+                   context);
             type_sequence loop ~chain:[ document ] ~dropped ~recovered ~items;
             let environment =
               match exit_file !(loop.environment) with

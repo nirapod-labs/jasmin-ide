@@ -1,0 +1,15 @@
+# Mutants of the first-error parity run (test/parity/mutate.sh) on which the
+# reference compiler is itself wrong, so the checker is not asked to copy it.
+# One tab-separated line per mutant:
+#
+#   seed  path  family  label  status  line  column  message  defect
+#
+# The mutant is the one the emitter makes for that seed, path, family and
+# label. The status, line, column and message are the compiler's behaviour on
+# it, as the run records them: the line and column of its first diagnostic,
+# the column zero-based as the compiler prints it, and the message with its
+# kind removed.
+# An entry the compiler no longer reproduces fails the run, so a fixed defect
+# cannot stay listed.
+0	sct-checker/success/bug_1097.jazz	delete	delete token 40 `sample`	2	0	0	Fatal error: exception Failure("hd")	#declassify() with no argument makes the compiler raise Failure("hd") instead of reporting a typing error
+0	success/x86-64/strings.jazz	duplicate	duplicate token 23 `;`	1	4	1	unexpected token	after a string literal that spans lines the compiler reports the right line but a wrong column

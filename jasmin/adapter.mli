@@ -79,6 +79,19 @@ type check_result = {
           order their first error was found. *)
 }
 
+val jasmin_path : unit -> (string * string) list option
+(** The named include paths of the [JASMINPATH] environment variable, read as
+    the compiler reads it: [NAME=PATH] entries separated by [:]. [Some []]
+    when it is not set, and [None] when an entry has no [=], a value the
+    compiler warns about and ignores. *)
+
+val with_jasmin_path : (string * string) list -> (string * string) list
+(** [with_jasmin_path idirs] is [idirs] followed by the bindings of
+    [JASMINPATH] it does not already hold, which is the order the compiler
+    binds them in. {!check} applies it itself; a caller that resolves a
+    [from NAME require] on its own, such as a context walk or the navigation
+    resolver, applies it to agree with the check. *)
+
 val check :
   ?resolve:(string -> string option) ->
   ?context:string list ->
@@ -89,7 +102,10 @@ val check :
   idirs:(string * string) list ->
   check_result
 (** [check ~resolve ~context arch call_conv ~file ~text ~idirs] parses and
-    types [text] as [file]. When [text] parses without an error, the compiler's
+    types [text] as [file]. The named include paths are [idirs] followed by
+    those of [JASMINPATH] ({!with_jasmin_path}), as the compiler binds them,
+    and an ill-formed value draws the compiler's own warning. When [text]
+    parses without an error, the compiler's
     own preprocessing (parameter substitution, then the final typing pass) runs
     over what typed, so a program the compiler rejects before its checkpoint
     is rejected here too. [resolve] answers with the bytes of a file a

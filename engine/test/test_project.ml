@@ -858,6 +858,58 @@ let test_a_key_with_no_value () =
   check_problem "line with no equals" text loaded ~line:2 ~fragment:"call_conv"
     ~message:"expected key = value"
 
+(* The compiler binds the named include paths of JASMINPATH after its own
+   [-I] options, so a document with no project file reads [from LIB require]
+   through it: the check, the context walk and the resolver all get the
+   binding. The variable is set in this process, so this test runs last and
+   leaves it set. *)
+let test_jasminpath_reaches_the_compiler_and_the_resolver () =
+  let source =
+    "from LIB require \"x.jinc\"\n\
+     fn f(reg u32 a) -> reg u32 {\n\
+    \  reg u32 b;\n\
+    \  b = inc(a);\n\
+    \  return b;\n\
+     }\n"
+  in
+  let root =
+    make
+      [
+        ("lib/x.jinc", Some "fn inc(reg u32 x) -> reg u32 {\n  return x;\n}\n");
+        ("src/b.jazz", Some source);
+      ]
+  in
+  let analyse () =
+    let file = path_of root "src/b.jazz" in
+    let uri = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path file) in
+    let engine = Jide_engine.Engine.create () in
+    Jide_engine.Engine.set_root engine (Some root);
+    Jide_engine.Engine.open_document engine ~uri ~version:1 ~text:source;
+    let diagnostics =
+      match Jide_engine.Engine.check engine ~uri with
+      | Some analysis -> analysis.Jide_engine.Engine.diagnostics
+      | None -> []
+    in
+    let reached =
+      match Jide_engine.Engine.snapshot engine ~uri with
+      | Some snapshot ->
+          List.exists
+            (fun (index : Jide_engine.Index.t) ->
+              Filename.basename index.Jide_engine.Index.file = "x.jinc")
+            (Jide_engine.Resolve.files snapshot.Jide_engine.Engine.resolve)
+      | None -> false
+    in
+    (diagnostics, reached)
+  in
+  let unbound, unreached = analyse () in
+  check "JASMINPATH: without it the name is unknown" (unbound <> []);
+  check "JASMINPATH: without it the resolver does not reach the file"
+    (not unreached);
+  Unix.putenv "JASMINPATH" ("LIB=" ^ path_of root "lib");
+  let bound, reached = analyse () in
+  check "JASMINPATH: the check reads the bound name" (bound = []);
+  check "JASMINPATH: the resolver reaches the file through it" reached
+
 let () =
   test_the_worked_example ();
   test_a_minimal_file ();
@@ -892,6 +944,7 @@ let () =
   test_the_settings_reach_the_checker ();
   test_the_include_paths_reach_the_compiler ();
   test_the_nearest_project_file_decides_for_a_document ();
+  test_jasminpath_reaches_the_compiler_and_the_resolver ();
   cleanup ();
   if !failures = 0 then print_endline "all project tests passed"
   else (

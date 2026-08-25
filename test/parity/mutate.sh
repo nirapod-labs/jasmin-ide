@@ -41,6 +41,22 @@
 #                be somewhere the two hosts share; it is removed on exit.
 #   PARITY_TSV   a file to write one tab-separated line per mutant to.
 #   PARITY_KEEP  a directory to copy the raw output of a differing mutant to.
+#   PARITY_DEFECTS  the list of known compiler defects. Default:
+#                `test/parity/compiler-defects.tsv` beside this script.
+#
+# A mutant on which the compiler itself is wrong is not a case the checker
+# should copy. The defects list names each such mutant exactly, by the seed,
+# its path, its family and its label, with the compiler's behaviour on it: its
+# exit status, the line and column of its first diagnostic as the TSV records
+# them, and the message. A listed mutant on which the compiler behaves exactly
+# so is excused, counted and printed with the defect. A listed mutant on which
+# it behaves otherwise is stale, and so is an entry for this run's seed whose
+# mutant a run over the whole corpus does not produce: the defect is fixed or
+# the list is wrong, and either way the run fails until the entry is changed.
+# A listed mutant on which the checker gives the compiler's own wrong answer
+# fails too: the defect has been copied. Every mutant not on the list is
+# judged as before, so the run exits 0 exactly when every other mutant agrees
+# and every entry still reproduces.
 #
 # The PARITY_TSV columns are, in order: the mutant's ordinal, its family, its
 # path below the corpus, the architecture, the checker's exit status and
@@ -55,7 +71,8 @@
 # neither tool rejected a single mutant has no positive control and is an
 # error too.
 #
-# Exit status: 0 when every mutant agrees, 1 when one does not, 2 when the
+# Exit status: 0 when every mutant agrees or is a listed compiler defect that
+# still reproduces, 1 when one does not or an entry is stale, 2 when the
 # script cannot run (bad arguments, no corpus, no checker, no compiler, no
 # emitter, no mutant, a mutant that is its own source, a mutant with no
 # result, or no mutant rejected at all) or is interrupted before it prints a
@@ -118,6 +135,8 @@ case $jobs in
 esac
 [ "$jobs" -ge 1 ] || die "PARITY_JOBS is below one: $jobs"
 
+defects=${PARITY_DEFECTS:-$here/compiler-defects.tsv}
+[ -f "$defects" ] || die "no list of known compiler defects at $defects (set PARITY_DEFECTS)"
 seed=${PARITY_SEED:-0}
 files=${PARITY_FILES:-0}
 case $files in
@@ -353,6 +372,50 @@ if [ -n "${PARITY_TSV:-}" ]; then
 	cp "$results" "$PARITY_TSV" || die "cannot write PARITY_TSV=$PARITY_TSV"
 fi
 
+# The known compiler defects, matched against this run's results. Each
+# listed mutant of this seed gets a tag: excused when the compiler behaves as
+# the entry says and the checker does not copy it, stale when the compiler
+# behaves otherwise, copied when the checker gives the compiler's answer. An
+# entry whose mutant this run did not produce is printed on its own line.
+awk -F'\t' -v seed="$seed" -v work="$work" '
+	FILENAME == ARGV[1] {
+		if ($0 ~ /^#/ || NF == 0) next
+		if (NF < 9) { printf "malformed\t%d\n", FNR; next }
+		if ($1 != seed) next
+		key = $2 SUBSEP $3 SUBSEP $4
+		entries[key] = 1
+		want_status[key] = $5
+		want_line[key] = $6
+		want_column[key] = $7
+		want_message[key] = $8
+		what[key] = $9
+		order[++count] = key
+		next
+	}
+	{
+		key = $3 SUBSEP $2 SUBSEP $15
+		if (!(key in entries)) next
+		seen[key] = 1
+		reproduced = ($10 == want_status[key] && $13 == want_message[key] && \
+			(want_status[key] > 1 || ($11 == want_line[key] && $12 == want_column[key])))
+		copied = ($5 == $10 && ($10 != 1 || ($6 == $11 && $7 == $12)))
+		tag = reproduced ? (copied ? "copied" : "excused") : "stale"
+		printf "%s\t%s\t%s\n", tag, what[key], \
+			"status " $10 " at " $11 ":" $12 ": " $13 > (work "/tag." $1)
+	}
+	END {
+		for (i = 1; i <= count; i++) {
+			key = order[i]
+			if (key in seen) continue
+			split(key, part, SUBSEP)
+			printf "absent\t%s\t%s\t%s\t%s\n", part[1], part[2], part[3], what[key]
+		}
+	}' "$defects" "$results" >"$work/defects.out" ||
+	die "cannot read the list of known compiler defects: $defects"
+if grep -q '^malformed' "$work/defects.out"; then
+	die "the list of known compiler defects has a malformed line: $defects line $(awk -F'\t' '$1 == "malformed" { print $2; exit }' "$work/defects.out")"
+fi
+
 # The comparison. Both accept is agreement; both reject is agreement only
 # when the line and the column are equal. A tool that exits above one did not
 # reach a verdict at all, so that mutant is a difference whatever it printed.
@@ -364,6 +427,12 @@ agreed=0
 faults=0
 contains=0
 preceded=0
+excused=0
+stale=0
+excused_list=$work/excused
+stale_list=$work/stale
+: >"$excused_list"
+: >"$stale_list"
 mismatches=$work/mismatches
 differing=$work/differing
 : >"$mismatches"
@@ -372,6 +441,27 @@ while IFS=$tab read -r index family relative arch checker_status c_line \
 	c_column c_kind c_message reference_status r_line r_column r_message \
 	found label; do
 	[ -n "$index" ] || continue
+	if [ -f "$work/tag.$index" ]; then
+		IFS=$tab read -r tag defect behaviour <"$work/tag.$index"
+		case $tag in
+		excused)
+			excused=$((excused + 1))
+			printf '%s mutant %s (%s, %s): %s; the compiler gives %s, as listed\n' \
+				"$relative" "$index" "$family" "$label" "$defect" "$behaviour" >>"$excused_list"
+			;;
+		copied)
+			stale=$((stale + 1))
+			printf '%s mutant %s (%s, %s): the checker gives the compiler'"'"'s defective answer (%s): %s\n' \
+				"$relative" "$index" "$family" "$label" "$behaviour" "$defect" >>"$stale_list"
+			;;
+		*)
+			stale=$((stale + 1))
+			printf '%s mutant %s (%s, %s): listed as "%s", but the compiler now gives %s\n' \
+				"$relative" "$index" "$family" "$label" "$defect" "$behaviour" >>"$stale_list"
+			;;
+		esac
+		continue
+	fi
 	expected=accept
 	observed=accept
 	[ "$reference_status" -ne 0 ] && expected="reject at $r_line:$r_column"
@@ -428,6 +518,20 @@ if [ -s "$differing" ] && [ -n "${PARITY_KEEP:-}" ]; then
 		done
 	done <"$differing"
 fi
+
+# An entry whose mutant this run did not make. Over the whole corpus it is
+# stale, because the run makes every mutant of its seed; over a subset the
+# mutant may simply not be in it.
+: >"$work/absent"
+while IFS=$tab read -r tag a_path a_family a_label a_what; do
+	[ "$tag" = absent ] || continue
+	if [ "$files" -eq 0 ]; then
+		stale=$((stale + 1))
+		say "stale defect entry: $a_path ($a_family, $a_label): no such mutant in a run over the whole corpus: $a_what" >>"$work/absent"
+	else
+		say "defect entry not in this run: $a_path ($a_family, $a_label)" >>"$work/absent"
+	fi
+done <"$work/defects.out"
 
 # The tables: per group, and per family of mutation.
 tables=$work/tables
@@ -500,10 +604,20 @@ say "cases compared: $total; both accept: $agreed; both reject: $((same + differ
 say "the same line and column: $same; a different location: $differ"
 say "accepted where the compiler rejects: $accepted; rejected where it accepts: $rejected"
 say "did not finish: $faults"
-say "agreement: $((agreed + same)) of $total; difference: $((differ + accepted + rejected + faults))"
+say "agreement: $((agreed + same)) of $total; difference: $((differ + accepted + rejected + faults)); known compiler defects: $excused excused, $stale stale"
 say "the compiler's location is somewhere in the checker's output: $contains of $((same + differ)) rejected mutants"
 say "of the $differ at a different location, the compiler's is in the checker's output too: $preceded"
 sed 's/^/'"$name"': /' "$tables"
+# The defects list against this run: what it excused, what is stale, and an
+# entry whose mutant the run did not make.
+while IFS= read -r line; do
+	say "known compiler defect: $line"
+done <"$excused_list"
+while IFS= read -r line; do
+	say "stale defect entry: $line"
+done <"$stale_list"
+cat "$work/absent"
+
 if [ -s "$mismatches" ]; then
 	while IFS=$tab read -r relative index family label expected observed \
 		checker_text compiler_text; do
@@ -526,6 +640,14 @@ fi
 if [ -s "$mismatches" ]; then
 	say "the mutants do not agree"
 	exit 1
+fi
+if [ "$stale" -gt 0 ]; then
+	say "$stale entry(ies) of the known compiler defects do not hold"
+	exit 1
+fi
+if [ "$excused" -gt 0 ]; then
+	say "every mutant agrees, except $excused on which the compiler itself is wrong, as listed"
+	exit 0
 fi
 say "every mutant agrees"
 exit 0

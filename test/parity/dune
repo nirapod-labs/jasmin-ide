@@ -94,3 +94,11 @@
 (cram
  (applies_to uses)
  (deps uses.sh %{exe:typed_uses.exe}))
+
+; The list of known compiler defects in mutate.sh, the script behind the
+; first-error parity run, with stand-ins for the checker and the compiler:
+; an excused defect, a stale entry, an unlisted crash and a copied defect.
+
+(cram
+ (applies_to mutate-defects)
+ (deps mutate.sh checker.awk oracle.awk %{exe:../mutation/mutants.exe}))

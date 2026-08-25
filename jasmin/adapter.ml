@@ -25,4 +25,6 @@ type check_result = Check.result = {
   required : required list;
 }
 
+let jasmin_path = Check.jasmin_path
+let with_jasmin_path = Check.with_jasmin_path
 let check ?resolve ?(context = []) = Arch.check ?resolve ~context
