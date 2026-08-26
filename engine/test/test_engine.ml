@@ -354,6 +354,10 @@ let test_at_the_size_limit_is_analysed () =
         | _ -> false)
   | None -> check "size: an analysis at the limit" false
 
+let test_the_adapter_admits_what_the_engine_admits () =
+  check "size: the adapter parses a document the engine admits"
+    (Jide_jasmin.Adapter.max_bytes >= Jide_engine.Engine.max_bytes)
+
 let test_exception_becomes_an_internal_diagnostic () =
   let raised = ref 0 in
   let check_raises ~arch:_ ~call_conv:_ ~file:_ ~text:_ ~idirs:_ =
@@ -567,6 +571,7 @@ let () =
   test_errors_come_before_warnings ();
   test_over_the_size_limit ();
   test_at_the_size_limit_is_analysed ();
+  test_the_adapter_admits_what_the_engine_admits ();
   test_exception_becomes_an_internal_diagnostic ();
   test_a_failing_check_does_not_break_the_store ();
   test_two_spellings_of_one_uri ();
