@@ -57,3 +57,86 @@ type node = Atom of string | List of node list
 
 exception Syntax of string
 
+let parse text =
+  let length = String.length text in
+  let position = ref 0 in
+  let fail message =
+    raise (Syntax (Printf.sprintf "%s (at offset %d)" message !position))
+  in
+  let is_delimiter = function
+    | ' ' | '\t' | '\n' | '\r' | '(' | ')' | ';' | '"' -> true
+    | _ -> false
+  in
+  let rec skip_blank () =
+    if !position < length then
+      match text.[!position] with
+      | ' ' | '\t' | '\n' | '\r' ->
+          incr position;
+          skip_blank ()
+      | ';' ->
+          while !position < length && text.[!position] <> '\n' do
+            incr position
+          done;
+          skip_blank ()
+      | _ -> ()
+  and sequence ~inside =
+    let items = ref [] in
+    let finished = ref false in
+    while not !finished do
+      skip_blank ();
+      if !position >= length then
+        if inside then fail "a list is not closed" else finished := true
+      else if text.[!position] = ')' then
+        if inside then (
+          incr position;
+          finished := true)
+        else fail "a list ends where none began"
+      else items := item () :: !items
+    done;
+    List.rev !items
+  and item () =
+    skip_blank ();
+    if !position >= length then fail "the file ends inside a form";
+    match text.[!position] with
+    | '(' ->
+        incr position;
+        List (sequence ~inside:true)
+    | '"' ->
+        incr position;
+        let buffer = Buffer.create 16 in
+        let rec more () =
+          if !position >= length then fail "a string is not closed";
+          match text.[!position] with
+          | '"' -> incr position
+          | '\\' when !position + 1 < length ->
+              Buffer.add_char buffer text.[!position + 1];
+              position := !position + 2;
+              more ()
+          | character ->
+              Buffer.add_char buffer character;
+              incr position;
+              more ()
+        in
+        more ();
+        Atom (Buffer.contents buffer)
+    | _ ->
+        let start = !position in
+        while !position < length && not (is_delimiter text.[!position]) do
+          incr position
+        done;
+        if !position = start then fail "an atom is empty";
+        Atom (String.sub text start (!position - start))
+  in
+  sequence ~inside:false
+
+let children = function Atom _ -> [] | List items -> items
+let atom = function Atom name -> Some name | List _ -> None
+let field = function List (Atom name :: _) -> Some name | _ -> None
+
+let rec each node ~f =
+  f node;
+  List.iter (fun child -> each child ~f) (children node)
+
+let atoms_of node = List.filter_map atom (children node)
+
+(* The names in the `libraries` field of every stanza of one dune file. *)
