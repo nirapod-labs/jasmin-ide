@@ -21,14 +21,7 @@ type kind =
   | Include
   | Unknown
 
-type role =
-  | Call
-  | Var
-  | Type
-  | Prim
-  | Annot
-  | Include_path
-  | Declared of kind
+type role = Call | Var | Type | Prim | Annot | Include_path | Declared of kind
 
 type occurrence = {
   span : Jide_lang.Span.t;
@@ -144,8 +137,11 @@ let last_segment (text : string) (span : Jide_lang.Span.t) (name : string) =
         start >= span.Jide_lang.Span.start_byte
         && preceding >= span.Jide_lang.Span.start_byte
         && preceding + 1 < String.length text
-        && text.[preceding] = ':' && text.[preceding + 1] = ':'
-      then Jide_lang.Span.make ~start_byte:start ~end_byte:span.Jide_lang.Span.end_byte
+        && text.[preceding] = ':'
+        && text.[preceding + 1] = ':'
+      then
+        Jide_lang.Span.make ~start_byte:start
+          ~end_byte:span.Jide_lang.Span.end_byte
       else span
 
 (* ------------------------------------------------------------------ *)
@@ -185,13 +181,7 @@ let occurrence_of_ident state ~(role : role) ~value
     (ident : string Location.located) =
   let span = span_of_ident ident in
   let name = Location.unloc ident in
-  {
-    span;
-    last = last_segment state.text span name;
-    name;
-    role;
-    value;
-  }
+  { span; last = last_segment state.text span name; name; role; value }
 
 let use_ident state role ident =
   add_occurrence state (occurrence_of_ident state ~role ~value:None ident)
@@ -217,7 +207,7 @@ let add_declaration state ~(kind : kind) ?detail
 let type_text state (ty : Syntax.ptype) =
   collapse (text_of_span state.text (span_of_location (Location.loc ty)))
 
-let stotype_text state (storage, ty : Syntax.pstotype) =
+let stotype_text state ((storage, ty) : Syntax.pstotype) =
   collapse (storage_text storage ^ " " ^ type_text state ty)
 
 (* The parts of a function's signature, rendered from its own type ranges.
@@ -226,8 +216,8 @@ let stotype_text state (storage, ty : Syntax.pstotype) =
    them. *)
 let signature_text state (pf : Syntax.pfundef) =
   let argument (_, (stotype, names)) =
-    stotype_text state stotype
-    ^ " " ^ String.concat ", " (List.map Location.unloc names)
+    stotype_text state stotype ^ " "
+    ^ String.concat ", " (List.map Location.unloc names)
   in
   let arguments = List.map argument pf.pdf_args in
   let returns =
@@ -238,8 +228,10 @@ let signature_text state (pf : Syntax.pfundef) =
         " -> " ^ String.concat ", " (List.map one returns)
   in
   collapse
-    (Printf.sprintf "fn %s(%s)%s" (Location.unloc pf.pdf_name)
-       (String.concat ", " arguments) returns)
+    (Printf.sprintf "fn %s(%s)%s"
+       (Location.unloc pf.pdf_name)
+       (String.concat ", " arguments)
+       returns)
 
 let rec expression state (pe : Syntax.pexpr) =
   match Location.unloc pe with
@@ -321,8 +313,8 @@ and lvalues state ((annotations_, values) : Syntax.plvals) =
   List.iter (lvalue state) values
 
 and instruction state
-    ((annotations_, (instr : Syntax.pinstr_r Location.located)) :
-      Syntax.pinstr) =
+    ((annotations_, (instr : Syntax.pinstr_r Location.located)) : Syntax.pinstr)
+    =
   annotations state annotations_;
   let item_span = span_of_location (Location.loc instr) in
   match Location.unloc instr with
@@ -350,15 +342,13 @@ and instruction state
       let detail = stotype_text state stotype in
       List.iter
         (fun name ->
-          ignore
-            (add_declaration state ~kind:Variable ~detail name ~item_span))
+          ignore (add_declaration state ~kind:Variable ~detail name ~item_span))
         names
   | PIdeclinit (stotype, inits) ->
       ptype state (snd stotype);
       let detail = stotype_text state stotype in
       List.iter
-        (fun (init : (string Location.located * Syntax.pexpr) Location.located)
-           ->
+        (fun (init : (string Location.located * Syntax.pexpr) Location.located) ->
           let name, value = Location.unloc init in
           ignore (add_declaration state ~kind:Variable ~detail name ~item_span);
           expression state value)
@@ -394,9 +384,7 @@ let rec item state (located : Syntax.pitem Location.located) : item =
       (match global.pgd_val with
       | Syntax.GEexpr value -> expression state value
       | GEarray elements -> List.iter (expression state) elements);
-      let detail =
-        collapse ("global " ^ type_text state global.pgd_type)
-      in
+      let detail = collapse ("global " ^ type_text state global.pgd_type) in
       let declaration =
         add_declaration state ~kind:Global ~detail global.pgd_name ~item_span
       in
@@ -445,8 +433,7 @@ let rec item state (located : Syntax.pitem Location.located) : item =
               {
                 from =
                   Option.map
-                    (fun ident ->
-                      (Location.unloc ident, span_of_ident ident))
+                    (fun ident -> (Location.unloc ident, span_of_ident ident))
                     from;
                 written;
                 written_span;
@@ -472,9 +459,7 @@ let rec item state (located : Syntax.pitem Location.located) : item =
         item_children = children;
       }
   | PNamespace (name, inner) ->
-      let declaration =
-        add_declaration state ~kind:Namespace name ~item_span
-      in
+      let declaration = add_declaration state ~kind:Namespace name ~item_span in
       {
         item_kind = Namespace;
         item_name = Some declaration.name;
@@ -532,9 +517,7 @@ let role_rank = function
   | Include_path -> 6
 
 let compare_occurrence left right =
-  match
-    Jide_lang.Span.compare left.span right.span
-  with
+  match Jide_lang.Span.compare left.span right.span with
   | 0 -> (
       match String.compare left.name right.name with
       | 0 -> Stdlib.compare (role_rank left.role) (role_rank right.role)
@@ -565,68 +548,28 @@ let compare_require left right =
 
 (* ------------------------------------------------------------------ *)
 
-let with_bom (text : string) =
+(* A document may begin with a UTF-8 byte-order mark, which the lexer refuses
+   as a character and which is not part of the program. The parser is given
+   the same text with the three mark bytes replaced by three spaces, so it
+   sees the same tokens at the same byte offsets: an offset the parser
+   reports is an offset in [text], and the tree it returns, the ranges the
+   walk reads from that tree and the parser's diagnostics all index the
+   caller's text with nothing to shift. Three bytes for three bytes is what
+   keeps the two strings the same length. *)
+let parser_input (text : string) =
   let length = String.length text in
   if
     length >= 3
     && Char.code text.[0] = 0xEF
     && Char.code text.[1] = 0xBB
     && Char.code text.[2] = 0xBF
-  then (3, String.sub text 3 (length - 3))
-  else (0, text)
-
-let shift_span (span : Jide_lang.Span.t) delta =
-  if delta = 0 then span else Jide_lang.Span.shift span delta
-
-let shift_diagnostic (diagnostic : Jide_lang.Diagnostic.t) delta =
-  if delta = 0 then diagnostic
-  else
-    {
-      diagnostic with
-      Jide_lang.Diagnostic.span =
-        shift_span diagnostic.Jide_lang.Diagnostic.span delta;
-    }
-
-let shift_occurrence (occurrence : occurrence) delta =
-  {
-    occurrence with
-    span = shift_span occurrence.span delta;
-    last = shift_span occurrence.last delta;
-  }
-
-let shift_declaration (declaration : declaration) delta =
-  {
-    declaration with
-    name_span = shift_span declaration.name_span delta;
-    item_span = shift_span declaration.item_span delta;
-  }
-
-let rec shift_item (item : item) delta =
-  {
-    item with
-    item_span = shift_span item.item_span delta;
-    item_name_span = Option.map (fun span -> shift_span span delta) item.item_name_span;
-    item_children = List.map (fun child -> shift_item child delta) item.item_children;
-  }
-
-let shift_require (require : require) delta =
-  {
-    require with
-    written_span = shift_span require.written_span delta;
-    item_span = shift_span require.item_span delta;
-    from =
-      Option.map (fun (name, span) -> (name, shift_span span delta)) require.from;
-  }
+  then "   " ^ String.sub text 3 (length - 3)
+  else text
 
 let of_text ~(file : string) (text : string) : t * Jide_lang.Diagnostic.t list =
-  let bom, body = with_bom text in
-  let parsed = Jide_jasmin.Adapter.parse ~name:file body in
+  let parsed = Jide_jasmin.Adapter.parse ~name:file (parser_input text) in
   let items = parsed.Jide_jasmin.Parse.items in
-  let diagnostics =
-    List.map
-      (fun diagnostic -> shift_diagnostic diagnostic bom)
-      parsed.Jide_jasmin.Parse.diagnostics
-  in
+  let diagnostics = parsed.Jide_jasmin.Parse.diagnostics in
   let state =
     {
       file;
@@ -637,29 +580,10 @@ let of_text ~(file : string) (text : string) : t * Jide_lang.Diagnostic.t list =
     }
   in
   let outline = List.map (item state) items in
-  let occurrences =
-    unique compare_occurrence
-      (List.map (fun occurrence -> shift_occurrence occurrence bom)
-         !(state.occurrences))
-  in
-  let declarations =
-    unique compare_declaration
-      (List.map (fun declaration -> shift_declaration declaration bom)
-         !(state.declarations))
-  in
-  let requires =
-    List.sort compare_require
-      (List.map (fun require -> shift_require require bom) !(state.requires))
-  in
-  ( {
-      file;
-      text;
-      items;
-      outline;
-      declarations;
-      occurrences;
-      requires;
-    },
+  let occurrences = unique compare_occurrence !(state.occurrences) in
+  let declarations = unique compare_declaration !(state.declarations) in
+  let requires = List.sort compare_require !(state.requires) in
+  ( { file; text; items; outline; declarations; occurrences; requires },
     diagnostics )
 
 let equal_declaration (left : declaration) (right : declaration) =
