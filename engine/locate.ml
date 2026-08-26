@@ -20,8 +20,18 @@
      controller;
    - take the outline from [Index.outline], whose items already nest.
 
-   None of that is written yet: the file is the seam, so the lane that fills
-   it in touches nothing outside [engine/locate.ml]. *)
+   None of that is written yet: the file is the seam between the controller
+   and the engine, and it is not the only one that moves. [Engine.analysis]
+   carries the text, its version, its diagnostics and its context, and no
+   [Index.t] and no [Resolve.t], so these four have nothing to answer from
+   today even when the document is open. The index an adapter needs is not
+   built at all yet, and the seam that has to widen is [Engine]: an analysis
+   that keeps what was built from it (the resolver's per-file index, and the
+   text that index describes), so that an answer can be read back without
+   re-resolving the file. The four functions below keep the signature they
+   have; what changes is what the engine holds for them to read. The
+   controller and the routing tests do not change.
+*)
 
 type range = { start_ : Jide_lang.Position.t; end_ : Jide_lang.Position.t }
 type location = { uri : string; range : range }
