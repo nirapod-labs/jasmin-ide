@@ -184,3 +184,123 @@ let scratch_directory () =
 (* ------------------------------------------------------------------ *)
 (* Words *)
 
+let is_word_char = function
+  | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true
+  | _ -> false
+
+let is_word_start = function
+  | 'a' .. 'z' | 'A' .. 'Z' | '_' -> true
+  | _ -> false
+
+(* Every identifier-shaped word of a text, comments and strings included:
+   a fresh name must not occur anywhere, not only where the index sees it. *)
+let words text =
+  let length = String.length text in
+  let found = ref [] in
+  let index = ref 0 in
+  while !index < length do
+    if
+      is_word_start text.[!index]
+      && (!index = 0 || not (is_word_char text.[!index - 1]))
+    then (
+      let stop = ref !index in
+      while !stop < length && is_word_char text.[!stop] do
+        incr stop
+      done;
+      found := String.sub text !index (!stop - !index) :: !found;
+      index := !stop)
+    else incr index
+  done;
+  !found
+
+(* [replace_word ~word ~by text] writes [by] for every whole-word occurrence
+   of [word] in [text]. *)
+let replace_word ~word ~by text =
+  let length = String.length text in
+  let word_length = String.length word in
+  if word_length = 0 then text
+  else
+    let buffer = Buffer.create (length + 16) in
+    let index = ref 0 in
+    while !index < length do
+      if
+        !index + word_length <= length
+        && String.sub text !index word_length = word
+        && (!index = 0 || not (is_word_char text.[!index - 1]))
+        && (!index + word_length = length
+           || not (is_word_char text.[!index + word_length]))
+      then (
+        Buffer.add_string buffer by;
+        index := !index + word_length)
+      else (
+        Buffer.add_char buffer text.[!index];
+        incr index)
+    done;
+    Buffer.contents buffer
+
+(* The columns of a location, [(12-17)] or [(4)], are left out of a verdict:
+   a rename to a name of another length moves the columns on the lines it
+   touches, and never a line. Everything else the compiler prints stays. *)
+let strip_columns text =
+  let length = String.length text in
+  let buffer = Buffer.create length in
+  let rec digits index =
+    if index < length && text.[index] >= '0' && text.[index] <= '9' then
+      digits (index + 1)
+    else index
+  in
+  let rec loop index =
+    if index >= length then ()
+    else if text.[index] = '(' then
+      let first = digits (index + 1) in
+      let after =
+        if first > index + 1 then
+          if first < length && text.[first] = '-' then
+            let second = digits (first + 1) in
+            if second > first + 1 then second else first
+          else first
+        else index + 1
+      in
+      if first > index + 1 && after < length && text.[after] = ')' then
+        loop (after + 1)
+      else (
+        Buffer.add_char buffer '(';
+        loop (index + 1))
+    else (
+      Buffer.add_char buffer text.[index];
+      loop (index + 1))
+  in
+  loop 0;
+  Buffer.contents buffer
+
+(* ------------------------------------------------------------------ *)
+(* The oracle *)
+
+type oracle = Binary of { jasminc : string; full : bool } | Library
+
+type verdict = {
+  status : string;  (** how the compiler ended: [exit 0], [exit 1], [timeout] *)
+  output : string;  (** everything it printed, and the assembly after it *)
+}
+
+let arch_names =
+  [
+    ("x86-64", "x86-64");
+    ("arm-m4", "arm-m4");
+    ("armv8a", "armv8a");
+    ("risc-v", "riscv");
+    ("riscv", "riscv");
+  ]
+
+(* The architecture an entry is compiled for: the deepest directory of its path
+   that names one, and the compiler's default (x86-64) otherwise, as the
+   release's own test layout reads it. *)
+let arch_of_path (path : string) =
+  List.fold_left
+    (fun found part ->
+      match List.assoc_opt part arch_names with
+      | Some arch -> arch
+      | None -> found)
+    "x86-64"
+    (String.split_on_char '/' path)
+
