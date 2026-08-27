@@ -304,3 +304,183 @@ let arch_of_path (path : string) =
     "x86-64"
     (String.split_on_char '/' path)
 
+type job = { entry : string; arch : string }
+
+(* The compiler on one entry, in a directory of its own: through typing, which
+   is where every name is resolved, or with [full] through every pass. *)
+let start_binary ~jasminc ~full ~idirs ~work (job : job) =
+  let out = Filename.concat work "out.s" in
+  let log = Filename.concat work "log" in
+  let args =
+    [ jasminc; "-arch"; job.arch ]
+    @ List.concat_map (fun (name, path) -> [ "-I"; name ^ "=" ^ path ]) idirs
+    @ [ "-ptyping" ]
+    @ (if full then [ "-o"; out ] else [ "-until_typing" ])
+    @ [ job.entry ]
+  in
+  let fd =
+    Unix.openfile log [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o644
+  in
+  let null = Unix.openfile "/dev/null" [ Unix.O_RDONLY ] 0 in
+  let pid = Unix.create_process jasminc (Array.of_list args) null fd fd in
+  Unix.close fd;
+  Unix.close null;
+  pid
+
+(* The verdict is what the compiler prints: the typed program, then every
+   error and warning, and how it ended. The typed program marks every global
+   read as one, so a local that captured a global's use prints another
+   program, and a name bound to another declaration is another error or
+   warning. The assembly is not part of it: the register allocator's choices
+   follow the variables' names (probed with jasminc 2026.09.0: renaming one
+   local of [exec/poly1305.jazz] moves a load from one register to another),
+   so the same program under another name is not the same assembly. For the
+   same reason the passes after typing are run only with [--full]: what they
+   add is the compiler's own choices, and a rename only changes names, which
+   typing has resolved. *)
+let finish_binary ~work status =
+  let log = Option.value ~default:"" (read (Filename.concat work "log")) in
+  (try Sys.remove (Filename.concat work "out.s") with Sys_error _ -> ());
+  { status; output = log }
+
+(* The compiler on every job, [jobs] at a time, each with a wall clock. *)
+let run_binary ~jasminc ~full ~idirs ~jobs ~timeout ~scratch (work : job list) =
+  let results = Hashtbl.create 16 in
+  let pending =
+    Queue.of_seq (List.to_seq (List.mapi (fun i job -> (i, job)) work))
+  in
+  let running = ref [] in
+  let start () =
+    let i, job = Queue.pop pending in
+    let dir = Filename.concat scratch (Printf.sprintf "job-%d" i) in
+    mkdir_p dir;
+    let pid = start_binary ~jasminc ~full ~idirs ~work:dir job in
+    running := (pid, i, job, dir, Unix.gettimeofday ()) :: !running
+  in
+  while not (Queue.is_empty pending && !running = []) do
+    while (not (Queue.is_empty pending)) && List.length !running < jobs do
+      start ()
+    done;
+    let still = ref [] in
+    List.iter
+      (fun ((pid, i, job, dir, started) as one) ->
+        match Unix.waitpid [ Unix.WNOHANG ] pid with
+        | 0, _ ->
+            if Unix.gettimeofday () -. started > timeout then (
+              (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
+              ignore (Unix.waitpid [] pid);
+              Hashtbl.replace results i
+                (job.entry, { status = "timeout"; output = "" }))
+            else still := one :: !still
+        | _, status ->
+            let status =
+              match status with
+              | Unix.WEXITED code -> Printf.sprintf "exit %d" code
+              | Unix.WSIGNALED signal -> Printf.sprintf "signal %d" signal
+              | Unix.WSTOPPED signal -> Printf.sprintf "stopped %d" signal
+            in
+            Hashtbl.replace results i (job.entry, finish_binary ~work:dir status))
+      !running;
+    running := !still;
+    if !running <> [] then Unix.sleepf 0.005
+  done;
+  List.mapi (fun i _ -> Hashtbl.find results i) work
+
+(* The linked library's check of one entry: the diagnostics with their file
+   and line, then the warnings, one per line and sorted, so the order the
+   library collects them in is not part of the verdict. *)
+let run_library ~idirs (job : job) =
+  match read job.entry with
+  | None -> (job.entry, { status = "unreadable"; output = "" })
+  | Some text ->
+      let arch =
+        Option.get
+          (Jide_jasmin.Adapter.arch_of_string
+             (if job.arch = "riscv" then "riscv" else job.arch))
+      in
+      let call_conv =
+        Option.get (Jide_jasmin.Adapter.call_conv_of_string "linux")
+      in
+      let result =
+        Jide_jasmin.Adapter.check arch call_conv ~file:job.entry ~text ~idirs
+      in
+      let lines = Jide_lang.Line_index.create text in
+      let line_of byte =
+        (Jide_lang.Line_index.position_of_byte lines byte)
+          .Jide_lang.Position.line
+      in
+      let errors =
+        List.map
+          (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+            Printf.sprintf "%s line %d: %s"
+              (match diagnostic.Jide_lang.Diagnostic.severity with
+              | Jide_lang.Diagnostic.Error -> "error"
+              | Jide_lang.Diagnostic.Warning -> "warning"
+              | Jide_lang.Diagnostic.Information -> "information"
+              | Jide_lang.Diagnostic.Hint -> "hint")
+              (line_of diagnostic.Jide_lang.Diagnostic.span.Span.start_byte)
+              diagnostic.Jide_lang.Diagnostic.message)
+          result.Jide_jasmin.Adapter.diagnostics
+      in
+      let required =
+        List.concat_map
+          (fun (required : Jide_jasmin.Adapter.required) ->
+            List.map
+              (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+                Printf.sprintf "in %s: %s" required.Jide_jasmin.Adapter.file
+                  diagnostic.Jide_lang.Diagnostic.message)
+              required.Jide_jasmin.Adapter.diagnostics)
+          result.Jide_jasmin.Adapter.required
+      in
+      let warnings =
+        List.map
+          (fun (warning : Jide_jasmin.Warnings.t) ->
+            Printf.sprintf "warning in %s: %s" warning.Jide_jasmin.Warnings.file
+              warning.Jide_jasmin.Warnings.message)
+          result.Jide_jasmin.Adapter.warnings
+      in
+      let status = if errors = [] && required = [] then "ok" else "errors" in
+      ( job.entry,
+        {
+          status;
+          output =
+            String.concat "\n"
+              (List.sort compare (errors @ required @ warnings));
+        } )
+
+let verdicts ~oracle ~idirs ~jobs ~timeout ~scratch work =
+  match oracle with
+  | Binary { jasminc; full } ->
+      run_binary ~jasminc ~full ~idirs ~jobs ~timeout ~scratch work
+  | Library -> List.map (run_library ~idirs) work
+
+(* How two names are written when two verdicts are compared. A fresh name is
+   written back as the old one, which is exact because it occurs nowhere
+   else; a taken name and the old one are both written as one placeholder,
+   because the compiler's own text mentions both. *)
+type naming =
+  | Fresh of { old_name : string; new_name : string }
+  | Taken of { old_name : string; new_name : string }
+
+(* A name is written as itself, and as the assembly writes a symbol on a
+   system that prefixes one with [_]. *)
+let replace_name ~word ~by text =
+  replace_word ~word:("_" ^ word) ~by:("_" ^ by) (replace_word ~word ~by text)
+
+(* The typed program is printed with line breaks where its lines grow too
+   long, and a longer name moves them, so runs of white space are one space in
+   a verdict. No token changes. *)
+let collapse_blanks text =
+  let buffer = Buffer.create (String.length text) in
+  let blank = ref false in
+  String.iter
+    (fun c ->
+      match c with
+      | ' ' | '\t' | '\n' | '\r' -> blank := true
+      | c ->
+          if !blank && Buffer.length buffer > 0 then Buffer.add_char buffer ' ';
+          blank := false;
+          Buffer.add_char buffer c)
+    text;
+  Buffer.contents buffer
+
