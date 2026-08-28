@@ -484,3 +484,237 @@ let collapse_blanks text =
     text;
   Buffer.contents buffer
 
+let normalise_before naming text =
+  match naming with
+  | Fresh _ -> strip_columns text
+  | Taken { old_name; new_name } ->
+      strip_columns
+        (replace_name ~word:new_name ~by:"\001"
+           (replace_name ~word:old_name ~by:"\001" text))
+
+(* A fresh name is a part of no word of the corpus, so every place it occurs
+   in the compiler's text, inside a longer symbol too ([LDouble__map_rn0$1]),
+   is a place the rename wrote it. *)
+let replace_all ~part ~by text =
+  let length = String.length text and lp = String.length part in
+  let buffer = Buffer.create length in
+  let rec loop index =
+    if index >= length then ()
+    else if index + lp <= length && String.sub text index lp = part then (
+      Buffer.add_string buffer by;
+      loop (index + lp))
+    else (
+      Buffer.add_char buffer text.[index];
+      loop (index + 1))
+  in
+  if lp > 0 then loop 0 else Buffer.add_string buffer text;
+  Buffer.contents buffer
+
+let normalise_after naming text =
+  match naming with
+  | Fresh { old_name; new_name } ->
+      strip_columns (replace_all ~part:new_name ~by:old_name text)
+  | Taken _ -> normalise_before naming text
+
+(* ------------------------------------------------------------------ *)
+(* The workspace: the copy, the engine over it, the entries' resolutions *)
+
+type workspace = {
+  root : string;  (** the copy, which a printed path is relative to *)
+  files : string list;  (** absolute paths of every source in the copy *)
+  originals : (string, string) Hashtbl.t;  (** the bytes each file began with *)
+  entries : string list;
+  idirs : (string * string) list;  (** bound to paths in the copy *)
+  engine : Engine.t;
+  readers : (string, string list) Hashtbl.t;
+      (** for each file, the entries whose resolution reads it *)
+  multi : (string, bool) Hashtbl.t;
+      (** whether some entry reads the file together with another file *)
+  taken_words : (string, unit) Hashtbl.t;  (** every word of the corpus *)
+  unique_words : string list;  (** the same words, once each *)
+  before : (string, verdict) Hashtbl.t;  (** each entry's verdict, as copied *)
+  scratch : string;
+}
+
+let uri_of path = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path path)
+
+let open_workspace ~corpus ~idirs =
+  let scratch = scratch_directory () in
+  let root = Filename.concat scratch "corpus" in
+  let relative = sources corpus in
+  let originals = Hashtbl.create 64 in
+  let files =
+    List.map
+      (fun rel ->
+        let source = Filename.concat corpus rel in
+        let target = Filename.concat root rel in
+        mkdir_p (Filename.dirname target);
+        let text = Option.value ~default:"" (read source) in
+        write target text;
+        let path = Index.normalise target in
+        Hashtbl.replace originals path text;
+        path)
+      relative
+  in
+  let idirs =
+    List.map
+      (fun (name, path) ->
+        ( name,
+          Index.normalise
+            (if Filename.is_relative path then Filename.concat root path
+             else path) ))
+      idirs
+  in
+  let entries =
+    List.filter (fun path -> Filename.check_suffix path ".jazz") files
+  in
+  let engine = Engine.create () in
+  Engine.set_settings engine { Engine.default_settings with Engine.idirs };
+  Engine.set_root engine (Some root);
+  let readers = Hashtbl.create 64 in
+  let multi = Hashtbl.create 64 in
+  let cache = Resolve.cache () in
+  List.iter
+    (fun entry ->
+      match Resolve.of_file ~cache ~idirs ~read entry with
+      | None -> ()
+      | Some resolution ->
+          let read_files =
+            List.map
+              (fun (index : Index.t) -> Index.normalise index.Index.file)
+              (Resolve.files resolution)
+          in
+          List.iter
+            (fun path ->
+              let earlier =
+                Option.value ~default:[] (Hashtbl.find_opt readers path)
+              in
+              Hashtbl.replace readers path (earlier @ [ entry ]);
+              if List.length read_files > 1 then Hashtbl.replace multi path true)
+            read_files)
+    entries;
+  let taken_words = Hashtbl.create 4096 in
+  Hashtbl.iter
+    (fun _ text ->
+      List.iter (fun word -> Hashtbl.replace taken_words word ()) (words text))
+    originals;
+  {
+    root = Index.normalise root;
+    files;
+    originals;
+    entries;
+    idirs;
+    engine;
+    readers;
+    multi;
+    taken_words;
+    unique_words = Hashtbl.fold (fun word () acc -> word :: acc) taken_words [];
+    before = Hashtbl.create 64;
+    scratch;
+  }
+
+let close_workspace workspace = remove_tree workspace.scratch
+
+(* A path of the copy as the corpus names it, and every such path inside a
+   message too, so a printed line names the corpus's own file. *)
+let shown workspace text =
+  let prefix = workspace.root ^ "/" in
+  let lp = String.length prefix in
+  let buffer = Buffer.create (String.length text) in
+  let rec loop index =
+    if index >= String.length text then ()
+    else if
+      index + lp <= String.length text && String.sub text index lp = prefix
+    then loop (index + lp)
+    else (
+      Buffer.add_char buffer text.[index];
+      loop (index + 1))
+  in
+  loop 0;
+  Buffer.contents buffer
+
+(* ------------------------------------------------------------------ *)
+(* One rename through the server's own answer *)
+
+let ask_rename workspace ~path ~byte ~new_name =
+  let uri = uri_of path in
+  let text = Option.value ~default:"" (read path) in
+  Engine.open_document workspace.engine ~uri ~version:1 ~text;
+  ignore (Engine.check workspace.engine ~uri);
+  let answer =
+    match Rename_features.prepare workspace.engine ~uri ~byte with
+    | None -> `Refused "prepareRename gave no answer"
+    | Some (Error reason) -> `Refused reason
+    | Some (Ok span) -> (
+        match
+          Rename_features.rename workspace.engine ~uri
+            ~byte:span.Span.start_byte ~new_name
+        with
+        | None -> `Refused "rename gave no answer"
+        | Some (Error reason) -> `Refused reason
+        | Some (Ok edits) ->
+            `Edits
+              ( span.Span.start_byte,
+                List.map
+                  (fun (edit : Features.edit) ->
+                    let file = edit.Features.file.Features.uri in
+                    ( Index.normalise
+                        (Option.value ~default:file
+                           (Jide_lang.Uri.path (Jide_lang.Uri.of_string file))),
+                      edit.Features.edits ))
+                  edits ))
+  in
+  Engine.close_document workspace.engine ~uri;
+  answer
+
+let apply_text text (edits : Jide_engine.Types.text_edit list) =
+  let sorted =
+    List.sort
+      (fun (a : Jide_engine.Types.text_edit) (b : Jide_engine.Types.text_edit) ->
+        compare b.Jide_engine.Types.span.Span.start_byte
+          a.Jide_engine.Types.span.Span.start_byte)
+      edits
+  in
+  List.fold_left
+    (fun text (edit : Jide_engine.Types.text_edit) ->
+      let start = edit.Jide_engine.Types.span.Span.start_byte in
+      let stop = edit.Jide_engine.Types.span.Span.end_byte in
+      String.sub text 0 start ^ edit.Jide_engine.Types.new_text
+      ^ String.sub text stop (String.length text - stop))
+    text sorted
+
+(* Where [byte] of a file lands once the file's edits are made. *)
+let moved (edits : Jide_engine.Types.text_edit list) byte =
+  List.fold_left
+    (fun after (edit : Jide_engine.Types.text_edit) ->
+      let span = edit.Jide_engine.Types.span in
+      if span.Span.end_byte <= byte then
+        after
+        + String.length edit.Jide_engine.Types.new_text
+        - (span.Span.end_byte - span.Span.start_byte)
+      else after)
+    byte edits
+
+(* ------------------------------------------------------------------ *)
+(* Sampling *)
+
+type symbol = {
+  path : string;
+  byte : int;
+  name : string;
+  kind : Index.kind;
+  multi_file : bool;
+  others : string list;  (** the names other declarations of the file have *)
+}
+
+let kind_name = function
+  | Index.Function -> "function"
+  | Index.Parameter -> "parameter"
+  | Index.Variable -> "variable"
+  | Index.Global -> "global"
+  | Index.Namespace -> "namespace"
+  | Index.Type_alias -> "type alias"
+  | _ -> "other"
+
+type population = { symbols : symbol list; namespaces : int; unread : int }
+
