@@ -718,3 +718,72 @@ let kind_name = function
 
 type population = { symbols : symbol list; namespaces : int; unread : int }
 
+let population workspace =
+  let namespaces = ref 0 in
+  let unread = ref 0 in
+  let symbols =
+    List.concat_map
+      (fun path ->
+        let text = Hashtbl.find workspace.originals path in
+        let index, _ = Index.of_text ~file:path text in
+        let names =
+          List.sort_uniq compare
+            (List.map
+               (fun (d : Index.declaration) -> d.Index.name)
+               index.Index.declarations)
+        in
+        List.filter_map
+          (fun (declaration : Index.declaration) ->
+            if declaration.Index.kind = Index.Namespace then (
+              incr namespaces;
+              None)
+            else if not (Hashtbl.mem workspace.readers path) then (
+              incr unread;
+              None)
+            else
+              let byte =
+                match
+                  Index.find_occurrence index
+                    ~byte:declaration.Index.name_span.Span.start_byte
+                with
+                | Some occurrence -> occurrence.Index.last.Span.start_byte
+                | None -> declaration.Index.name_span.Span.start_byte
+              in
+              Some
+                {
+                  path;
+                  byte;
+                  name = declaration.Index.name;
+                  kind = declaration.Index.kind;
+                  multi_file = Hashtbl.mem workspace.multi path;
+                  others =
+                    List.filter
+                      (fun name ->
+                        name <> declaration.Index.name
+                        && not (String.contains name ':'))
+                      names;
+                })
+          index.Index.declarations)
+      workspace.files
+  in
+  { symbols; namespaces = !namespaces; unread = !unread }
+
+(* [n] of [items], drawn without replacement by the seeded generator, in the
+   order they were drawn. *)
+let draw state n items =
+  let array = Array.of_list items in
+  let length = Array.length array in
+  let n = min n length in
+  for i = 0 to n - 1 do
+    let j = i + Random.State.int state (length - i) in
+    let swap = array.(i) in
+    array.(i) <- array.(j);
+    array.(j) <- swap
+  done;
+  Array.to_list (Array.sub array 0 n)
+
+let contains ~part word =
+  let lw = String.length word and lp = String.length part in
+  let rec at i = i + lp <= lw && (String.sub word i lp = part || at (i + 1)) in
+  at 0
+
