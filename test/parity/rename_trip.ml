@@ -1052,3 +1052,245 @@ type summary = {
   differences : string list;
 }
 
+let run ~corpus ~oracle ~idirs ~seed ~sample ~jobs ~timeout ~plant ~quiet =
+  let workspace = open_workspace ~corpus ~idirs in
+  Fun.protect
+    ~finally:(fun () -> close_workspace workspace)
+    (fun () ->
+      let population = population workspace in
+      let multi_population =
+        List.filter (fun s -> s.multi_file) population.symbols
+      in
+      let single_population =
+        List.filter (fun s -> not s.multi_file) population.symbols
+      in
+      let state = Random.State.make [| seed |] in
+      let multi = draw state sample multi_population in
+      let single = draw state sample single_population in
+      if not quiet then (
+        Printf.printf "rename: %d files, %d entries\n"
+          (List.length workspace.files)
+          (List.length workspace.entries);
+        Printf.printf
+          "rename: seed %d, sample %d from each population: %d of %d \
+           multi-file declarations, %d of %d single-file declarations\n"
+          seed sample (List.length multi)
+          (List.length multi_population)
+          (List.length single)
+          (List.length single_population);
+        Printf.printf
+          "rename: not sampled: namespace names %d, declarations no entry \
+           reads %d\n\
+           %!"
+          population.namespaces population.unread);
+      let fresh = tally () and taken = tally () and multi_tally = tally () in
+      let differences = ref [] in
+      let record t symbol ~naming (outcome, planted) =
+        t.sampled <- t.sampled + 1;
+        if planted then t.planted <- t.planted + 1;
+        let new_name =
+          match naming with
+          | Fresh { new_name; _ } | Taken { new_name; _ } -> new_name
+        in
+        match outcome with
+        | Exact -> t.exact <- t.exact + 1
+        | Refused_by (kind, reason) ->
+            t.refused <- bump t.refused kind;
+            if not quiet then
+              print_endline
+                (shown workspace
+                   (Printf.sprintf "REFUSED %s %s at byte %d (%s) to %s: %s"
+                      symbol.path symbol.name symbol.byte
+                      (kind_name symbol.kind) new_name reason))
+        | Excluded reason ->
+            t.sampled <- t.sampled - 1;
+            t.excluded <- bump t.excluded reason
+        | Differs detail ->
+            t.differ <- t.differ + 1;
+            if planted then t.caught <- t.caught + 1;
+            let line =
+              shown workspace
+                (Printf.sprintf "DIFF %s %s at byte %d (%s) to %s: %s"
+                   symbol.path symbol.name symbol.byte (kind_name symbol.kind)
+                   new_name detail)
+            in
+            differences := line :: !differences;
+            if not quiet then print_endline line
+      in
+      List.iter
+        (fun symbol ->
+          let naming =
+            Fresh
+              {
+                old_name = symbol.name;
+                new_name = fresh_name workspace ~old_name:symbol.name;
+              }
+          in
+          let result =
+            trip workspace ~oracle ~jobs ~timeout ~plant symbol ~naming
+          in
+          record fresh symbol ~naming result;
+          if symbol.multi_file then record multi_tally symbol ~naming result;
+          match symbol.others with
+          | [] ->
+              taken.excluded <- bump taken.excluded "no other name in the file"
+          | others ->
+              let other =
+                List.nth others (Random.State.int state (List.length others))
+              in
+              let naming = Taken { old_name = symbol.name; new_name = other } in
+              record taken symbol ~naming
+                (trip workspace ~oracle ~jobs ~timeout ~plant symbol ~naming))
+        (multi @ single);
+      if not quiet then (
+        print_tally "fresh" fresh;
+        print_tally "fresh, multi-file" multi_tally;
+        print_tally "taken" taken;
+        if plant then
+          Printf.printf "negative control: planted %d, caught %d, missed %d\n"
+            (fresh.planted + taken.planted)
+            (fresh.caught + taken.caught)
+            (fresh.planted + taken.planted - fresh.caught - taken.caught));
+      { fresh; taken; multi = multi_tally; differences = List.rev !differences })
+
+(* ------------------------------------------------------------------ *)
+(* The self-test *)
+
+let selftest_project =
+  [
+    ( "lib.jinc",
+      "param int N = 4;\n\
+       u32 seed = 7;\n\
+       fn twice(reg u32 a) -> reg u32 {\n\
+      \  reg u32 r;\n\
+      \  r = a;\n\
+      \  r += a;\n\
+      \  return r;\n\
+       }\n" );
+    ( "sum.jinc",
+      "fn sum(reg u32 x) -> reg u32 {\n\
+      \  reg u32 s;\n\
+      \  s = x;\n\
+      \  s += x;\n\
+      \  return s;\n\
+       }\n" );
+    ( "sub/base.jinc",
+      "fn base(reg u32 b) -> reg u32 {\n\
+      \  reg u32 t;\n\
+      \  t = b;\n\
+      \  return t;\n\
+       }\n" );
+    ( "a.jazz",
+      "require \"lib.jinc\"\n\
+       namespace Short {\n\
+      \  require \"sum.jinc\"\n\
+       }\n\
+       namespace Long {\n\
+      \  require \"sum.jinc\"\n\
+       }\n\
+       export fn main(reg u32 x) -> reg u32 {\n\
+      \  reg u32 y z;\n\
+      \  y = twice(x);\n\
+      \  z = Short::sum(y);\n\
+      \  y = Long::sum(z);\n\
+      \  y += seed;\n\
+      \  return y;\n\
+       }\n" );
+    ( "b.jazz",
+      "require \"lib.jinc\"\n\
+       from LIB require \"base.jinc\"\n\
+       export fn other(reg u32 v) -> reg u32 {\n\
+      \  reg u32 w;\n\
+      \  inline int i;\n\
+      \  w = base(v);\n\
+      \  for i = 0 to N {\n\
+      \    w = twice(w);\n\
+      \  }\n\
+      \  return w;\n\
+       }\n" );
+    ( "c.jazz",
+      "u32 g = 1;\n\
+       export fn alone(reg u32 p, reg u32 q) -> reg u32 {\n\
+      \  reg u32 acc tmp;\n\
+      \  acc = p;\n\
+      \  tmp = q;\n\
+      \  if (acc < tmp) {\n\
+      \    acc = tmp;\n\
+      \  }\n\
+      \  acc += g;\n\
+      \  return acc;\n\
+       }\n" );
+  ]
+
+let selftest () =
+  let failures = ref 0 in
+  let check name condition =
+    if condition then Printf.printf "ok   %s\n" name
+    else (
+      incr failures;
+      Printf.printf "FAIL %s\n" name)
+  in
+  check "words: a whole word is replaced, a part of one is not"
+    (replace_word ~word:"x" ~by:"y" "x xx x_1 (x) x" = "y xx x_1 (y) y");
+  check "columns: a location's columns are left out, other text is kept"
+    (strip_columns "\"a.jazz\", line 5 (12-17) and line 6 (3) to (x) (4-)"
+    = "\"a.jazz\", line 5  and line 6  to (x) (4-)");
+  check "blanks: a run of white space is one space, and none is added"
+    (collapse_blanks "  fn f (reg u32\n      x) ->\t()\n"
+    = "fn f (reg u32 x) -> ()");
+  check "words: every word of a text, comments included"
+    (List.sort compare (words "fn f /* g */ x1 _y")
+    = [ "_y"; "f"; "fn"; "g"; "x1" ]);
+  let corpus = scratch_directory () in
+  List.iter
+    (fun (rel, text) ->
+      let path = Filename.concat corpus rel in
+      mkdir_p (Filename.dirname path);
+      write path text)
+    selftest_project;
+  let run_once ~plant =
+    run ~corpus ~oracle:Library
+      ~idirs:[ ("LIB", "sub") ]
+      ~seed:1 ~sample:1000 ~jobs:1 ~timeout:60. ~plant ~quiet:true
+  in
+  let summary = run_once ~plant:false in
+  List.iter print_endline summary.differences;
+  check
+    (Printf.sprintf
+       "trip: every made rename is exact (%d sampled, %d exact, %d differ)"
+       summary.fresh.sampled summary.fresh.exact summary.fresh.differ)
+    (summary.fresh.differ = 0 && summary.taken.differ = 0);
+  check
+    (Printf.sprintf "trip: the fixtures' fresh renames are made (%d of %d)"
+       summary.fresh.exact summary.fresh.sampled)
+    (summary.fresh.exact = summary.fresh.sampled && summary.fresh.sampled >= 20);
+  check
+    (Printf.sprintf "trip: the multi-file declarations are sampled (%d)"
+       summary.multi.sampled)
+    (summary.multi.sampled >= 15 && summary.multi.exact = summary.multi.sampled);
+  check
+    (Printf.sprintf "trip: some taken names are refused (%d)"
+       (List.fold_left (fun n (_, k) -> n + k) 0 summary.taken.refused))
+    (summary.taken.refused <> []);
+  let planted = run_once ~plant:true in
+  check
+    (Printf.sprintf
+       "negative control: every planted defect is caught (%d planted, %d \
+        caught)"
+       (planted.fresh.planted + planted.taken.planted)
+       (planted.fresh.caught + planted.taken.caught))
+    (planted.fresh.planted > 10
+    && planted.fresh.caught = planted.fresh.planted
+    && planted.taken.caught = planted.taken.planted);
+  check "negative control: the run reports differences, so it exits 1"
+    (planted.differences <> []);
+  remove_tree corpus;
+  if !failures = 0 then (
+    print_endline "rename_trip: selftest ok";
+    0)
+  else (
+    Printf.printf "rename_trip: %d selftest check(s) failed\n" !failures;
+    1)
+
+(* ------------------------------------------------------------------ *)
+
