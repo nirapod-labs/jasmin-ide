@@ -787,3 +787,268 @@ let contains ~part word =
   let rec at i = i + lp <= lw && (String.sub word i lp = part || at (i + 1)) in
   at 0
 
+let fresh_name workspace ~old_name =
+  let rec attempt n =
+    let candidate = Printf.sprintf "%s_rn%d" old_name n in
+    if
+      Hashtbl.mem workspace.taken_words candidate
+      || List.exists (contains ~part:candidate) workspace.unique_words
+      || not (Rename.valid_name candidate)
+    then attempt (n + 1)
+    else candidate
+  in
+  attempt 0
+
+(* ------------------------------------------------------------------ *)
+(* The trip of one symbol to one name *)
+
+type outcome =
+  | Exact
+  | Refused_by of string * string
+  | Differs of string
+  | Excluded of string
+
+(* A reason, by the rule that gave it, so the counts read as the refusal
+   kinds the tests name. *)
+let reason_class reason =
+  let has fragment =
+    let lf = String.length fragment and lr = String.length reason in
+    let rec at i =
+      i + lf <= lr && (String.sub reason i lf = fragment || at (i + 1))
+    in
+    at 0
+  in
+  if has "already names a different declaration" then "collision"
+  else if has "is declared twice in one scope" then
+    "ends a duplicate the compiler reports"
+  else if has "when it is read into" || has "for one file that reads it" then
+    "two meanings in one shared file"
+  else if has "with no declaration, and the rename would give it one" then
+    "gives an unbound use a declaration"
+  else if has "recovered syntax errors" then "syntax errors in the closure"
+  else if has "reads as a built-in" then "reserved function name"
+  else if has "would change what" then "changes a meaning"
+  else if has "would not parse" then "parses differently"
+  else if has "spaces around ::" then "spaced qualified name"
+  else if has "namespace part" || has "namespace's own name" then "namespace"
+  else if has "has no declaration" then "no declaration"
+  else if has "keyword" then "keyword"
+  else if has "intrinsic" then "intrinsic"
+  else if has "annotation" then "annotation"
+  else if has "include path" then "include path"
+  else if has "no name" then "no name"
+  else reason
+
+let edited_files edits = List.map fst edits
+
+let affected workspace paths =
+  List.sort_uniq compare
+    (List.concat_map
+       (fun path ->
+         Option.value ~default:[] (Hashtbl.find_opt workspace.readers path))
+       paths)
+
+let verdicts_of workspace ~oracle ~jobs ~timeout entries =
+  let work =
+    List.map (fun entry -> { entry; arch = arch_of_path entry }) entries
+  in
+  let dir = Filename.concat workspace.scratch "jobs" in
+  mkdir_p dir;
+  verdicts ~oracle ~idirs:workspace.idirs ~jobs ~timeout ~scratch:dir work
+
+let before_verdicts workspace ~oracle ~jobs ~timeout entries =
+  let missing =
+    List.filter (fun entry -> not (Hashtbl.mem workspace.before entry)) entries
+  in
+  List.iter
+    (fun (entry, verdict) -> Hashtbl.replace workspace.before entry verdict)
+    (verdicts_of workspace ~oracle ~jobs ~timeout missing);
+  List.map (fun entry -> (entry, Hashtbl.find workspace.before entry)) entries
+
+let restore workspace paths =
+  List.iter
+    (fun path -> write path (Hashtbl.find workspace.originals path))
+    paths
+
+(* The first place two verdicts part, with some text around it on each side. *)
+let first_difference left right =
+  let ll = String.length left and lr = String.length right in
+  let rec at i =
+    if i < ll && i < lr && left.[i] = right.[i] then at (i + 1) else i
+  in
+  let i = at 0 in
+  let around text =
+    let from = max 0 (i - 60) in
+    String.sub text from (min (String.length text - from) 120)
+  in
+  Printf.sprintf "at character %d: %S then %S" i (around left) (around right)
+
+let trip workspace ~oracle ~jobs ~timeout ~plant (symbol : symbol) ~naming =
+  let old_name, new_name =
+    match naming with
+    | Fresh { old_name; new_name } | Taken { old_name; new_name } ->
+        (old_name, new_name)
+  in
+  ignore old_name;
+  match ask_rename workspace ~path:symbol.path ~byte:symbol.byte ~new_name with
+  | `Refused reason -> (Refused_by (reason_class reason, reason), false)
+  | `Edits (_, []) -> (Differs "the rename answered no edit", false)
+  | `Edits (start, edits) ->
+      let edits, planted =
+        if not plant then (edits, false)
+        else
+          (* The negative control: drop one edit that is not the declaration's
+             own name, the last one in the answer. *)
+          let is_declaration path (edit : Jide_engine.Types.text_edit) =
+            path = symbol.path
+            && edit.Jide_engine.Types.span.Span.start_byte = start
+          in
+          let candidates =
+            List.concat_map
+              (fun (path, group) ->
+                List.filter_map
+                  (fun edit ->
+                    if is_declaration path edit then None else Some (path, edit))
+                  group)
+              edits
+          in
+          match List.rev candidates with
+          | [] -> (edits, false)
+          | (drop_path, drop) :: _ ->
+              ( List.map
+                  (fun (path, group) ->
+                    if path = drop_path then
+                      (path, List.filter (fun edit -> edit != drop) group)
+                    else (path, group))
+                  edits,
+                true )
+      in
+      if plant && not planted then (Excluded "no use to drop", false)
+      else
+        let touched = edited_files edits in
+        let entries = affected workspace touched in
+        let before = before_verdicts workspace ~oracle ~jobs ~timeout entries in
+        if List.exists (fun (_, v) -> v.status = "timeout") before then
+          (Excluded "the compiler timed out before the rename", planted)
+        else (
+          List.iter
+            (fun (path, group) ->
+              write path
+                (apply_text (Hashtbl.find workspace.originals path) group))
+            edits;
+          let after = verdicts_of workspace ~oracle ~jobs ~timeout entries in
+          let verdict_change =
+            List.find_map
+              (fun ((entry, (was : verdict)), (_, (now : verdict))) ->
+                let was_text =
+                  was.status ^ " "
+                  ^ collapse_blanks (normalise_before naming was.output)
+                in
+                let now_text =
+                  now.status ^ " "
+                  ^ collapse_blanks (normalise_after naming now.output)
+                in
+                if String.equal was_text now_text then None
+                else
+                  Some
+                    (Printf.sprintf "the verdict of %s changed (%s)" entry
+                       (first_difference was_text now_text)))
+              (List.combine before after)
+          in
+          let outcome =
+            match verdict_change with
+            | Some change -> Differs change
+            | None -> (
+                (* The rename back, from the renamed declaration, to the old
+                   name, over the renamed texts on disk. *)
+                let own =
+                  Option.value ~default:[] (List.assoc_opt symbol.path edits)
+                in
+                let back_byte = moved own start in
+                match
+                  ask_rename workspace ~path:symbol.path ~byte:back_byte
+                    ~new_name:old_name
+                with
+                | `Refused reason ->
+                    Differs ("renaming back was refused: " ^ reason)
+                | `Edits (_, back) -> (
+                    let paths =
+                      List.sort_uniq compare (touched @ edited_files back)
+                    in
+                    let mismatch =
+                      List.find_opt
+                        (fun path ->
+                          let renamed =
+                            match List.assoc_opt path edits with
+                            | Some group ->
+                                apply_text
+                                  (Hashtbl.find workspace.originals path)
+                                  group
+                            | None -> Hashtbl.find workspace.originals path
+                          in
+                          let restored =
+                            match List.assoc_opt path back with
+                            | Some group -> apply_text renamed group
+                            | None -> renamed
+                          in
+                          not
+                            (String.equal restored
+                               (Hashtbl.find workspace.originals path)))
+                        paths
+                    in
+                    match mismatch with
+                    | Some path ->
+                        Differs ("renaming back did not restore " ^ path)
+                    | None -> Exact))
+          in
+          restore workspace touched;
+          (outcome, planted))
+
+(* ------------------------------------------------------------------ *)
+(* The run *)
+
+type tally = {
+  mutable sampled : int;
+  mutable exact : int;
+  mutable refused : (string * int) list;
+  mutable differ : int;
+  mutable excluded : (string * int) list;
+  mutable planted : int;
+  mutable caught : int;
+}
+
+let tally () =
+  {
+    sampled = 0;
+    exact = 0;
+    refused = [];
+    differ = 0;
+    excluded = [];
+    planted = 0;
+    caught = 0;
+  }
+
+let bump list key =
+  match List.assoc_opt key list with
+  | Some n -> (key, n + 1) :: List.remove_assoc key list
+  | None -> (key, 1) :: list
+
+let print_tally label t =
+  Printf.printf "%s: sampled %d, exact %d, refused %d, differ %d\n" label
+    t.sampled t.exact
+    (List.fold_left (fun n (_, k) -> n + k) 0 t.refused)
+    t.differ;
+  List.iter
+    (fun (reason, n) -> Printf.printf "  %s refused: %s %d\n" label reason n)
+    (List.sort compare t.refused);
+  List.iter
+    (fun (reason, n) -> Printf.printf "  %s excluded: %s %d\n" label reason n)
+    (List.sort compare t.excluded)
+
+type summary = {
+  fresh : tally;
+  taken : tally;
+  multi : tally;
+  differences : string list;
+}
+
