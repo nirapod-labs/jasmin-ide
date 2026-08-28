@@ -378,7 +378,7 @@ let case ?(corpus = [||]) (st : Gen.state) : string =
       (send server (notification "initialized"));
     (* The session proper. *)
     for _ = 1 to Gen.between st 4 24 do
-      match Gen.int st 10 with
+      match Gen.int st 12 with
       | 0 | 1 | 2 -> open_another ()
       | 3 | 4 | 5 -> change_one (Gen.pick st uris)
       | 6 -> close_one (Gen.pick st uris)
@@ -407,6 +407,8 @@ let case ?(corpus = [||]) (st : Gen.state) : string =
                (request ~id
                   ~params:(`Assoc [ ("textDocument", `Int 1) ])
                   "textDocument/hover"))
+      | 9 -> prepare_rename (Gen.pick st uris)
+      | 10 -> rename (Gen.pick st uris)
       | _ ->
           expect_no_reply "a notification the server does not know"
             (send server (notification "fuzz/unknown"));
