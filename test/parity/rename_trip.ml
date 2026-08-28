@@ -1294,3 +1294,107 @@ let selftest () =
 
 (* ------------------------------------------------------------------ *)
 
+let () =
+  let args = List.tl (Array.to_list Sys.argv) in
+  let corpus = ref None and jasminc = ref None and idirs = ref [] in
+  let seed = ref 1
+  and sample = ref 120
+  and jobs = ref 4
+  and timeout = ref 300. in
+  let plant = ref false and selftest_mode = ref false and full = ref false in
+  let bad message =
+    prerr_endline ("rename_trip: " ^ message);
+    prerr_endline usage;
+    exit 2
+  in
+  let int_of name value =
+    match int_of_string_opt value with
+    | Some n when n > 0 -> n
+    | _ -> bad (name ^ " takes a positive number")
+  in
+  let rec parse = function
+    | [] -> ()
+    | "--corpus" :: dir :: rest ->
+        corpus := Some dir;
+        parse rest
+    | "--jasminc" :: path :: rest ->
+        jasminc := Some path;
+        parse rest
+    | "--idir" :: binding :: rest -> (
+        match String.index_opt binding '=' with
+        | Some i when i > 0 ->
+            idirs :=
+              !idirs
+              @ [
+                  ( String.sub binding 0 i,
+                    String.sub binding (i + 1) (String.length binding - i - 1)
+                  );
+                ];
+            parse rest
+        | _ -> bad "--idir takes NAME=PATH")
+    | "--seed" :: n :: rest ->
+        seed := int_of "--seed" n;
+        parse rest
+    | "--sample" :: n :: rest ->
+        sample := int_of "--sample" n;
+        parse rest
+    | "--jobs" :: n :: rest ->
+        jobs := int_of "--jobs" n;
+        parse rest
+    | "--timeout" :: n :: rest ->
+        timeout := float_of_int (int_of "--timeout" n);
+        parse rest
+    | "--plant" :: "skip" :: rest ->
+        plant := true;
+        parse rest
+    | "--full" :: rest ->
+        full := true;
+        parse rest
+    | "--selftest" :: rest ->
+        selftest_mode := true;
+        parse rest
+    | ("--help" | "-h") :: _ ->
+        print_endline usage;
+        exit 0
+    | other :: _ -> bad ("unknown argument " ^ other)
+  in
+  parse args;
+  if !selftest_mode then exit (selftest ())
+  else
+    match !corpus with
+    | None -> bad "--corpus is required"
+    | Some dir ->
+        let dir =
+          let tests =
+            Filename.concat (Filename.concat dir "compiler") "tests"
+          in
+          if is_directory tests then tests else dir
+        in
+        if not (is_directory dir) then bad ("no corpus directory: " ^ dir);
+        let dir =
+          Index.normalise
+            (if Filename.is_relative dir then
+               Filename.concat (Sys.getcwd ()) dir
+             else dir)
+        in
+        let oracle =
+          match !jasminc with
+          | None -> Library
+          | Some path ->
+              if not (Sys.file_exists path) then bad ("no compiler at " ^ path);
+              Binary { jasminc = path; full = !full }
+        in
+        Printf.printf "rename: corpus %s\nrename: oracle %s\n%!" dir
+          (match oracle with
+          | Binary { jasminc; full } ->
+              jasminc ^ if full then ", every pass" else ", through typing"
+          | Library -> "the linked library's check");
+        let summary =
+          run ~corpus:dir ~oracle ~idirs:!idirs ~seed:!seed ~sample:!sample
+            ~jobs:!jobs ~timeout:!timeout ~plant:!plant ~quiet:false
+        in
+        if summary.fresh.sampled = 0 then (
+          prerr_endline "rename_trip: the corpus gave no declaration to sample";
+          exit 2);
+        exit
+          (if summary.fresh.differ = 0 && summary.taken.differ = 0 then 0 else 1)
