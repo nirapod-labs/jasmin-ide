@@ -391,3 +391,74 @@ let print_keystroke_table results =
 let is_jasmin_file name =
   Filename.check_suffix name ".jazz" || Filename.check_suffix name ".jinc"
 
+let largest ~count directory =
+  if not (Sys.is_directory directory) then die ("not a directory: " ^ directory);
+  let found = ref [] in
+  let rec walk directory =
+    match Sys.readdir directory with
+    | entries ->
+        Array.iter
+          (fun entry ->
+            let path = Filename.concat directory entry in
+            match Unix.stat path with
+            | { Unix.st_kind = Unix.S_DIR; _ } -> walk path
+            | { Unix.st_kind = Unix.S_REG; _ } when is_jasmin_file entry ->
+                found := (path, (Unix.stat path).Unix.st_size) :: !found
+            | _ -> ()
+            | exception Unix.Unix_error _ -> ())
+          entries
+    | exception Sys_error _ -> ()
+  in
+  walk directory;
+  let sorted = List.sort (fun (_, a) (_, b) -> Int.compare b a) !found in
+  let rec take wanted = function
+    | _ when wanted <= 0 -> []
+    | [] -> []
+    | value :: rest -> value :: take (wanted - 1) rest
+  in
+  List.iter
+    (fun (path, size) -> Printf.printf "%d\t%s\n" size path)
+    (take count sorted)
+
+(* -- the command line ---------------------------------------------------- *)
+
+type command = Whole | Keystroke | Largest
+
+type options = {
+  command : command option;
+  units : string option;
+  arch : string option;
+  call_conv : string;
+  idirs : (string * string) list;
+  label : string option;
+  runs : int;
+  samples : bool;
+  count : int;
+  files : string list;
+}
+
+let empty_options =
+  {
+    command = None;
+    units = None;
+    arch = None;
+    call_conv = default_call_conv_name;
+    idirs = [];
+    label = None;
+    runs = default_runs;
+    samples = false;
+    count = default_count;
+    files = [];
+  }
+
+let positive option value =
+  match int_of_string_opt value with
+  | Some number when number > 0 -> number
+  | _ -> die (Printf.sprintf "%s needs a positive number, got: %s" option value)
+
+let command_of_word = function
+  | "whole" -> Whole
+  | "keystroke" -> Keystroke
+  | "largest" -> Largest
+  | word -> die ("unknown command: " ^ word ^ " (whole, keystroke, largest)")
+
