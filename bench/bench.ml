@@ -520,3 +520,48 @@ let read_units ~call_conv path =
                 idirs, path): " ^ line))
     lines
 
+let units_of options =
+  let call_conv = parse_call_conv options.call_conv in
+  let from_files =
+    List.map
+      (fun file ->
+        let label =
+          match options.label with Some label -> label | None -> file
+        in
+        make_unit ~label ~arch:options.arch ~call_conv ~idirs:options.idirs
+          ~file)
+      options.files
+  in
+  match options.units with
+  | Some path -> read_units ~call_conv path
+  | None -> from_files
+
+let main arguments =
+  let options = parse_options arguments in
+  match options.command with
+  | None -> die "no command: one of whole, keystroke, largest"
+  | Some Largest -> (
+      match options.files with
+      | [ directory ] -> largest ~count:options.count directory
+      | _ -> die "largest takes one directory")
+  | Some ((Whole | Keystroke) as command) -> (
+      let units = units_of options in
+      if units = [] then die "no unit to measure: name a file or pass --units";
+      match command with
+      | Whole ->
+          Printf.printf "whole check: %d runs per unit, milliseconds\n"
+            options.runs;
+          let results = List.map (measure_whole ~runs:options.runs) units in
+          if options.samples then print_whole_samples results;
+          print_whole_table results
+      | Keystroke ->
+          Printf.printf
+            "keystroke to diagnostics, no debounce, %d runs per unit, \
+             milliseconds\n"
+            options.runs;
+          let results = List.map (measure_keystroke ~runs:options.runs) units in
+          if options.samples then print_keystroke_samples results;
+          print_keystroke_table results
+      | Largest -> ())
+
+let () = main (List.tl (Array.to_list Sys.argv))

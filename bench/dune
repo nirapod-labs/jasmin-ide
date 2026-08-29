@@ -1,0 +1,15 @@
+; The measurement program. It is not installed and not a test: `make bench`
+; runs it on an idle host, `make bench-build` builds it.
+
+(executable
+ (name bench)
+ (libraries
+  jide_check
+  jide_controller
+  jide_engine
+  jide_jasmin
+  jide_lang
+  jide_lsp
+  jsonrpc
+  unix
+  yojson))
