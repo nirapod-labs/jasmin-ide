@@ -349,3 +349,219 @@ let measure_keystroke ~runs unit_ =
   in
   { keystroke_unit = unit_; samples; log = List.rev !log }
 
+let print_keystroke_samples results =
+  List.iter
+    (fun result ->
+      List.iteri
+        (fun index sample ->
+          Printf.printf "keystroke %s %d %.4f %.4f %.4f %.4f %d\n"
+            result.keystroke_unit.label (index + 1) sample.total sample.loop
+            sample.checked sample.converted sample.found)
+        result.samples)
+    results
+
+let print_keystroke_table results =
+  Printf.printf "%-44s %-7s %3s %10s %8s %8s %8s %8s %8s %5s %6s\n" "unit"
+    "arch" "n" "median" "p95" "max" "loop" "check" "convert" "diags" "errors";
+  List.iter
+    (fun result ->
+      let field f = List.map f result.samples in
+      Printf.printf
+        "%-44s %-7s %3d %10.3f %8.3f %8.3f %8.3f %8.3f %8.3f %5d %6d\n"
+        result.keystroke_unit.label result.keystroke_unit.arch_name
+        (List.length result.samples)
+        (median (field (fun sample -> sample.total)))
+        (percentile 0.95 (field (fun sample -> sample.total)))
+        (maximum (field (fun sample -> sample.total)))
+        (median (field (fun sample -> sample.loop)))
+        (median (field (fun sample -> sample.checked)))
+        (median (field (fun sample -> sample.converted)))
+        (match result.samples with [] -> 0 | sample :: _ -> sample.found)
+        (List.fold_left
+           (fun total sample -> total + sample.failed)
+           0 result.samples);
+      List.iter
+        (fun message ->
+          Printf.printf "  log %s: %s\n" result.keystroke_unit.label message)
+        result.log)
+    results
+
+(* -- the largest corpus files -------------------------------------------- *)
+
+let is_jasmin_file name =
+  Filename.check_suffix name ".jazz" || Filename.check_suffix name ".jinc"
+
+let largest ~count directory =
+  if not (Sys.is_directory directory) then die ("not a directory: " ^ directory);
+  let found = ref [] in
+  let rec walk directory =
+    match Sys.readdir directory with
+    | entries ->
+        Array.iter
+          (fun entry ->
+            let path = Filename.concat directory entry in
+            match Unix.stat path with
+            | { Unix.st_kind = Unix.S_DIR; _ } -> walk path
+            | { Unix.st_kind = Unix.S_REG; _ } when is_jasmin_file entry ->
+                found := (path, (Unix.stat path).Unix.st_size) :: !found
+            | _ -> ()
+            | exception Unix.Unix_error _ -> ())
+          entries
+    | exception Sys_error _ -> ()
+  in
+  walk directory;
+  let sorted = List.sort (fun (_, a) (_, b) -> Int.compare b a) !found in
+  let rec take wanted = function
+    | _ when wanted <= 0 -> []
+    | [] -> []
+    | value :: rest -> value :: take (wanted - 1) rest
+  in
+  List.iter
+    (fun (path, size) -> Printf.printf "%d\t%s\n" size path)
+    (take count sorted)
+
+(* -- the command line ---------------------------------------------------- *)
+
+type command = Whole | Keystroke | Largest
+
+type options = {
+  command : command option;
+  units : string option;
+  arch : string option;
+  call_conv : string;
+  idirs : (string * string) list;
+  label : string option;
+  runs : int;
+  samples : bool;
+  count : int;
+  files : string list;
+}
+
+let empty_options =
+  {
+    command = None;
+    units = None;
+    arch = None;
+    call_conv = default_call_conv_name;
+    idirs = [];
+    label = None;
+    runs = default_runs;
+    samples = false;
+    count = default_count;
+    files = [];
+  }
+
+let positive option value =
+  match int_of_string_opt value with
+  | Some number when number > 0 -> number
+  | _ -> die (Printf.sprintf "%s needs a positive number, got: %s" option value)
+
+let command_of_word = function
+  | "whole" -> Whole
+  | "keystroke" -> Keystroke
+  | "largest" -> Largest
+  | word -> die ("unknown command: " ^ word ^ " (whole, keystroke, largest)")
+
+let parse_options arguments =
+  let rec loop options rest =
+    match rest with
+    | [] -> options
+    | ("-h" | "--help") :: _ ->
+        print_endline usage;
+        exit 0
+    | "--samples" :: rest -> loop { options with samples = true } rest
+    | "--units" :: value :: rest ->
+        loop { options with units = Some value } rest
+    | "--arch" :: value :: rest -> loop { options with arch = Some value } rest
+    | "--call-conv" :: value :: rest ->
+        loop { options with call_conv = value } rest
+    | "-I" :: value :: rest ->
+        loop
+          { options with idirs = options.idirs @ [ split_include value ] }
+          rest
+    | "--label" :: value :: rest ->
+        loop { options with label = Some value } rest
+    | "--runs" :: value :: rest ->
+        loop { options with runs = positive "--runs" value } rest
+    | "--count" :: value :: rest ->
+        loop { options with count = positive "--count" value } rest
+    | option :: _ when String.length option > 0 && Char.equal option.[0] '-' ->
+        die ("unknown option: " ^ option)
+    | _ :: _ when options.units <> None ->
+        die
+          "the files of a units table are in the table, not on the command line"
+    | word :: rest -> (
+        match options.command with
+        | None ->
+            loop { options with command = Some (command_of_word word) } rest
+        | Some _ -> loop { options with files = options.files @ [ word ] } rest)
+  in
+  loop empty_options arguments
+
+let read_units ~call_conv path =
+  let text = read_file path in
+  let lines = String.split_on_char '\n' text in
+  List.filter_map
+    (fun line ->
+      let line = String.trim line in
+      if String.equal line "" || Char.equal line.[0] '#' then None
+      else
+        match String.split_on_char '\t' line with
+        | [ label; arch; idirs; file ] ->
+            let arch =
+              match arch with "auto" | "-" -> None | name -> Some name
+            in
+            Some
+              (make_unit ~label ~arch ~call_conv ~idirs:(split_idirs idirs)
+                 ~file)
+        | _ ->
+            die
+              ("a units line needs four tab-separated fields (label, arch, \
+                idirs, path): " ^ line))
+    lines
+
+let units_of options =
+  let call_conv = parse_call_conv options.call_conv in
+  let from_files =
+    List.map
+      (fun file ->
+        let label =
+          match options.label with Some label -> label | None -> file
+        in
+        make_unit ~label ~arch:options.arch ~call_conv ~idirs:options.idirs
+          ~file)
+      options.files
+  in
+  match options.units with
+  | Some path -> read_units ~call_conv path
+  | None -> from_files
+
+let main arguments =
+  let options = parse_options arguments in
+  match options.command with
+  | None -> die "no command: one of whole, keystroke, largest"
+  | Some Largest -> (
+      match options.files with
+      | [ directory ] -> largest ~count:options.count directory
+      | _ -> die "largest takes one directory")
+  | Some ((Whole | Keystroke) as command) -> (
+      let units = units_of options in
+      if units = [] then die "no unit to measure: name a file or pass --units";
+      match command with
+      | Whole ->
+          Printf.printf "whole check: %d runs per unit, milliseconds\n"
+            options.runs;
+          let results = List.map (measure_whole ~runs:options.runs) units in
+          if options.samples then print_whole_samples results;
+          print_whole_table results
+      | Keystroke ->
+          Printf.printf
+            "keystroke to diagnostics, no debounce, %d runs per unit, \
+             milliseconds\n"
+            options.runs;
+          let results = List.map (measure_keystroke ~runs:options.runs) units in
+          if options.samples then print_keystroke_samples results;
+          print_keystroke_table results
+      | Largest -> ())
+
+let () = main (List.tl (Array.to_list Sys.argv))
