@@ -196,3 +196,201 @@ let skip_string (text : string) limit index =
   in
   loop index
 
+let skip_line (text : string) limit index =
+  let rec loop index =
+    if index >= limit then limit
+    else if text.[index] = '\n' then index + 1
+    else loop (index + 1)
+  in
+  loop index
+
+let skip_comment (text : string) limit index =
+  let rec loop index =
+    if index + 1 >= limit then limit
+    else if text.[index] = '*' && text.[index + 1] = '/' then index + 2
+    else loop (index + 1)
+  in
+  loop index
+
+(* The delimiters left open at the offset. Strings and comments are skipped,
+   so a bracket or a comma in a message or in a [`ct`] string counts for
+   nothing, and each open delimiter counts the commas written directly
+   inside it, which is what the active parameter is read from. *)
+let rec scan (text : string) limit index stack =
+  if index >= limit then stack
+  else
+    match text.[index] with
+    | '"' -> scan text limit (skip_string text limit (index + 1)) stack
+    | '/' when index + 1 < limit && text.[index + 1] = '/' ->
+        scan text limit (skip_line text limit (index + 2)) stack
+    | '/' when index + 1 < limit && text.[index + 1] = '*' ->
+        scan text limit (skip_comment text limit (index + 2)) stack
+    | ('(' | '[' | '{') as character ->
+        scan text limit (index + 1)
+          ({ character; position = index; commas = 0 } :: stack)
+    | ')' | ']' | '}' -> (
+        match stack with
+        | [] -> scan text limit (index + 1) []
+        | _ :: rest -> scan text limit (index + 1) rest)
+    | ',' -> (
+        match stack with
+        | [] -> scan text limit (index + 1) []
+        | top :: rest ->
+            scan text limit (index + 1)
+              ({ top with commas = top.commas + 1 } :: rest))
+    | _ -> scan text limit (index + 1) stack
+
+let rec open_paren = function
+  | [] -> None
+  | entry :: rest ->
+      if entry.character = '(' then Some entry else open_paren rest
+
+(* [call_at text byte] is the call the offset is in: the callee as written,
+   the byte its name starts at, the number of arguments already finished, and
+   whether the call is a primitive, which is written [\#name(...)]. *)
+let call_at (text : string) (byte : int) =
+  let limit = max 0 (min byte (String.length text)) in
+  match open_paren (scan text limit 0 []) with
+  | None -> None
+  | Some paren ->
+      let rec before index =
+        if index > 0 && is_blank text.[index - 1] then before (index - 1)
+        else index
+      in
+      let stop = before paren.position in
+      if stop = 0 || not (is_ident_char text.[stop - 1]) then None
+      else
+        let start = word_start text stop in
+        let callee = String.sub text start (stop - start) in
+        if String.equal callee "" then None
+        else
+          Some
+            (callee, start, paren.commas, start >= 1 && text.[start - 1] = '#')
+
+(* The parameters of a signature written in the source: the groups between
+   its parentheses, split at the commas that are not inside a nested pair. *)
+let split_at_commas (body : string) =
+  let parts = ref [] in
+  let current = Buffer.create 32 in
+  let depth = ref 0 in
+  String.iter
+    (fun character ->
+      match character with
+      | '(' | '[' | '{' ->
+          incr depth;
+          Buffer.add_char current character
+      | ')' | ']' | '}' ->
+          decr depth;
+          Buffer.add_char current character
+      | ',' when !depth = 0 ->
+          parts := Buffer.contents current :: !parts;
+          Buffer.clear current
+      | character -> Buffer.add_char current character)
+    body;
+  parts := Buffer.contents current :: !parts;
+  List.rev !parts
+
+let parameters_of_detail (detail : string) =
+  match String.index_opt detail '(' with
+  | None -> []
+  | Some open_ ->
+      let rec matching depth index =
+        if index >= String.length detail then String.length detail
+        else
+          match detail.[index] with
+          | '(' -> matching (depth + 1) (index + 1)
+          | ')' -> if depth = 1 then index else matching (depth - 1) (index + 1)
+          | _ -> matching depth (index + 1)
+      in
+      let close = matching 1 (open_ + 1) in
+      let body = String.sub detail (open_ + 1) (max 0 (close - open_ - 1)) in
+      List.filter
+        (fun part -> not (String.equal part ""))
+        (List.map String.trim (split_at_commas body))
+
+let label (callee : string) (parameters : string list) (results : string list) =
+  Printf.sprintf "%s(%s)%s" callee
+    (String.concat ", " parameters)
+    (match results with
+    | [] -> ""
+    | results -> " -> " ^ String.concat ", " results)
+
+(* The signature the compiler left for one declaration. Facts hold the items
+   of one checked file, so they answer only for a declaration of that file,
+   and the identity is the design's: the file and the byte where the name
+   starts. *)
+let facts_signature (facts : Facts.t) (index : Index.t)
+    (declaration : Index.declaration) =
+  if
+    not
+      (String.equal
+         (Index.normalise declaration.Index.file)
+         (Index.normalise index.Index.file))
+  then None
+  else
+    List.find_map
+      (fun (item : Facts.item) ->
+        if
+          item.Facts.i_kind = Facts.Function
+          && item.Facts.i_name_span.Jide_lang.Span.start_byte
+             = declaration.Index.name_span.Jide_lang.Span.start_byte
+        then
+          Option.map
+            (fun (signature : Facts.fun_sig) ->
+              (signature.Facts.fs_in, signature.Facts.fs_out))
+            item.Facts.i_sig
+        else None)
+      facts.Facts.items
+
+(* The declaration a call names: the answer the resolver recorded for the
+   callee when the parser kept it, and otherwise the function the scope holds
+   under that name, which is what an unfinished call leaves to go on. *)
+let declaration_of_call (resolve : Resolve.t) ~(file : string) ~(start : int)
+    ~(callee : string) =
+  match Resolve.answer_at resolve ~file ~byte:start with
+  | Some (_, Resolve.Resolved declaration)
+    when declaration.Index.kind = Index.Function ->
+      Some declaration
+  | _ -> (
+      match Resolve.scope_at resolve ~file ~byte:start with
+      | None -> None
+      | Some scope ->
+          List.find_opt
+            (fun (binding : Resolve.binding) ->
+              String.equal binding.Resolve.name callee)
+            scope.Resolve.funs
+          |> Option.map (fun (binding : Resolve.binding) ->
+                 binding.Resolve.declaration))
+
+let signature_help ?(facts = Facts.empty) ~(index : Index.t)
+    ~(resolve : Resolve.t) ~(byte : int) () =
+  match call_at index.Index.text byte with
+  | None -> None
+  | Some (callee, start, commas, intrinsic) -> (
+      if intrinsic then None
+      else
+        match
+          declaration_of_call resolve ~file:index.Index.file ~start ~callee
+        with
+        | None -> None
+        | Some declaration -> (
+            match facts_signature facts index declaration with
+            | Some (parameters, results) ->
+                Some
+                  {
+                    label = label callee parameters results;
+                    parameters;
+                    active = commas;
+                    callee;
+                  }
+            | None -> (
+                match declaration.Index.detail with
+                | None -> None
+                | Some detail ->
+                    let parameters = parameters_of_detail detail in
+                    let label =
+                      if String.starts_with ~prefix:"fn " detail then
+                        String.sub detail 3 (String.length detail - 3)
+                      else detail
+                    in
+                    Some { label; parameters; active = commas; callee })))
