@@ -7,7 +7,7 @@
 (executable
  (name parity_tree)
  (modules parity_tree)
- (libraries jide_jasmin jasmin.jasmin))
+ (libraries jide_jasmin jasmin.jasmin jide_harness))
 
 (rule
  (alias runtest)
@@ -119,3 +119,10 @@
 (cram
  (applies_to mutate-defects)
  (deps mutate.sh checker.awk oracle.awk %{exe:../mutation/mutants.exe}))
+
+; The tree half over a corpus tree.t writes itself, with a stand-in for the
+; release's parse-and-print, including the negative control.
+
+(cram
+ (applies_to tree)
+ (deps %{exe:parity_tree.exe}))

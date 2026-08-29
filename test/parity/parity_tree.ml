@@ -308,11 +308,274 @@ let check_selftest () =
     Printf.eprintf "parity_tree: %d selftest check(s) failed\n" !failures;
     exit 1)
 
+(* ------------------------------------------------------------------ *)
+(* The corpus run: every file the release's parser accepts, our answers and
+   the release's own printing of the same bytes. *)
+
+module H = Jide_harness.Harness
+
+type printed =
+  | Same
+  | Differs of string
+  | Refused of string
+  | Silent
+  | Uncompared
+
+type row = {
+  relative : string;
+  diagnostics : int option;  (** [None]: the printer gave no answer *)
+  tree : bool option;
+  recovery : bool option;
+  first : string option;
+  printed : printed;
+}
+
+let corpus_usage =
+  "usage: parity_tree --corpus <dir> [--checks <list>] [--jasmin2tex <path>] \
+   [--jobs N]\n\n\
+   <dir> is a release's compiler directory (its tests/success and examples) or \
+   its\n\
+   tests directory; <list> holds label, path and architecture per line."
+
+(* The first line where two printings part, from each side. *)
+let first_line_difference ours theirs =
+  let rec go = function
+    | a :: rest_a, b :: rest_b ->
+        if String.equal a b then go (rest_a, rest_b)
+        else Printf.sprintf "ours: %s; compiler: %s" a b
+    | a :: _, [] -> "ours: " ^ a ^ "; compiler: (end)"
+    | [], b :: _ -> "ours: (end); compiler: " ^ b
+    | [], [] -> "the two printings differ"
+  in
+  go (String.split_on_char '\n' ours, String.split_on_char '\n' theirs)
+
+let one ~root ~printer (relative, arch) =
+  let path = Filename.concat root relative in
+  let base = Filename.basename path in
+  let answer = parse_text ~name:base (read path) in
+  let printed =
+    match printer with
+    | None -> Uncompared
+    | Some printer ->
+        let ours =
+          Format.asprintf "%a@." Jasmin.Latex_printer.pp_prog answer.items
+        in
+        let out =
+          H.run ~cwd:(Filename.dirname path) printer [ "--arch"; arch; base ]
+        in
+        if out.H.status <> 0 then
+          Refused (List.hd (String.split_on_char '\n' out.H.err))
+        else if out.H.out = "" then Silent
+        else if String.equal ours out.H.out then Same
+        else Differs (first_line_difference ours out.H.out)
+  in
+  {
+    relative;
+    diagnostics = Some answer.diagnostics;
+    tree = answer.same_tree;
+    recovery = answer.same_recovery;
+    first = answer.difference;
+    printed;
+  }
+
+let corpus_run (args : H.args) =
+  H.name := "tree";
+  let root = H.directory (Option.value ~default:"" (args.value "--corpus")) in
+  let printer =
+    Option.map (H.executable ~what:"--jasmin2tex") (args.value "--jasmin2tex")
+  in
+  let is_dir path = Sys.file_exists path && Sys.is_directory path in
+  let folders =
+    if is_dir (Filename.concat root "tests/success") then
+      [ "tests/success"; "examples" ]
+    else if is_dir (Filename.concat root "success") then [ "success" ]
+    else
+      H.die "no tests/success under %s: name the release's compiler directory"
+        root
+  in
+  let checks =
+    match args.value "--checks" with
+    | Some list ->
+        List.map (fun (c : H.check) -> (c.path, c.arch)) (H.read_checks list)
+    | None ->
+        List.concat_map
+          (fun folder ->
+            let dir = Filename.concat root folder in
+            if is_dir dir then
+              List.map
+                (fun file ->
+                  let relative = folder ^ "/" ^ file in
+                  (relative, H.arch_of relative))
+                (H.files dir)
+            else [])
+          folders
+  in
+  let seen = Hashtbl.create 1024 in
+  let files =
+    List.filter
+      (fun (relative, _) ->
+        if Hashtbl.mem seen relative then false
+        else (
+          Hashtbl.add seen relative ();
+          true))
+      checks
+  in
+  if files = [] then
+    H.die "no files: the corpus holds no .jazz under its success folder";
+  List.iter
+    (fun (relative, _) ->
+      if not (Sys.file_exists (Filename.concat root relative)) then
+        H.die "no such file under %s: %s" root relative)
+    files;
+  let rows =
+    List.map2
+      (fun (relative, _) -> function
+        | Ok row -> row
+        | Error _ ->
+            {
+              relative;
+              diagnostics = None;
+              tree = None;
+              recovery = None;
+              first = None;
+              printed = Uncompared;
+            })
+      files
+      (H.parallel ~jobs:(H.jobs args) (one ~root ~printer) files)
+  in
+  let total = List.length rows in
+  let count p = List.length (List.filter p rows) in
+  let answered = function Some _ -> true | None -> false in
+  (* A row with no answer is the printer's fault, not a tree that differs. *)
+  let noanswer r = r.diagnostics = None in
+  let rejected r = (not (noanswer r)) && r.tree = None in
+  let tree_yes = count (fun r -> r.tree = Some true) in
+  let tree_no = count (fun r -> r.tree = Some false) in
+  let tree_na = count rejected in
+  let tree_unknown = count noanswer in
+  let recovery_yes = count (fun r -> r.recovery = Some true) in
+  let recovery_no = count (fun r -> r.recovery = Some false) in
+  let printed p = count (fun r -> p r.printed) in
+  let printed_yes = printed (( = ) Same) in
+  let printed_no = printed (function Differs _ -> true | _ -> false) in
+  let refused = printed (function Refused _ -> true | _ -> false) in
+  let silent = printed (( = ) Silent) in
+  let mismatch r =
+    if noanswer r then
+      Some "the tree printer gave no answer: the driver raised or was killed"
+    else if r.tree = None then
+      Some
+        (Printf.sprintf
+           "the compiler rejects it, so there is no compiler tree to compare \
+            with (driver diagnostics: %d)"
+           (Option.get r.diagnostics))
+    else if r.tree = Some true && r.recovery = Some true then
+      if r.diagnostics <> Some 0 then
+        Some
+          (Printf.sprintf
+             "the driver reports %d diagnostic(s) on a file the compiler parses"
+             (Option.get r.diagnostics))
+      else
+        match r.printed with
+        | Differs detail -> Some ("printing: " ^ detail)
+        | Refused reason ->
+            Some
+              (Printf.sprintf
+                 "the parse-and-print produced no tree (refused: %s); the \
+                  printing was not compared"
+                 reason)
+        | Silent ->
+            Some
+              "the parse-and-print produced no tree (silent); the printing was \
+               not compared"
+        | Same | Uncompared -> None
+    else Some (Option.value ~default:"a tree differs" r.first)
+  in
+  if args.value "--checks" <> None then
+    H.say
+      "the check list names %d checks over %d files; the tree does not depend \
+       on the target, so one comparison per file covers them"
+      (List.length checks) total;
+  H.say
+    "%d files; the compiler's parser accepts %d, rejects %d, and the tree \
+     printer did not answer for %d"
+    total (tree_yes + tree_no) tree_na tree_unknown;
+  H.say "no error from the driver: %d of %d"
+    (count (fun r -> r.diagnostics = Some 0))
+    total;
+  H.say
+    "the same tree as the compiler, by construction: %d of %d answered; %d no \
+     answer; %d the compiler's parser rejects the file"
+    tree_yes (tree_yes + tree_no) tree_unknown tree_na;
+  H.say
+    "the same recovery tree as the compiler, by construction: %d of %d \
+     answered; %d no answer"
+    recovery_yes
+    (recovery_yes + recovery_no)
+    (count (fun r -> noanswer r));
+  (match printer with
+  | Some _ ->
+      H.say
+        "the same printing as the compiler, external, byte for byte: %d of %d \
+         compared; %d not compared (%d refused, %d answered nothing)"
+        printed_yes (printed_yes + printed_no) (refused + silent) refused silent
+  | None -> H.say "no --jasmin2tex named: the printing was not compared");
+  (* By group, in the order the checks name them. *)
+  let group relative =
+    let relative =
+      if String.length relative > 6 && String.sub relative 0 6 = "tests/" then
+        String.sub relative 6 (String.length relative - 6)
+      else relative
+    in
+    H.group_of relative
+  in
+  let groups =
+    List.fold_left
+      (fun acc (relative, _) ->
+        let g = group relative in
+        if List.mem g acc then acc else acc @ [ g ])
+      [] checks
+  in
+  H.say
+    "by group: checks, files, the compiler's parser answered, no tree, a \
+     different tree";
+  List.iter
+    (fun g ->
+      let mine = List.filter (fun r -> group r.relative = g) rows in
+      let n p = List.length (List.filter p mine) in
+      H.say "  %s: %d checks, %d files, %d answered, %d no tree, %d unequal" g
+        (List.length
+           (List.filter (fun (relative, _) -> group relative = g) checks))
+        (List.length mine)
+        (n (fun r -> answered r.tree))
+        (n rejected)
+        (n (fun r -> r.tree = Some false)))
+    groups;
+  let differing =
+    List.filter_map (fun r -> Option.map (fun m -> (r, m)) (mismatch r)) rows
+  in
+  List.iter (fun (r, m) -> H.say "different %s: %s" r.relative m) differing;
+  if tree_unknown > 0 && tree_yes + tree_no = 0 then (
+    H.say "the tree printer answered with a tree for none of the %d files" total;
+    exit 2);
+  if printer <> None && printed_yes + printed_no = 0 && tree_na <> total then (
+    H.say
+      "the parse-and-print produced a tree for none of the %d files: it is not \
+       a working oracle (%d refused, %d answered nothing)"
+      total refused silent;
+    exit 2);
+  if differing = [] then (
+    H.say "every file the compiler parses passes";
+    exit 0);
+  H.say "the corpus does not agree";
+  exit 1
+
 let main () =
   match Array.to_list Sys.argv with
   | _ :: [ "--selftest" ] -> check_selftest ()
   | _ :: [ "--help" ] | _ :: [ "-help" ] ->
       print_endline usage;
+      print_endline corpus_usage;
       exit 0
   | _ :: [ path ] -> (
       match read path with
