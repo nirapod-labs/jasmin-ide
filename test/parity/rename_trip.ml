@@ -540,6 +540,13 @@ let uri_of path = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path path)
 
 let open_workspace ~corpus ~idirs =
   let scratch = scratch_directory () in
+  (* A run that is stopped leaves no copy behind: the copy goes at exit, and
+     a stop signal is an exit. *)
+  at_exit (fun () -> if Sys.file_exists scratch then remove_tree scratch);
+  List.iter
+    (fun signal ->
+      Sys.set_signal signal (Sys.Signal_handle (fun _ -> exit 130)))
+    [ Sys.sigint; Sys.sigterm; Sys.sighup ];
   let root = Filename.concat scratch "corpus" in
   let relative = sources corpus in
   let originals = Hashtbl.create 64 in

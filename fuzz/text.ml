@@ -196,7 +196,30 @@ let check_engine (st : Gen.state) (text : string) =
       let diagnostics = analysis.Jide_engine.Engine.diagnostics in
       let length = String.length text in
       match check_ordering "the engine" diagnostics with
-      | "" -> check_inside_engine diagnostics length
+      | "" -> (
+          match check_inside_engine diagnostics length with
+          | "" ->
+              let occurrences =
+                match Jide_engine.Engine.snapshot engine ~uri with
+                | Some snapshot ->
+                    Array.of_list
+                      snapshot.Jide_engine.Engine.index
+                        .Jide_engine.Index.occurrences
+                | None -> [||]
+              in
+              let rec loop n =
+                if n = 0 || Array.length occurrences = 0 then ""
+                else
+                  let occurrence = Gen.pick st occurrences in
+                  let byte =
+                    occurrence.Jide_engine.Index.last.Jide_lang.Span.start_byte
+                  in
+                  match rename_round_trip engine text ~byte with
+                  | "" -> loop (n - 1)
+                  | report -> report
+              in
+              loop renames
+          | report -> report)
       | report -> report)
 
 let same_diagnostics (first : Jide_lang.Diagnostic.t list)
@@ -232,5 +255,5 @@ let case ?(corpus = [||]) (st : Gen.state) : string =
                   "one text was checked twice and the answers differ: %d then \
                    %d diagnostics"
                   (List.length diagnostics) (List.length second)
-              else check_engine text)
+              else check_engine st text)
       | report -> report)

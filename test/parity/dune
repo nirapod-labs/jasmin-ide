@@ -33,7 +33,7 @@
 (executable
  (name typed_uses)
  (modules typed_uses)
- (libraries jide_engine jide_jasmin jide_lang unix))
+ (libraries jide_engine jide_jasmin jide_lang jide_harness unix))
 
 ; The two measurements of completion: the names completion offers against the
 ; resolver's scope, and what completion offers after a [#] for each
@@ -87,13 +87,30 @@
  (action
   (run %{exe:intrinsics.exe} --selftest)))
 
+; The rename round trip. It needs a corpus and a compiler, neither of which
+; this repository carries, so `dune runtest` runs only its self-test: small
+; projects renamed and renamed back with the linked library's check as the
+; verdict, and the negative control, which plants a missed occurrence in every
+; rename and must see each one. `make rename` runs the measurement over the
+; corpus named by CORPUS with the compiler named by JASMINC.
+
+(executable
+ (name rename_trip)
+ (modules rename_trip)
+ (libraries jide_engine jide_controller jide_jasmin jide_lang unix))
+
+(rule
+ (alias runtest)
+ (action
+  (run %{exe:rename_trip.exe} --selftest)))
+
 ; The verdicts of uses.sh, the script behind `make parity-uses`, over a corpus
 ; uses.t writes itself: a passing run, the negative control failing the run,
 ; and a refused file. The comparison it runs is the one built here.
 
 (cram
  (applies_to uses)
- (deps uses.sh %{exe:typed_uses.exe}))
+ (deps %{exe:typed_uses.exe}))
 
 ; The list of known compiler defects in mutate.sh, the script behind the
 ; first-error parity run, with stand-ins for the checker and the compiler:
