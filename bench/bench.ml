@@ -462,3 +462,61 @@ let command_of_word = function
   | "largest" -> Largest
   | word -> die ("unknown command: " ^ word ^ " (whole, keystroke, largest)")
 
+let parse_options arguments =
+  let rec loop options rest =
+    match rest with
+    | [] -> options
+    | ("-h" | "--help") :: _ ->
+        print_endline usage;
+        exit 0
+    | "--samples" :: rest -> loop { options with samples = true } rest
+    | "--units" :: value :: rest ->
+        loop { options with units = Some value } rest
+    | "--arch" :: value :: rest -> loop { options with arch = Some value } rest
+    | "--call-conv" :: value :: rest ->
+        loop { options with call_conv = value } rest
+    | "-I" :: value :: rest ->
+        loop
+          { options with idirs = options.idirs @ [ split_include value ] }
+          rest
+    | "--label" :: value :: rest ->
+        loop { options with label = Some value } rest
+    | "--runs" :: value :: rest ->
+        loop { options with runs = positive "--runs" value } rest
+    | "--count" :: value :: rest ->
+        loop { options with count = positive "--count" value } rest
+    | option :: _ when String.length option > 0 && Char.equal option.[0] '-' ->
+        die ("unknown option: " ^ option)
+    | _ :: _ when options.units <> None ->
+        die
+          "the files of a units table are in the table, not on the command line"
+    | word :: rest -> (
+        match options.command with
+        | None ->
+            loop { options with command = Some (command_of_word word) } rest
+        | Some _ -> loop { options with files = options.files @ [ word ] } rest)
+  in
+  loop empty_options arguments
+
+let read_units ~call_conv path =
+  let text = read_file path in
+  let lines = String.split_on_char '\n' text in
+  List.filter_map
+    (fun line ->
+      let line = String.trim line in
+      if String.equal line "" || Char.equal line.[0] '#' then None
+      else
+        match String.split_on_char '\t' line with
+        | [ label; arch; idirs; file ] ->
+            let arch =
+              match arch with "auto" | "-" -> None | name -> Some name
+            in
+            Some
+              (make_unit ~label ~arch ~call_conv ~idirs:(split_idirs idirs)
+                 ~file)
+        | _ ->
+            die
+              ("a units line needs four tab-separated fields (label, arch, \
+                idirs, path): " ^ line))
+    lines
+
