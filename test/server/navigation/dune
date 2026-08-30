@@ -1,0 +1,19 @@
+; Navigation tests: the four requests the engine answers, layer 2 of the test
+; design. Each `.t` drives the built server through the test client over pipes,
+; so every test runs the real binary and the record is the protocol's own
+; bytes, normalised.
+;
+; The two executables are declared as dependencies even though dune would
+; build them anyway: the dependency is what makes a rebuilt server or client
+; re-run these tests instead of leaving a recorded pass from the previous
+; binary in place. A fixture a test reads that is not listed here would not
+; invalidate its record, so a fixture added later belongs in this list too.
+;
+; The stanza must never be given `(files ...)`, `(applies_to ...)` or
+; `(enabled_if false)`: each of those leaves a `.t` file in the tree with no
+; record, which `scripts/runtest.sh` refuses.
+
+(cram
+ (deps
+  %{exe:../../client/jide_test_client.exe}
+  %{exe:../../../lsp-server/native/main.exe}))

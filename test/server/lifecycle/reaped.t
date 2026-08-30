@@ -17,7 +17,7 @@ reported.
   $ ../../client/jide_test_client.exe --server ./run-server.sh --timeout 3000 session.txt > replies.txt 2> server.err; echo "status $?"
   status 0
   $ sed 's/"version":"[^"]*"/"version":"<version>"/' replies.txt
-  1 result {"capabilities":{"textDocumentSync":1},"serverInfo":{"name":"jasmin-lsp","version":"<version>"}}
+  1 result {"capabilities":{"definitionProvider":true,"documentSymbolProvider":true,"hoverProvider":true,"referencesProvider":true,"textDocumentSync":1},"serverInfo":{"name":"jasmin-lsp","version":"<version>"}}
   2 result null
   $ grep 'input closed' server.err
   [jasmin-lsp] input closed

@@ -125,9 +125,17 @@ let test_initialize () =
   | [ reply ] -> (
       match result_json reply with
       | Some (`Assoc fields) ->
-          check "initialize: capabilities are exactly full text sync"
+          check "initialize: exactly the implemented capabilities"
             (List.assoc_opt "capabilities" fields
-            = Some (`Assoc [ ("textDocumentSync", `Int 1) ]));
+            = Some
+                (`Assoc
+                  [
+                    ("textDocumentSync", `Int 1);
+                    ("definitionProvider", `Bool true);
+                    ("referencesProvider", `Bool true);
+                    ("hoverProvider", `Bool true);
+                    ("documentSymbolProvider", `Bool true);
+                  ]));
           check "initialize: serverInfo names the server"
             (match List.assoc_opt "serverInfo" fields with
             | Some (`Assoc info) ->
@@ -279,6 +287,9 @@ let test_multiple_changes_use_the_last () =
   check "two changes: the last one is applied"
     (stored_text server ~uri = Some "fn last() -> reg u32 { return 2; }")
 
+(* A known method's parameters that do not parse are InvalidParams: the
+   server understood the method and refused the call, which the protocol
+   separates from a method it does not have. *)
 let test_malformed_params () =
   let server = create () in
   initialize server;
@@ -290,7 +301,7 @@ let test_malformed_params () =
   in
   let replies = send server bad in
   check_single_error "malformed params"
-    Jsonrpc.Response.Error.Code.InvalidRequest replies
+    Jsonrpc.Response.Error.Code.InvalidParams replies
 
 let test_empty_change_keeps_document () =
   let server = create () in
@@ -410,6 +421,8 @@ let publish_method = "textDocument/publishDiagnostics"
 
 type probe = {
   mutable checks : string list;  (** The documents analysed, in order. *)
+  mutable checked_version : int;
+      (** The version of the text the last check read, 0 before the first. *)
   mutable forgotten : string list;  (** The documents the analysis dropped. *)
   mutable raises : bool;  (** Whether the analysis fails instead. *)
   mutable version_offset : int;  (** Added to the version it read. *)
@@ -419,6 +432,7 @@ type probe = {
 let probe () =
   {
     checks = [];
+    checked_version = 0;
     forgotten = [];
     raises = false;
     version_offset = 0;
@@ -440,6 +454,7 @@ let probe_analysis (probe : probe) engine : Jide_controller.Server.analysis =
         match Jide_engine.Engine.document engine ~uri with
         | None -> Hashtbl.remove stored uri
         | Some document ->
+            probe.checked_version <- Jide_engine.Document.version document;
             Hashtbl.replace stored uri
               ( Jide_engine.Document.version document + probe.version_offset,
                 probe.diagnostics ));
@@ -453,11 +468,12 @@ let probe_analysis (probe : probe) engine : Jide_controller.Server.analysis =
 let clock = ref 0.0
 let advance seconds = clock := !clock +. seconds
 
-let create_probe ?(log = fun _ -> ()) probe =
+let create_probe ?(log = fun _ -> ()) ?locate probe =
   let engine = Jide_engine.Engine.create () in
   let server =
     Jide_controller.Server.create ~log ?engine:(Some engine)
       ~analysis:(probe_analysis probe engine)
+      ?locate
       ~now:(fun () -> !clock)
       ()
   in
@@ -789,6 +805,669 @@ let test_nothing_is_published_after_shutdown () =
   check "after shutdown no check runs" (analyse_due server = []);
   check "after shutdown nothing was analysed" (probe.checks = [])
 
+(* The four navigation requests. The answers come from a locate the test
+   writes down, so the encoding of a location, of a hover and of a symbol tree
+   is checked without an engine that can find one, and every call is recorded
+   so a request that must not reach the engine can be seen not to have. The
+   analysis probe is the same one the publish path uses, so the forced check a
+   request runs is the check a real one runs. *)
+
+type locate_probe = {
+  mutable definition_calls : (string * Jide_lang.Position.t) list;
+  mutable reference_calls : (string * Jide_lang.Position.t * bool) list;
+  mutable hover_calls : (string * Jide_lang.Position.t) list;
+  mutable symbol_calls : string list;
+  mutable seen_at_call : (int * int) list;
+      (** What the check had done when the answer was asked for: how many
+          analyses had run, and the version of the text the last one read.
+          [(0, 0)] is a request that answered before its check. *)
+  mutable definitions : Jide_engine.Locate.location list;
+  mutable references : Jide_engine.Locate.location list;
+  mutable hover : Jide_engine.Locate.hover option;
+  mutable symbols : Jide_engine.Locate.symbol list;
+}
+
+let locate_probe () =
+  {
+    definition_calls = [];
+    reference_calls = [];
+    hover_calls = [];
+    symbol_calls = [];
+    seen_at_call = [];
+    definitions = [];
+    references = [];
+    hover = None;
+    symbols = [];
+  }
+
+let fake_locate ~analysis (probe : locate_probe) : Jide_controller.Server.locate
+    =
+  let seen () =
+    let checks, version =
+      (List.length analysis.checks, analysis.checked_version)
+    in
+    probe.seen_at_call <- probe.seen_at_call @ [ (checks, version) ]
+  in
+  {
+    Jide_controller.Server.definition =
+      (fun ~uri ~position ->
+        seen ();
+        probe.definition_calls <- probe.definition_calls @ [ (uri, position) ];
+        probe.definitions);
+    references =
+      (fun ~uri ~position ~include_declaration ->
+        seen ();
+        probe.reference_calls <-
+          probe.reference_calls @ [ (uri, position, include_declaration) ];
+        probe.references);
+    hover =
+      (fun ~uri ~position ->
+        seen ();
+        probe.hover_calls <- probe.hover_calls @ [ (uri, position) ];
+        probe.hover);
+    symbols =
+      (fun ~uri ->
+        seen ();
+        probe.symbol_calls <- probe.symbol_calls @ [ uri ];
+        probe.symbols);
+  }
+
+let position line character = Jide_lang.Position.make ~line ~character
+
+let locate_range ~start_line ~start_character ~end_line ~end_character =
+  {
+    Jide_engine.Locate.start_ = position start_line start_character;
+    end_ = position end_line end_character;
+  }
+
+let locate_location ~uri ~start_line ~start_character ~end_line ~end_character =
+  {
+    Jide_engine.Locate.uri;
+    range = locate_range ~start_line ~start_character ~end_line ~end_character;
+  }
+
+let range_json ~start_line ~start_character ~end_line ~end_character =
+  `Assoc
+    [
+      ( "start",
+        `Assoc
+          [ ("line", `Int start_line); ("character", `Int start_character) ] );
+      ( "end",
+        `Assoc [ ("line", `Int end_line); ("character", `Int end_character) ] );
+    ]
+
+let location_json ~uri ~start_line ~start_character ~end_line ~end_character =
+  `Assoc
+    [
+      ("uri", `String uri);
+      ("range", range_json ~start_line ~start_character ~end_line ~end_character);
+    ]
+
+let target_params ~uri ~line ~character =
+  `Assoc
+    [
+      ("textDocument", `Assoc [ ("uri", `String uri) ]);
+      ("position", `Assoc [ ("line", `Int line); ("character", `Int character) ]);
+    ]
+
+let references_params ~uri ~line ~character ~include_declaration =
+  `Assoc
+    [
+      ("textDocument", `Assoc [ ("uri", `String uri) ]);
+      ("position", `Assoc [ ("line", `Int line); ("character", `Int character) ]);
+      ("context", `Assoc [ ("includeDeclaration", `Bool include_declaration) ]);
+    ]
+
+let document_symbol_params ~uri =
+  `Assoc [ ("textDocument", `Assoc [ ("uri", `String uri) ]) ]
+
+(* A request whose parameters are absent rather than wrong: the protocol
+   allows the member to be missing, and the server has to refuse that too. *)
+let request_without_params id method_ =
+  Jsonrpc.Packet.Request (Jsonrpc.Request.create ~id:(`Int id) ~method_ ())
+
+let markdown value = { Jide_engine.Types.value }
+
+(* A reply to a navigation request is the second packet: the forced check's
+   publish comes first. Both are checked, so a request that skipped the check
+   and a request that sent the reply first are both failures. *)
+let check_checked_reply name ~version reply =
+  match reply with
+  | [ publish; reply ] -> (
+      (match publishes [ publish ] with
+      | [ params ] ->
+          check
+            (name ^ ": the check publishes first")
+            (int_field "version" params = Some version)
+      | _ -> check (name ^ ": one publish first") false);
+      match result_json reply with
+      | Some result -> result
+      | None ->
+          check (name ^ ": the reply carries a result") false;
+          `Null)
+  | _ ->
+      check (name ^ ": a publish and a reply") false;
+      `Null
+
+let test_definition_answer () =
+  let uri = "file:///tmp/definition.jazz" in
+  let locate = locate_probe () in
+  locate.definitions <-
+    [
+      locate_location ~uri:"file:///tmp/other.jazz" ~start_line:2
+        ~start_character:3 ~end_line:2 ~end_character:10;
+    ];
+  let probe = probe () in
+  let server, _ =
+    create_probe ~locate:(fake_locate ~analysis:probe locate) probe
+  in
+  initialize server;
+  did_open server ~uri ~text:"fn f() -> reg u32 {\n  return 0;\n}\n";
+  let replies =
+    send server
+      (request
+         ~params:(target_params ~uri ~line:1 ~character:2)
+         2 "textDocument/definition")
+  in
+  let result = check_checked_reply "definition" ~version:1 replies in
+  check "definition: a location array"
+    (result
+    = `List
+        [
+          location_json ~uri:"file:///tmp/other.jazz" ~start_line:2
+            ~start_character:3 ~end_line:2 ~end_character:10;
+        ]);
+  check "definition: the engine was asked where the request said"
+    (locate.definition_calls = [ (uri, position 1 2) ])
+
+let test_definition_without_an_answer () =
+  let uri = "file:///tmp/nothing.jazz" in
+  let locate = locate_probe () in
+  let probe = probe () in
+  let server, _ =
+    create_probe ~locate:(fake_locate ~analysis:probe locate) probe
+  in
+  initialize server;
+  did_open server ~uri ~text:"fn f() -> reg u32 {\n  return 0;\n}\n";
+  let replies =
+    send server
+      (request
+         ~params:(target_params ~uri ~line:1 ~character:2)
+         2 "textDocument/definition")
+  in
+  let result =
+    check_checked_reply "definition without an answer" ~version:1 replies
+  in
+  check "definition without an answer: null, not an error" (result = `Null)
+
+let test_references_answer () =
+  let uri = "file:///tmp/references.jazz" in
+  let locate = locate_probe () in
+  locate.references <-
+    [
+      locate_location ~uri ~start_line:1 ~start_character:1 ~end_line:1
+        ~end_character:2;
+      locate_location ~uri ~start_line:1 ~start_character:9 ~end_line:1
+        ~end_character:10;
+    ];
+  let probe = probe () in
+  let server, _ =
+    create_probe ~locate:(fake_locate ~analysis:probe locate) probe
+  in
+  initialize server;
+  did_open server ~uri ~text:"fn f() -> reg u32 {\n  return 0;\n}\n";
+  let replies =
+    send server
+      (request
+         ~params:
+           (references_params ~uri ~line:1 ~character:2
+              ~include_declaration:true)
+         2 "textDocument/references")
+  in
+  let result = check_checked_reply "references" ~version:1 replies in
+  check "references: every location, in order"
+    (result
+    = `List
+        [
+          location_json ~uri ~start_line:1 ~start_character:1 ~end_line:1
+            ~end_character:2;
+          location_json ~uri ~start_line:1 ~start_character:9 ~end_line:1
+            ~end_character:10;
+        ]);
+  check "references: the context reaches the engine"
+    (locate.reference_calls = [ (uri, position 1 2, true) ])
+
+let test_references_without_an_answer () =
+  let uri = "file:///tmp/no-references.jazz" in
+  let locate = locate_probe () in
+  let probe = probe () in
+  let server, _ =
+    create_probe ~locate:(fake_locate ~analysis:probe locate) probe
+  in
+  initialize server;
+  did_open server ~uri ~text:"fn f() -> reg u32 {\n  return 0;\n}\n";
+  let replies =
+    send server
+      (request
+         ~params:
+           (references_params ~uri ~line:1 ~character:2
+              ~include_declaration:false)
+         2 "textDocument/references")
+  in
+  let result =
+    check_checked_reply "references without an answer" ~version:1 replies
+  in
+  check "references without an answer: an empty list, not an error"
+    (result = `List []);
+  check "references: the default is not assumed"
+    (locate.reference_calls = [ (uri, position 1 2, false) ])
+
+let test_hover_answer () =
+  let uri = "file:///tmp/hover.jazz" in
+  let locate = locate_probe () in
+  locate.hover <-
+    Some
+      {
+        Jide_engine.Locate.range =
+          Some
+            (locate_range ~start_line:1 ~start_character:2 ~end_line:1
+               ~end_character:3);
+        contents = markdown "reg u32";
+      };
+  let probe = probe () in
+  let server, _ =
+    create_probe ~locate:(fake_locate ~analysis:probe locate) probe
+  in
+  initialize server;
+  did_open server ~uri ~text:"fn f() -> reg u32 {\n  return 0;\n}\n";
+  let replies =
+    send server
+      (request
+         ~params:(target_params ~uri ~line:1 ~character:2)
+         2 "textDocument/hover")
+  in
+  let result = check_checked_reply "hover" ~version:1 replies in
+  check "hover: markup content and range"
+    (result
+    = `Assoc
+        [
+          ( "contents",
+            `Assoc
+              [ ("kind", `String "markdown"); ("value", `String "reg u32") ] );
+          ( "range",
+            range_json ~start_line:1 ~start_character:2 ~end_line:1
+              ~end_character:3 );
+        ])
+
+let test_hover_without_an_answer () =
+  let uri = "file:///tmp/no-hover.jazz" in
+  let locate = locate_probe () in
+  let probe = probe () in
+  let server, _ =
+    create_probe ~locate:(fake_locate ~analysis:probe locate) probe
+  in
+  initialize server;
+  did_open server ~uri ~text:"fn f() -> reg u32 {\n  return 0;\n}\n";
+  let replies =
+    send server
+      (request
+         ~params:(target_params ~uri ~line:1 ~character:2)
+         2 "textDocument/hover")
+  in
+  let result =
+    check_checked_reply "hover without an answer" ~version:1 replies
+  in
+  check "hover without an answer: null, not an error" (result = `Null)
+
+let test_document_symbols () =
+  let uri = "file:///tmp/symbols.jazz" in
+  let locate = locate_probe () in
+  locate.symbols <-
+    [
+      {
+        Jide_engine.Locate.name = "f";
+        detail = Some "fn f() -> reg u32";
+        kind = Jide_engine.Types.Function;
+        range =
+          locate_range ~start_line:0 ~start_character:0 ~end_line:2
+            ~end_character:1;
+        selection_range =
+          locate_range ~start_line:0 ~start_character:3 ~end_line:0
+            ~end_character:4;
+        children =
+          [
+            {
+              Jide_engine.Locate.name = "x";
+              detail = None;
+              kind = Jide_engine.Types.Variable;
+              range =
+                locate_range ~start_line:1 ~start_character:2 ~end_line:1
+                  ~end_character:3;
+              selection_range =
+                locate_range ~start_line:1 ~start_character:2 ~end_line:1
+                  ~end_character:3;
+              children = [];
+            };
+          ];
+      };
+    ];
+  let probe = probe () in
+  let server, _ =
+    create_probe ~locate:(fake_locate ~analysis:probe locate) probe
+  in
+  initialize server;
+  did_open server ~uri ~text:"fn f() -> reg u32 {\n  return 0;\n}\n";
+  let replies =
+    send server
+      (request
+         ~params:(document_symbol_params ~uri)
+         2 "textDocument/documentSymbol")
+  in
+  let result = check_checked_reply "documentSymbol" ~version:1 replies in
+  check "documentSymbol: the hierarchy, with both ranges"
+    (result
+    = `List
+        [
+          `Assoc
+            [
+              ("name", `String "f");
+              ("kind", `Int 12);
+              ( "range",
+                range_json ~start_line:0 ~start_character:0 ~end_line:2
+                  ~end_character:1 );
+              ( "selectionRange",
+                range_json ~start_line:0 ~start_character:3 ~end_line:0
+                  ~end_character:4 );
+              ("detail", `String "fn f() -> reg u32");
+              ( "children",
+                `List
+                  [
+                    `Assoc
+                      [
+                        ("name", `String "x");
+                        ("kind", `Int 13);
+                        ( "range",
+                          range_json ~start_line:1 ~start_character:2
+                            ~end_line:1 ~end_character:3 );
+                        ( "selectionRange",
+                          range_json ~start_line:1 ~start_character:2
+                            ~end_line:1 ~end_character:3 );
+                      ];
+                  ] );
+            ];
+        ])
+
+let test_document_symbols_without_items () =
+  let uri = "file:///tmp/empty-symbols.jazz" in
+  let locate = locate_probe () in
+  let probe = probe () in
+  let server, _ =
+    create_probe ~locate:(fake_locate ~analysis:probe locate) probe
+  in
+  initialize server;
+  did_open server ~uri ~text:"\n\n";
+  let replies =
+    send server
+      (request
+         ~params:(document_symbol_params ~uri)
+         2 "textDocument/documentSymbol")
+  in
+  let result =
+    check_checked_reply "documentSymbol without items" ~version:1 replies
+  in
+  check "documentSymbol without items: an empty list, not an error"
+    (result = `List [])
+
+(* Whitespace and past the end of the file are positions, not errors: the
+   request is answered, the engine is asked at the position the client wrote,
+   and the empty answer it gives is encoded as null or []. *)
+let test_positions_outside_the_text () =
+  let uri = "file:///tmp/outside.jazz" in
+  let text = "fn f() -> reg u32 {\n  return 0;\n}\n" in
+  let run method_ ~params =
+    let locate = locate_probe () in
+    let probe = probe () in
+    let server, _ =
+      create_probe ~locate:(fake_locate ~analysis:probe locate) probe
+    in
+    initialize server;
+    did_open server ~uri ~text;
+    let replies = send server (request ~params 2 method_) in
+    ( locate,
+      check_checked_reply (method_ ^ " outside the text") ~version:1 replies )
+  in
+  (* Line 1 is "  return 0;": character 1 is a space. *)
+  let locate, result =
+    run "textDocument/definition"
+      ~params:(target_params ~uri ~line:1 ~character:1)
+  in
+  check "definition in whitespace: null" (result = `Null);
+  check "definition in whitespace: the engine sees the position"
+    (locate.definition_calls = [ (uri, position 1 1) ]);
+  let locate, result =
+    run "textDocument/hover" ~params:(target_params ~uri ~line:1 ~character:1)
+  in
+  check "hover in whitespace: null" (result = `Null);
+  check "hover in whitespace: the engine sees the position"
+    (locate.hover_calls = [ (uri, position 1 1) ]);
+  let locate, result =
+    run "textDocument/definition"
+      ~params:(target_params ~uri ~line:99 ~character:0)
+  in
+  check "definition past the end: null" (result = `Null);
+  check "definition past the end: the engine sees the position"
+    (locate.definition_calls = [ (uri, position 99 0) ]);
+  let locate, result =
+    run "textDocument/references"
+      ~params:
+        (references_params ~uri ~line:99 ~character:0 ~include_declaration:true)
+  in
+  check "references past the end: an empty list" (result = `List []);
+  check "references past the end: the engine sees the position"
+    (locate.reference_calls = [ (uri, position 99 0, true) ])
+
+(* A document the server does not hold has no stale text, so the request is
+   answered without a publish and without an error. *)
+let test_navigation_for_an_unopened_document () =
+  let uri = "file:///tmp/never-opened.jazz" in
+  let locate = locate_probe () in
+  let probe = probe () in
+  let server, _ =
+    create_probe ~locate:(fake_locate ~analysis:probe locate) probe
+  in
+  initialize server;
+  let replies =
+    send server
+      (request
+         ~params:(target_params ~uri ~line:0 ~character:0)
+         2 "textDocument/definition")
+  in
+  check "an unopened document: one reply, no publish"
+    (match replies with
+    | [ reply ] -> result_json reply = Some `Null
+    | _ -> false);
+  check "an unopened document: nothing was analysed" (probe.checks = [])
+
+(* The answer is for the text the client has: a change the debounce has not
+   published yet is checked before the reply, and the publish names the new
+   version. *)
+let test_a_navigation_request_checks_stale_text () =
+  let uri = "file:///tmp/stale.jazz" in
+  let locate = locate_probe () in
+  let probe = probe () in
+  let server, _ =
+    create_probe ~locate:(fake_locate ~analysis:probe locate) probe
+  in
+  initialize server;
+  did_open server ~uri ~text:"fn f() -> reg u32 {\n  return 0;\n}\n";
+  did_change server ~uri ~version:2
+    ~text:"fn g() -> reg u32 {\n  return 1;\n}\n";
+  let replies =
+    send server
+      (request
+         ~params:(target_params ~uri ~line:1 ~character:2)
+         2 "textDocument/hover")
+  in
+  let result = check_checked_reply "a stale document" ~version:2 replies in
+  check "a stale document: the answer is for the new text" (result = `Null);
+  check_int "a stale document: the request ran the one check"
+    (List.length probe.checks) 1;
+  (* The check has to have run before the engine was asked, and the text it
+     read has to be the text the answer is about: one check, of version 2.
+     [(0, 0)] is an answer computed from the index the previous text left. *)
+  check "a stale document: the engine was asked after the check"
+    (locate.seen_at_call = [ (1, 2) ]);
+  check "a stale document: no work is left for the loop"
+    (analyse_due server = [])
+
+let test_a_dropped_check_still_answers () =
+  let uri = "file:///tmp/dropped.jazz" in
+  let locate = locate_probe () in
+  let probe = probe () in
+  let server, _ =
+    create_probe ~locate:(fake_locate ~analysis:probe locate) probe
+  in
+  initialize server;
+  did_open server ~uri ~text:"fn f() -> reg u32 {\n  return 0;\n}\n";
+  probe.version_offset <- -1;
+  let replies =
+    send server
+      (request
+         ~params:(target_params ~uri ~line:1 ~character:2)
+         2 "textDocument/hover")
+  in
+  check "a dropped check: one reply, no publish"
+    (match replies with
+    | [ reply ] -> result_json reply = Some `Null
+    | _ -> false);
+  check_int "a dropped check: the request ran the one check"
+    (List.length probe.checks) 1;
+  check "a dropped check: the engine was asked after the check"
+    (locate.seen_at_call = [ (1, 1) ])
+
+(* A parameters object that does not parse is InvalidParams, and it never
+   reaches the engine or costs a check. *)
+let test_navigation_rejects_bad_params () =
+  let uri = "file:///tmp/strict.jazz" in
+  let bad_params =
+    [
+      ( "definition without params",
+        "textDocument/definition",
+        None,
+        "params must be an object" );
+      ( "definition without position",
+        "textDocument/definition",
+        Some (`Assoc [ ("textDocument", `Assoc [ ("uri", `String uri) ]) ]),
+        "position is missing" );
+      ( "definition with a string line",
+        "textDocument/definition",
+        Some
+          (`Assoc
+            [
+              ("textDocument", `Assoc [ ("uri", `String uri) ]);
+              ( "position",
+                `Assoc [ ("line", `String "0"); ("character", `Int 0) ] );
+            ]),
+        "position.line must be an integer" );
+      ( "definition with a negative character",
+        "textDocument/definition",
+        Some
+          (`Assoc
+            [
+              ("textDocument", `Assoc [ ("uri", `String uri) ]);
+              ("position", `Assoc [ ("line", `Int 0); ("character", `Int (-1)) ]);
+            ]),
+        "position.character must not be negative" );
+      ( "definition without a uri",
+        "textDocument/definition",
+        Some
+          (`Assoc
+            [
+              ("textDocument", `Assoc []);
+              ("position", `Assoc [ ("line", `Int 0); ("character", `Int 0) ]);
+            ]),
+        "textDocument.uri is missing" );
+      ( "hover with a non-object position",
+        "textDocument/hover",
+        Some
+          (`Assoc
+            [
+              ("textDocument", `Assoc [ ("uri", `String uri) ]);
+              ("position", `Int 0);
+            ]),
+        "position must be an object" );
+      ( "references without context",
+        "textDocument/references",
+        Some (target_params ~uri ~line:0 ~character:0),
+        "context is missing" );
+      ( "references with a string context",
+        "textDocument/references",
+        Some
+          (`Assoc
+            [
+              ("textDocument", `Assoc [ ("uri", `String uri) ]);
+              ("position", `Assoc [ ("line", `Int 0); ("character", `Int 0) ]);
+              ("context", `Assoc [ ("includeDeclaration", `String "yes") ]);
+            ]),
+        "context.includeDeclaration must be a boolean" );
+      ( "documentSymbol without a text document",
+        "textDocument/documentSymbol",
+        Some (`Assoc []),
+        "textDocument is missing" );
+    ]
+  in
+  List.iter
+    (fun (name, method_, params, message) ->
+      let locate = locate_probe () in
+      let probe = probe () in
+      let server, _ =
+        create_probe ~locate:(fake_locate ~analysis:probe locate) probe
+      in
+      initialize server;
+      did_open server ~uri ~text:"fn f() -> reg u32 {\n  return 0;\n}\n";
+      let packet =
+        match params with
+        | None -> request_without_params 2 method_
+        | Some params -> request ~params 2 method_
+      in
+      let replies = send server packet in
+      check_single_error name Jsonrpc.Response.Error.Code.InvalidParams replies;
+      (match replies with
+      | [ reply ] ->
+          check
+            (name ^ ": the message names the member")
+            (match
+               match reply with
+               | Jsonrpc.Packet.Response { result = Error error; _ } ->
+                   Some error
+               | _ -> None
+             with
+            | Some error ->
+                String.equal error.Jsonrpc.Response.Error.message message
+            | None -> false)
+      | _ -> ());
+      check
+        (name ^ ": the engine was not asked")
+        (locate.definition_calls = []
+        && locate.reference_calls = []
+        && locate.hover_calls = [] && locate.symbol_calls = []);
+      check (name ^ ": nothing was checked") (probe.checks = []))
+    bad_params
+
+(* The four are added, not the protocol's whole list: a request this server
+   does not implement is still MethodNotFound. *)
+let test_other_protocol_requests_are_still_unknown () =
+  let server = create () in
+  initialize server;
+  let replies =
+    send server
+      (request
+         ~params:(target_params ~uri:"file:///tmp/a.jazz" ~line:0 ~character:0)
+         2 "textDocument/completion")
+  in
+  check_single_error "completion is not advertised or answered"
+    Jsonrpc.Response.Error.Code.MethodNotFound replies
+
 let () =
   test_initialize ();
   test_second_initialize ();
@@ -824,6 +1503,20 @@ let () =
   test_initialize_options_set_the_delay ();
   test_configuration_sets_the_delay ();
   test_nothing_is_published_after_shutdown ();
+  test_definition_answer ();
+  test_definition_without_an_answer ();
+  test_references_answer ();
+  test_references_without_an_answer ();
+  test_hover_answer ();
+  test_hover_without_an_answer ();
+  test_document_symbols ();
+  test_document_symbols_without_items ();
+  test_positions_outside_the_text ();
+  test_navigation_for_an_unopened_document ();
+  test_a_navigation_request_checks_stale_text ();
+  test_a_dropped_check_still_answers ();
+  test_navigation_rejects_bad_params ();
+  test_other_protocol_requests_are_still_unknown ();
   if !failures = 0 then print_endline "all server tests passed"
   else (
     Printf.printf "%d server test(s) failed\n" !failures;

@@ -17,7 +17,31 @@
     waits for [delay] milliseconds without another change; a document that
     closes is cleared at once. The analysis itself is not the server's: it
     comes from the [analysis] the caller passes, so the server decides when
-    to analyse and what to publish, and the engine decides how. *)
+    to analyse and what to publish, and the engine decides how.
+
+    It owns the four navigation requests the same way. A request whose
+    document is stale forces a check before it answers, so it never answers
+    from text the client has replaced, and the four answers come from the
+    [locate] the caller passes, so the server decides when to ask and the
+    engine decides what to answer. An answer the engine does not have is
+    [null] or [], never an error; a parameters object the request cannot
+    read is [InvalidParams] (-32602).
+
+    Three limits of the protocol's client-capability negotiation are
+    declared here rather than implemented: this server reads none of the
+    client's capabilities, and the advertisement in [initialize] is fixed.
+
+    - [documentSymbolProvider] is advertised unconditionally. Whether the
+      client can take the hierarchy at all is not asked; {!Navigation}
+      writes the tree either way.
+    - [hoverProvider] likewise: the answer is always markdown, whatever
+      [contentFormat] the client named. {!Navigation} holds the detail.
+    - A cancel request is logged and otherwise ignored: a superseded request
+      is still answered, normally and in full. The staleness rule above
+      means a request never answers from text the client has replaced, which
+      is one half of what cancellation is for; the other half is missing,
+      and the [RequestCancelled] code is mapped for a handler that would use
+      it and is never sent today. *)
 
 type state = Uninitialized | Running | Shutting_down | Exited
 
@@ -35,6 +59,34 @@ type analysis = {
 
 type t
 
+type locate = {
+  definition :
+    uri:string ->
+    position:Jide_lang.Position.t ->
+    Jide_engine.Locate.location list;
+      (** The declaration of the name at the position. *)
+  references :
+    uri:string ->
+    position:Jide_lang.Position.t ->
+    include_declaration:bool ->
+    Jide_engine.Locate.location list;
+      (** Every occurrence of the name at the position. *)
+  hover :
+    uri:string ->
+    position:Jide_lang.Position.t ->
+    Jide_engine.Locate.hover option;
+      (** What the name at the position is. *)
+  symbols : uri:string -> Jide_engine.Locate.symbol list;
+      (** The document's outline. *)
+}
+(** How the four navigation requests are answered. The engine satisfies this
+    interface, through {!Jide_engine.Locate}, and the default the server is
+    created with is the engine's; a test passes its own to see what the
+    server does with an answer it writes down. Each function receives the uri
+    as the client wrote it, and the position as it was parsed: a position
+    past the end of the document is the request's, not an error, and the
+    answer then is what the engine says of it, which may be nothing. *)
+
 val default_delay : int
 (** The debounce when neither the caller nor the client names one: 250
     milliseconds. *)
@@ -49,15 +101,18 @@ val create :
   log:(string -> unit) ->
   ?engine:Jide_engine.Engine.t ->
   ?analysis:analysis ->
+  ?locate:locate ->
   ?delay:int ->
   ?now:(unit -> float) ->
   unit ->
   t
-(** [create ~log ?engine ?analysis ?delay ?now ()] is a server that has not
-    been initialized. [delay] is the debounce in milliseconds, clamped to
-    [min_delay] to [max_delay] (and 250 when it is not given); a client can
+(** [create ~log ?engine ?analysis ?locate ?delay ?now ()] is a server that
+    has not been initialized. [delay] is the debounce in milliseconds, clamped
+    to [min_delay] to [max_delay] (and 250 when it is not given); a client can
     change it later with the [diagnostics.delay] setting. [now] is the clock
-    in seconds, [Unix.gettimeofday] unless a test supplies its own. *)
+    in seconds, [Unix.gettimeofday] unless a test supplies its own. [locate]
+    is the engine's answers, {!locate} over [engine] unless a test supplies
+    its own. *)
 
 val delay : t -> int
 (** The debounce in force, in milliseconds. *)
