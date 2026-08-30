@@ -42,6 +42,22 @@ val publish_params :
     the version of the text the diagnostics describe when it is known, and
     the full set. An empty list clears the file's diagnostics. *)
 
+val completion_json : Jide_engine.Types.completion_item list -> Yojson.Safe.t
+(** [completion_json items] is the answer of [textDocument/completion]: one
+    object per item, each with its label and its kind, and with its detail,
+    documentation, insert text and sort text only where the engine gave them.
+    An absent field is left out rather than written null, because the
+    protocol tells the two apart. The items keep the engine's order, which is
+    by label; the protocol reads them as a list of the same weight and lets
+    the client decide otherwise. *)
+
+val signature_help_json : Jide_engine.Types.signature_help -> Yojson.Safe.t
+(** [signature_help_json help] is the answer of [textDocument/signatureHelp]:
+    the signatures with their parameters and documentation, and the active
+    signature and argument as zero-based indexes into them. A signature the
+    engine gave no parameters for carries no [parameters] field, because an
+    empty list would say the call takes no argument. *)
+
 val delay_of_settings : Yojson.Safe.t -> int option
 (** [delay_of_settings settings] is the value of [diagnostics.delay] in an
     editor's settings object, or [None] when the object does not carry one.

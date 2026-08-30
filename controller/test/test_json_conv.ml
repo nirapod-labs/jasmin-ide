@@ -124,12 +124,121 @@ let test_delay_of_settings () =
   check "delay: not an object" (of_string {|[]|} = None);
   check "delay: a null section" (of_string {|{"diagnostics":null}|} = None)
 
+let markdown value = { Jide_engine.Types.value }
+
+let item ?detail ?documentation ?insert_text ?sort_text ~label ~kind () =
+  {
+    Jide_engine.Types.label;
+    kind;
+    detail;
+    documentation;
+    insert_text;
+    sort_text;
+  }
+
+let parameter ?documentation label = { Jide_engine.Types.label; documentation }
+
+let signature ?documentation ?(parameters = []) label =
+  { Jide_engine.Types.label; documentation; parameters }
+
+(* The completion answer: the two fields every item carries, the optional
+   fields only when the engine has them, and the protocol's number for each
+   kind the engine can return. *)
+let test_completion () =
+  check_json "completion: an item with only the required fields"
+    (Jide_controller.Json_conv.completion_json
+       [ item ~label:"fn" ~kind:Jide_engine.Types.Keyword () ])
+    {|[{"label":"fn","kind":14}]|};
+  check_json "completion: every optional field, in the protocol's names"
+    (Jide_controller.Json_conv.completion_json
+       [
+         item ~label:"add" ~kind:Jide_engine.Types.Function
+           ~detail:"fn add(reg u64 a, reg u64 b) -> reg u64"
+           ~documentation:(markdown "twice") ~insert_text:"add"
+           ~sort_text:"0001add" ();
+       ])
+    {|[{"label":"add","kind":3,"detail":"fn add(reg u64 a, reg u64 b) -> reg u64","documentation":{"kind":"markdown","value":"twice"},"insertText":"add","sortText":"0001add"}]|};
+  check_json "completion: no item is an empty list, not null"
+    (Jide_controller.Json_conv.completion_json [])
+    {|[]|};
+  (* Every kind the engine has, so a number that drifts is caught here. *)
+  let kinds =
+    [
+      (Jide_engine.Types.Keyword, 14);
+      (Function, 3);
+      (Variable_, 6);
+      (Field, 5);
+      (Module_, 9);
+      (Type_parameter, 25);
+      (Snippet, 15);
+      (Text, 1);
+    ]
+  in
+  List.iter
+    (fun (kind, expected) ->
+      let json =
+        Jide_controller.Json_conv.completion_json [ item ~label:"x" ~kind () ]
+      in
+      match json with
+      | `List [ `Assoc fields ] -> (
+          match List.assoc_opt "kind" fields with
+          | Some (`Int actual) ->
+              check
+                (Printf.sprintf "completion: kind %d" expected)
+                (actual = expected)
+          | _ ->
+              check
+                (Printf.sprintf "completion: kind %d is a number" expected)
+                false)
+      | _ -> check (Printf.sprintf "completion: kind %d" expected) false)
+    kinds
+
+(* The signature-help answer: the signatures with their parameters, the
+   active indexes as the engine gave them, and no [parameters] field for a
+   signature the engine left without any. *)
+let test_signature_help () =
+  check_json "signature help: one signature with two parameters"
+    (Jide_controller.Json_conv.signature_help_json
+       {
+         Jide_engine.Types.signatures =
+           [
+             signature "add(reg u64, reg u64) -> reg u64"
+               ~parameters:[ parameter "reg u64"; parameter "reg u64" ];
+           ];
+         active_signature = 0;
+         active_parameter = 1;
+       })
+    {|{"signatures":[{"label":"add(reg u64, reg u64) -> reg u64","parameters":[{"label":"reg u64"},{"label":"reg u64"}]}],"activeSignature":0,"activeParameter":1}|};
+  check_json "signature help: a parameter's documentation"
+    (Jide_controller.Json_conv.signature_help_json
+       {
+         Jide_engine.Types.signatures =
+           [
+             signature "spill(reg u64)" ~documentation:(markdown "spill one")
+               ~parameters:
+                 [ parameter ~documentation:(markdown "the value") "reg u64" ];
+           ];
+         active_signature = 0;
+         active_parameter = 0;
+       })
+    {|{"signatures":[{"label":"spill(reg u64)","documentation":{"kind":"markdown","value":"spill one"},"parameters":[{"label":"reg u64","documentation":{"kind":"markdown","value":"the value"}}]}],"activeSignature":0,"activeParameter":0}|};
+  check_json "signature help: no parameter field when the engine named none"
+    (Jide_controller.Json_conv.signature_help_json
+       {
+         Jide_engine.Types.signatures = [ signature "f()" ];
+         active_signature = 0;
+         active_parameter = 0;
+       })
+    {|{"signatures":[{"label":"f()"}],"activeSignature":0,"activeParameter":0}|}
+
 let () =
   test_position ();
   test_range ();
   test_severity ();
   test_diagnostic ();
   test_publish ();
+  test_completion ();
+  test_signature_help ();
   test_delay_of_settings ();
   if !failures = 0 then print_endline "all conversion tests passed"
   else (
