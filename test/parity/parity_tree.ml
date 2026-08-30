@@ -587,7 +587,12 @@ let main () =
       | exception Sys_error message ->
           Printf.eprintf "parity_tree: cannot read %s: %s\n" path message;
           exit 2)
-  | _ ->
+  | _ :: args ->
+      corpus_run
+        (H.parse_args ~usage:corpus_usage ~flags:[]
+           ~options:[ "--corpus"; "--checks"; "--jasmin2tex"; "--jobs" ]
+           args)
+  | [] ->
       prerr_endline usage;
       exit 2
 
