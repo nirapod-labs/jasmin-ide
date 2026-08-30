@@ -58,6 +58,16 @@
 (intrinsic
   "#" @punctuation.special)
 
+; Intrinsic instructions such as `#spill(x);`, a statement of their own since
+; the grammar parses them as one rather than as an annotation.
+(intrinsic_instr
+  intrinsic: (intrinsic) @function)
+
+; `assert("message", condition);`, the compiler's ASSERT statement.
+(assert_statement
+  "assert" @keyword
+  message: (string_literal) @string)
+
 ; Annotations and their contents
 (annotations) @attribute
 
@@ -70,8 +80,8 @@
 (annotations
   (string_literal) @string)
 
-(annotations
-  (aint) @number)
+; An annotation value is an expression, so a number in one is an
+; `int_literal` and the literal rule below colours it with the rest.
 
 ; Functions
 (function_definition

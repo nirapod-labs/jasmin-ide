@@ -8,7 +8,13 @@ description = "Jasmin language support for Zed: recognition of .jazz and .jinc f
 repository = "https://github.com/jasmin-lang/tree-sitter-jasmin"
 # `commit` is an alias of `rev`; naming the same commit in both keys makes Zed
 # reject this file as a duplicate field, so the commit is written once.
-rev = "4e678d93d80f4e698a540981008bb44c105ffeff"
+#
+# This is the grammar head that carries the fixes the queries are written
+# for: `intrinsic_instr` for `#spill(x);`, `assert_statement` for
+# `assert("message", condition);`, annotation values parsed as expressions,
+# and the compiler's operator precedence. The queries name only nodes this
+# commit has, and `test/queries.sh` refuses any other grammar.
+rev = "ada182798ca67fa2e241e2882c90632f948730d1"
 
 [language_servers.jasmin-lsp]
 name = "Jasmin LSP"

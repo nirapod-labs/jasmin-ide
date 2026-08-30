@@ -21,7 +21,10 @@
 #
 # For each file the job prints the capture names it produced, and it checks
 # every capture name written in a query against the names Zed gives a style
-# to, so `@variable.builtin` fails here rather than doing nothing.
+# to, so `@variable.builtin` fails here rather than doing nothing. A file that
+# compiles and matches something can still hold a pattern the sample never
+# exercises, so a short list of constructs each named file must capture is
+# checked too.
 
 set -u
 
@@ -155,12 +158,42 @@ for name in "${files[@]}"; do
     continue
   fi
 
+  printf '%s\n' "$out" >"$tmp/$name.out"
   printf 'ok   %-15s %2d captures: %s\n' \
     "$name.scm" "$count" "$(printf '%s\n' "$produced" | tr '\n' ' ' | sed 's/ $//')"
 done
 
+# A file that matches something is not the same as every pattern in it being
+# exercised: a pattern for a node the sample never uses compiles and then
+# matches nothing, so nobody notices it is wrong. Each entry below is
+# `<query file>:<text the sample must capture through it>`, covering the six
+# things the outline lists and the two statements the grammar gained last.
+required=(
+  "outline:lane"
+  "outline:CRYPTO"
+  "outline:ROUNDS"
+  "outline:mask"
+  "outline:keep"
+  "outline:mix"
+  "highlights:#spill"
+  "highlights:assert"
+)
+for entry in "${required[@]}"; do
+  name=${entry%%:*}
+  text=${entry#*:}
+  [ -f "$tmp/$name.out" ] || continue
+  # The capture's own text, not any larger capture that happens to contain
+  # it: an outline item's text is its whole declaration, so a name shows up
+  # in it only through the pattern that captured the name.
+  needle='text: `'"$text"'`'
+  if ! grep -qF -- "$needle" "$tmp/$name.out"; then
+    printf 'fail %-15s matched no %s in the sample\n' "$name.scm" "$text"
+    failures=$((failures + 1))
+  fi
+done
+
 if [ "$failures" -ne 0 ]; then
-  printf '\n%d of %d query files failed\n' "$failures" "${#files[@]}" >&2
+  printf '\n%d failure(s) across %d query files\n' "$failures" "${#files[@]}" >&2
   exit 1
 fi
-printf '\nall %d query files compile and match the sample\n' "${#files[@]}"
+printf '\nall %d query files compile, match the sample and capture what it must\n' "${#files[@]}"
