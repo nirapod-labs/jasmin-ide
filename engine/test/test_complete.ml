@@ -272,3 +272,187 @@ let test_the_fixed_tables () =
   check "annotation keys: sct is one" (List.mem "sct" keys);
   check "annotation keys: they are sorted" (keys = List.sort String.compare keys)
 
+let test_signature_help () =
+  let file = "/work/basic.jazz" in
+  let resolved = resolve file basic in
+  let index = index_of resolved file in
+  (match byte_after basic ~within:"  x = add(counter, 1);" ~name:"add(" with
+  | None -> check "signature: the call exists" false
+  | Some byte -> (
+      match signature_at ~facts:basic_facts (resolved, index) ~byte with
+      | None -> check "signature: the call has a signature" false
+      | Some signature ->
+          check "signature: the callee is the name as written"
+            (String.equal signature.callee "add");
+          check "signature: the parameters are the checked types"
+            (signature.parameters = [ "reg u64"; "reg u64" ]);
+          check "signature: the label is the signature"
+            (String.equal signature.label "add(reg u64, reg u64) -> reg u64");
+          check "signature: the first argument is active" (signature.active = 0)
+      ));
+  (match
+     byte_after basic ~within:"  x = add(counter, 1);" ~name:"add(counter,"
+   with
+  | None -> check "signature: the second argument exists" false
+  | Some byte -> (
+      match signature_at ~facts:basic_facts (resolved, index) ~byte with
+      | None -> check "signature: the second argument has a signature" false
+      | Some signature ->
+          check "signature: the argument after the comma is active"
+            (signature.active = 1)));
+  (match
+     byte_after basic ~within:"  x = add(counter, 1);" ~name:"add(counter, 1)"
+   with
+  | None -> check "signature: the closed call exists" false
+  | Some byte ->
+      check "signature: a closed call asks for nothing"
+        (signature_at ~facts:basic_facts (resolved, index) ~byte = None));
+  (* A fact whose name span is not the declaration's is not that
+     declaration's signature: the identity is the file and the byte of the
+     name, so the answer falls back to the source the index renders. *)
+  let shifted_facts =
+    facts_of
+      [
+        {
+          (function_fact basic ~within:"fn add(reg u64 a, reg u64 b)"
+             ~name:"add" ~fs_in:[ "reg u64"; "reg u64" ] ~fs_out:[ "reg u64" ])
+          with
+          Jide_jasmin.Facts.i_name_span =
+            Jide_lang.Span.make ~start_byte:0 ~end_byte:3;
+        };
+      ]
+  in
+  match byte_after basic ~within:"  x = add(counter, 1);" ~name:"add(" with
+  | None -> check "signature: the fallback position exists" false
+  | Some byte -> (
+      match signature_at ~facts:shifted_facts (resolved, index) ~byte with
+      | None -> check "signature: the fallback answers" false
+      | Some signature ->
+          check "signature: a shifted fact is not the declaration's"
+            (signature.parameters = [ "reg u64 a"; "reg u64 b" ]);
+          check "signature: the fallback label is the written signature"
+            (String.equal signature.label "add(reg u64 a, reg u64 b) -> reg u64")
+      )
+
+(* ------------------------------------------------------------------ *)
+(* A call inside a namespace, and the qualified call after it *)
+
+let namespaced =
+  {|namespace A {
+  fn mul(reg u64 a, reg u64 b) -> reg u64 {
+    reg u64 p;
+    p = a * b;
+    return p;
+  }
+
+  fn twice(reg u64 v) -> reg u64 {
+    reg u64 r;
+    r = mul(v, 2);
+    return r;
+  }
+}
+
+fn use_it(reg u64 x) -> reg u64 {
+  reg u64 y;
+  y = A::mul(x, 3);
+  return y;
+}
+|}
+
+let namespaced_facts =
+  facts_of
+    [
+      function_fact namespaced ~within:"fn mul(reg u64 a, reg u64 b)"
+        ~name:"mul" ~fs_in:[ "reg u64"; "reg u64" ] ~fs_out:[ "reg u64" ];
+      function_fact namespaced ~within:"fn twice(reg u64 v)" ~name:"twice"
+        ~fs_in:[ "reg u64" ] ~fs_out:[ "reg u64" ];
+    ]
+
+let test_a_namespace () =
+  let file = "/work/namespaced.jazz" in
+  let resolved = resolve file namespaced in
+  let index = index_of resolved file in
+  (match
+     complete_in (resolved, index) ~text:namespaced ~within:"    return r;"
+       ~name:"return"
+   with
+  | None -> check "namespace: the inner position exists" false
+  | Some completion ->
+      check "namespace: the namespace's own function is in scope, unqualified"
+        (has_label completion "mul");
+      check "namespace: its parameter is in scope" (has_label completion "v");
+      check "namespace: the other function's local is not in scope"
+        (no_label completion "p");
+      check "namespace: a function is not in scope before it is written"
+        (no_label completion "twice");
+      check "namespace: an inner name is not offered qualified"
+        (no_label completion "A::mul"));
+  let completion =
+    complete_at (resolved, index) ~byte:(String.length namespaced)
+  in
+  check "namespace: the namespace's function is qualified outside it"
+    (has_label completion "A::mul");
+  check "namespace: the second function is qualified too"
+    (has_label completion "A::twice");
+  check "namespace: the outer function is in scope"
+    (has_label completion "use_it");
+  check "namespace: the inner name is not in scope unqualified"
+    (no_label completion "mul");
+  (* A call inside the namespace, and the qualified call after it. *)
+  (match byte_after namespaced ~within:"    r = mul(v, 2);" ~name:"mul(" with
+  | None -> check "namespace: the inner call exists" false
+  | Some byte -> (
+      match signature_at ~facts:namespaced_facts (resolved, index) ~byte with
+      | None -> check "namespace: the inner call has a signature" false
+      | Some signature ->
+          check "namespace: the inner callee is the name written"
+            (String.equal signature.callee "mul");
+          check "namespace: the inner call takes the checked types"
+            (signature.parameters = [ "reg u64"; "reg u64" ])));
+  match byte_after namespaced ~within:"  y = A::mul(x, 3);" ~name:"A::mul(" with
+  | None -> check "namespace: the qualified call exists" false
+  | Some byte -> (
+      match signature_at ~facts:namespaced_facts (resolved, index) ~byte with
+      | None -> check "namespace: the qualified call has a signature" false
+      | Some signature ->
+          check "namespace: the qualified callee is the whole name"
+            (String.equal signature.callee "A::mul");
+          check "namespace: the qualified call takes the checked types"
+            (signature.parameters = [ "reg u64"; "reg u64" ]);
+          check "namespace: its first argument is active" (signature.active = 0)
+      )
+
+(* ------------------------------------------------------------------ *)
+(* A required file, and a call the parser dropped at the end of the file *)
+
+let library = {|fn other(reg u64 a) -> reg u64 {
+  return a;
+}
+|}
+
+let entry =
+  {|require "lib.jazz"
+
+fn helper(reg u64 a, reg u64 b) -> reg u64 {
+  reg u64 c;
+  c = other(a);
+  return c;
+}
+
+fn run(reg u64 seed) -> reg u64 {
+  reg u64 r;
+  r = helper(seed, 1);
+  return r;
+}
+|}
+
+(* The text a client holds while the last argument is still being typed. The
+   parser drops the whole file at an unfinished call, so the names come from
+   the snapshot of the text before it, which [entry] is. *)
+let partial_entry =
+  match
+    byte_after entry ~within:"  r = helper(seed, 1);" ~name:"helper(seed, "
+  with
+  | Some byte -> String.sub entry 0 byte
+  | None -> entry
+
