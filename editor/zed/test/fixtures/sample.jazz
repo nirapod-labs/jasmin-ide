@@ -18,6 +18,7 @@ namespace CRYPTO {
 
     acc = 0;
     acc = #set0();
+    #spill(acc);
     acc = source[0];
     acc = [#aligned :u64 source + 0];
     acc += 3;
@@ -45,6 +46,7 @@ namespace CRYPTO {
     }
 
     check(ROUNDS > 0);
+    assert("mix: acc below the bound", acc < 8);
     return source;
   }
 }
