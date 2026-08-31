@@ -456,3 +456,91 @@ let partial_entry =
   | Some byte -> String.sub entry 0 byte
   | None -> entry
 
+let entry_facts =
+  facts_of
+    [
+      function_fact entry ~within:"fn helper(reg u64 a, reg u64 b)"
+        ~name:"helper" ~fs_in:[ "reg u64"; "reg u64" ] ~fs_out:[ "reg u64" ];
+    ]
+
+let test_a_required_file_and_a_partial_call () =
+  let file = "/work/entry.jazz" in
+  let resolved = resolve ~files:[ ("lib.jazz", library) ] file entry in
+  let index = index_of resolved file in
+  (match
+     complete_in (resolved, index) ~text:entry ~within:"  c = other(a);"
+       ~name:"other"
+   with
+  | None -> check "require: the position exists" false
+  | Some completion ->
+      check "require: the required function is in scope"
+        (has_label completion "other");
+      check "require: it is a function"
+        (kind_of completion "other" = Some Jide_engine.Complete.Function);
+      check "require: its detail is its own source"
+        (match detail_of completion "other" with
+        | Some detail -> String.equal detail "fn other(reg u64 a) -> reg u64"
+        | None -> false);
+      check "require: the file's own function is not in scope in its own body"
+        (no_label completion "helper");
+      check "require: the parameters are in scope" (has_label completion "a");
+      check "require: the later function is not in scope"
+        (no_label completion "run"));
+  (match
+     complete_in (resolved, index) ~text:entry ~within:"  r = helper(seed, 1);"
+       ~name:"r"
+   with
+  | None -> check "require: the second function's body has a position" false
+  | Some completion ->
+      check "require: the file's own function is in scope once declared"
+        (has_label completion "helper"));
+  let partial_index = Jide_engine.Index.of_text ~file partial_entry |> fst in
+  (match
+     byte_of_in partial_entry ~within:"r = helper(seed, " ~name:"helper"
+   with
+  | None -> check "partial: the call exists" false
+  | Some byte ->
+      check "partial: the parser dropped the unfinished call"
+        (Jide_engine.Index.find_occurrence partial_index ~byte = None));
+  (match byte_after entry ~within:"  c = other(a);" ~name:"other(" with
+  | None -> check "require: the required call exists" false
+  | Some byte -> (
+      match signature_at ~facts:entry_facts (resolved, index) ~byte with
+      | None -> check "require: the required call has a signature" false
+      | Some signature ->
+          check "require: the parameters come from the required file's index"
+            (signature.parameters = [ "reg u64 a" ]);
+          check "require: the label is that file's signature"
+            (String.equal signature.label "other(reg u64 a) -> reg u64")));
+  match
+    Jide_engine.Complete.signature_help ~facts:entry_facts ~index:partial_index
+      ~resolve:resolved
+      ~byte:(String.length partial_entry)
+      ()
+  with
+  | None ->
+      check "partial: the call at the end of the file has a signature" false
+  | Some signature ->
+      check "partial: the callee is read from the text"
+        (String.equal signature.callee "helper");
+      check "partial: the parameters are the checked types"
+        (signature.parameters = [ "reg u64"; "reg u64" ]);
+      check "partial: the label is the signature"
+        (String.equal signature.label "helper(reg u64, reg u64) -> reg u64");
+      check "partial: the argument after the comma is active"
+        (signature.active = 1)
+
+let () =
+  test_completion_in_a_function_body ();
+  test_block_scope ();
+  test_completion_at_the_top_level ();
+  test_the_prefix_filters_the_list ();
+  test_annotation_keys ();
+  test_the_fixed_tables ();
+  test_signature_help ();
+  test_a_namespace ();
+  test_a_required_file_and_a_partial_call ();
+  if !failures = 0 then print_endline "all completion tests passed"
+  else (
+    Printf.printf "%d completion test(s) failed\n" !failures;
+    exit 1)

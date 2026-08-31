@@ -48,6 +48,8 @@ type t = {
   answers : (string * int, answer) Hashtbl.t;
   order : Index.t list; (* entry first *)
   loaded : (string * string) list;
+  snapshots : (string, (int * frame list) array) Hashtbl.t;
+      (* The environment each file's walk met, by byte, in walk order. *)
 }
 
 type session = {
@@ -55,6 +57,7 @@ type session = {
   read : string -> string option;
   indexes : (string, Index.t) Hashtbl.t;
   answers : (string * int, answer) Hashtbl.t;
+  snapshots : (string, (int * frame list) list) Hashtbl.t; (* reversed *)
   mutable order_rev : Index.t list;
   mutable loaded : (string * string) list;
 }
@@ -97,6 +100,26 @@ let find_type env name = find (fun frame -> frame.types) name env
 let find_fun env name = find (fun frame -> frame.funs) name env
 let find_var env name = find (fun frame -> frame.vars) name env
 
+(* The environment at a byte offset, for completion. The frames are immutable
+   and shared, so a mark costs one cons per frame list. Marks are written in
+   the order the walk meets them and at offsets that never decrease, which is
+   what lets [scope_at] take the last mark at or before the offset it is
+   asked about. *)
+let mark session env (byte : int) =
+  let byte = max 0 byte in
+  let previous =
+    Option.value ~default:[] (Hashtbl.find_opt session.snapshots env.file)
+  in
+  Hashtbl.replace session.snapshots env.file ((byte, env.frames) :: previous)
+
+let mark_start session env (span : Jide_lang.Span.t) =
+  mark session env span.Jide_lang.Span.start_byte;
+  env
+
+let mark_end session env (span : Jide_lang.Span.t) =
+  mark session env span.Jide_lang.Span.end_byte;
+  env
+
 let push_var env declaration =
   let frame = current env in
   replace_current env
@@ -128,6 +151,12 @@ let push_type env declaration =
           frame with
           types = Names.add declaration.Index.name declaration frame.types;
         }
+
+(* A declaration that is in scope from where it is written: the mark is the
+   end of the name, and the environment after it is what completion sees. *)
+let push_marked session push env declaration =
+  let env = push env declaration in
+  mark_end session env declaration.Index.name_span
 
 let merge_frame prefix frame parent =
   let merge prefix_map parent_map =
@@ -321,70 +350,82 @@ and lvalues session env ((annotation, values) : Syntax.plvals) =
   in
   List.fold_left (lvalue session) env values
 
-and block session env (block : Syntax.pblock) =
-  List.fold_left (instruction session) env (Location.unloc block)
+and block session env (body : Syntax.pblock) =
+  List.fold_left (instruction session) env (Location.unloc body)
+
+(* A block scopes its declarations: the frame it built is dropped at its end,
+   so the environment after it is the one before it, and that is what a mark
+   at the block's end records. *)
+and scoped_block session env (body : Syntax.pblock) =
+  ignore (block session env body);
+  mark_end session env (span_of_location (Location.loc body))
 
 and instruction session env
     ((annotations_, (instr : Syntax.pinstr_r Location.located)) : Syntax.pinstr)
     =
   let item_span = span_of_location (Location.loc instr) in
+  let env = mark_start session env item_span in
   let env = annotations session env annotations_ in
-  match Location.unloc instr with
-  | Syntax.PIArrayInit ident -> ignored session env Use_var ident
-  | PIAssign (targets, _operator, value, condition) -> (
-      let env = lvalues session env targets in
-      let env = expression session env value in
-      match condition with
-      | None -> env
-      | Some condition -> expression session env condition)
-  | PIAssert (_message, condition) -> expression session env condition
-  | PIIf (condition, when_true, when_false) ->
-      let env = expression session env condition in
-      ignore (block session env when_true);
-      (match when_false with
-      | None -> ()
-      | Some when_false -> ignore (block session env when_false));
-      env
-  | PIFor (ident, (_direction, first, last), body) ->
-      let env = ignored session env Use_var ident in
-      let env = expression session env first in
-      let env = expression session env last in
-      ignore (block session env body);
-      env
-  | PIWhile (before, condition, after) ->
-      (match before with
-      | None -> ()
-      | Some before -> ignore (block session env before));
-      let env = expression session env condition in
-      (match after with
-      | None -> ()
-      | Some after -> ignore (block session env after));
-      env
-  | PIdecl (stotype, names) ->
-      List.fold_left
-        (fun env name ->
-          let env = ptype session env (snd stotype) in
-          let declaration =
-            declare session env Index.Variable name ~item_span
-          in
-          push_var env declaration)
-        env names
-  | PIdeclinit (stotype, inits) ->
-      List.fold_left
-        (fun env
-             (init : (string Location.located * Syntax.pexpr) Location.located) ->
-          let name, value = Location.unloc init in
-          let before = env in
-          let env = ptype session env (snd stotype) in
-          let declaration =
-            declare session env Index.Variable name ~item_span
-          in
-          let env = push_var env declaration in
-          (* The initialising expression is typed before the name is in
-             scope, as [tt_annot_decl] does. *)
-          ignore (expression session before value);
-          env)
-        env inits
+  let env =
+    match Location.unloc instr with
+    | Syntax.PIArrayInit ident -> ignored session env Use_var ident
+    | PIAssign (targets, _operator, value, condition) -> (
+        let env = lvalues session env targets in
+        let env = expression session env value in
+        match condition with
+        | None -> env
+        | Some condition -> expression session env condition)
+    | PIAssert (_message, condition) -> expression session env condition
+    | PIIf (condition, when_true, when_false) ->
+        let env = expression session env condition in
+        ignore (scoped_block session env when_true);
+        (match when_false with
+        | None -> ()
+        | Some when_false -> ignore (scoped_block session env when_false));
+        env
+    | PIFor (ident, (_direction, first, last), body) ->
+        let env = ignored session env Use_var ident in
+        let env = expression session env first in
+        let env = expression session env last in
+        ignore (scoped_block session env body);
+        env
+    | PIWhile (before, condition, after) ->
+        (match before with
+        | None -> ()
+        | Some before -> ignore (scoped_block session env before));
+        let env = expression session env condition in
+        (match after with
+        | None -> ()
+        | Some after -> ignore (scoped_block session env after));
+        env
+    | PIdecl (stotype, names) ->
+        List.fold_left
+          (fun env name ->
+            let env = ptype session env (snd stotype) in
+            let declaration =
+              declare session env Index.Variable name ~item_span
+            in
+            push_marked session push_var env declaration)
+          env names
+    | PIdeclinit (stotype, inits) ->
+        List.fold_left
+          (fun env
+               (init :
+                 (string Location.located * Syntax.pexpr) Location.located) ->
+            let name, value = Location.unloc init in
+            let before = env in
+            let env = ptype session env (snd stotype) in
+            let declaration =
+              declare session env Index.Variable name ~item_span
+            in
+            let env = push_marked session push_var env declaration in
+            (* The initialising expression is typed before the name is in
+               scope, as [tt_annot_decl] does. *)
+            ignore (expression session before value);
+            env)
+          env inits
+  in
+  mark_end session env item_span
 
 (* ------------------------------------------------------------------ *)
 (* Items *)
@@ -408,73 +449,92 @@ let max_chain = 64
 
 let rec item session env (located : Syntax.pitem Location.located) : env =
   let item_span = span_of_location (Location.loc located) in
-  match Location.unloc located with
-  | Syntax.PParam pp ->
-      let env = ptype session env pp.ppa_ty in
-      let env = expression session env pp.ppa_init in
-      let declaration =
-        declare session env Index.Parameter pp.ppa_name ~item_span
-      in
-      push_var env declaration
-  | PGlobal global ->
-      let env = annotations session env global.pgd_annot in
-      let env = ptype session env global.pgd_type in
-      let env =
-        match global.pgd_val with
-        | Syntax.GEexpr value -> expression session env value
-        | GEarray values -> List.fold_left (expression session) env values
-      in
-      let declaration =
-        declare session env Index.Global global.pgd_name ~item_span
-      in
-      push_var env declaration
-  | Pexec exec ->
-      ignore (use session env Use_call exec.pex_name);
-      env
-  | PTypeAlias (name, annotations_, ty) ->
-      let env = annotations session env annotations_ in
-      let env = ptype session env ty in
-      let declaration = declare session env Index.Type_alias name ~item_span in
-      push_type env declaration
-  | Prequire (from, files) ->
-      let env =
-        match from with
-        | None -> env
-        | Some ident -> ignored session env Use_include ident
-      in
-      let from = Option.map Location.unloc from in
-      List.fold_left
-        (fun env (file : string Location.located) ->
-          require_file session env ~from (Location.unloc file))
-        env files
-  | PNamespace (name, items) ->
-      let namespace = Location.unloc name in
-      ignore (declare session env Index.Namespace name ~item_span);
-      let inner = push_namespace env namespace in
-      let resolved = List.fold_left (item session) inner items in
-      exit_namespace resolved
-  | PFundef function_ ->
-      let env = annotations session env function_.pdf_annot in
-      let local = { env with frames = empty_frame :: env.frames } in
-      let local =
+  let env = mark_start session env item_span in
+  let env =
+    match Location.unloc located with
+    | Syntax.PParam pp ->
+        let env = ptype session env pp.ppa_ty in
+        let env = expression session env pp.ppa_init in
+        let declaration =
+          declare session env Index.Parameter pp.ppa_name ~item_span
+        in
+        push_var env declaration
+    | PGlobal global ->
+        let env = annotations session env global.pgd_annot in
+        let env = ptype session env global.pgd_type in
+        let env =
+          match global.pgd_val with
+          | Syntax.GEexpr value -> expression session env value
+          | GEarray values -> List.fold_left (expression session) env values
+        in
+        let declaration =
+          declare session env Index.Global global.pgd_name ~item_span
+        in
+        push_var env declaration
+    | Pexec exec ->
+        ignore (use session env Use_call exec.pex_name);
+        env
+    | PTypeAlias (name, annotations_, ty) ->
+        let env = annotations session env annotations_ in
+        let env = ptype session env ty in
+        let declaration =
+          declare session env Index.Type_alias name ~item_span
+        in
+        push_type env declaration
+    | Prequire (from, files) ->
+        let env =
+          match from with
+          | None -> env
+          | Some ident -> ignored session env Use_include ident
+        in
+        let from = Option.map Location.unloc from in
         List.fold_left
-          (fun env
-               ((annotations_, (stotype, names)) :
-                 Syntax.pannotations * Syntax.paramdecls) ->
-            let env = annotations session env annotations_ in
-            let env = ptype session env (snd stotype) in
-            List.fold_left
-              (fun env name ->
-                let declaration =
-                  declare session env Index.Parameter name ~item_span
-                in
-                push_var env declaration)
-              env names)
-          local function_.pdf_args
-      in
-      let local =
-        match function_.pdf_rty with
-        | None -> local
+          (fun env (file : string Location.located) ->
+            require_file session env ~from (Location.unloc file))
+          env files
+    | PNamespace (name, items) ->
+        let namespace = Location.unloc name in
+        ignore (declare session env Index.Namespace name ~item_span);
+        let inner = push_namespace env namespace in
+        let inner = mark_end session inner (span_of_ident name) in
+        let resolved = List.fold_left (item session) inner items in
+        exit_namespace resolved
+    | PFundef function_ ->
+        let env = annotations session env function_.pdf_annot in
+        let local = { env with frames = empty_frame :: env.frames } in
+        let local = mark_end session local (span_of_ident function_.pdf_name) in
+        let local =
+          List.fold_left
+            (fun env
+                 ((annotations_, (stotype, names)) :
+                   Syntax.pannotations * Syntax.paramdecls) ->
+              let env = annotations session env annotations_ in
+              let env = ptype session env (snd stotype) in
+              List.fold_left
+                (fun env name ->
+                  let declaration =
+                    declare session env Index.Parameter name ~item_span
+                  in
+                  push_marked session push_var env declaration)
+                env names)
+            local function_.pdf_args
+        in
+        let local =
+          match function_.pdf_rty with
+          | None -> local
+          | Some returns ->
+              List.fold_left
+                (fun env (annotations_, stotype) ->
+                  let env = annotations session env annotations_ in
+                  ptype session env (snd stotype))
+                local returns
+        in
+        let final =
+          List.fold_left (instruction session) local
+            function_.pdf_body.pdb_instr
+        in
+        (match Location.unloc function_.pdf_body.pdb_ret with
+        | None -> ()
         | Some returns ->
             List.fold_left
               (fun env (annotations_, stotype) ->
