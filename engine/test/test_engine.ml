@@ -551,6 +551,272 @@ let test_an_exception_in_the_context_stage_is_internal () =
     | Some analysis -> List.length analysis.Jide_engine.Engine.diagnostics = 1
     | None -> false)
 
+(* The snapshot: what the last check built, read back without a second check.
+   These four tests are the contract the completion and signature-help lanes
+   are written against, so each of them names one half of it: nothing is
+   analysed to answer, the answer is the last analysis's, it survives a broken
+   file, and a caller can see when it is stale. *)
+
+(* A checker that counts how many times it was called, so "no check ran" is a
+   number and not an inference. Its result is empty, so the assertions below
+   are about the index and the resolver, which are built from the text and do
+   not read the checker's output. *)
+let counting_check counter ~arch:_ ~call_conv:_ ~file:_ ~text:_ ~idirs:_ =
+  incr counter;
+  {
+    Jide_jasmin.Adapter.diagnostics = [];
+    warnings = [];
+    facts = Jide_jasmin.Facts.empty;
+  }
+
+let names_of_declarations (index : Jide_engine.Index.t) =
+  List.map
+    (fun (declaration : Jide_engine.Index.declaration) -> declaration.name)
+    index.Jide_engine.Index.declarations
+
+(* The text a declaration's name span covers, read out of the index's own
+   text: a declaration whose name is not where its span says would be a silent
+   corruption a name-only check would miss. *)
+let declaration_texts (index : Jide_engine.Index.t) =
+  List.map
+    (fun (declaration : Jide_engine.Index.declaration) ->
+      ( declaration.name,
+        Jide_engine.Index.text_of_span index.Jide_engine.Index.text
+          declaration.name_span ))
+    index.Jide_engine.Index.declarations
+
+(* Where a use of [name] is, taken from the index's own occurrences rather
+   than from byte arithmetic written by hand: the [n]th occurrence of the name
+   that is a use and not the declaration. Every byte below that is a position
+   of the text is chosen this way, so the tests cannot drift when a word in a
+   program changes length. *)
+let use_byte (index : Jide_engine.Index.t) ~(name : string) ~(n : int) =
+  let uses =
+    List.filter
+      (fun (occurrence : Jide_engine.Index.occurrence) ->
+        String.equal occurrence.Jide_engine.Index.name name
+        &&
+        match occurrence.Jide_engine.Index.role with
+        | Jide_engine.Index.Declared _ -> false
+        | _ -> true)
+      index.Jide_engine.Index.occurrences
+  in
+  match List.nth_opt uses (n - 1) with
+  | Some occurrence ->
+      Some occurrence.Jide_engine.Index.span.Jide_lang.Span.start_byte
+  | None -> None
+
+(* (a) A uri that was never analysed has no snapshot, and asking for one does
+   not analyse it. The proof is two counters: the engine's own
+   [analysis_count], and a checker that counts the calls it received. *)
+let test_snapshot_without_an_analysis () =
+  let calls = ref 0 in
+  let engine = Jide_engine.Engine.create ~check:(counting_check calls) () in
+  let uri = uri_of "never-analysed" in
+  open_text engine ~uri ~version:1 valid;
+  check "snapshot: no analysis yet, no snapshot"
+    (Jide_engine.Engine.snapshot engine ~uri = None);
+  check "snapshot: asking did not run a check"
+    (Jide_engine.Engine.analysis_count engine = 0);
+  check "snapshot: and did not call the checker" (!calls = 0);
+  (* A uri no document was opened for is the same answer, and the same
+     nothing. *)
+  check "snapshot: an unknown uri has no snapshot"
+    (Jide_engine.Engine.snapshot engine ~uri:(uri_of "not-open") = None);
+  check "snapshot: the document is still open"
+    (Jide_engine.Engine.document engine ~uri <> None);
+  check "snapshot: still nothing analysed"
+    (Jide_engine.Engine.analysis_count engine = 0 && !calls = 0)
+
+(* (b) After a check, the snapshot is the index and the resolver that check
+   built: the declarations name the text they came from, the resolver answers a
+   known name, and a completion answers from the two without a check. *)
+let test_snapshot_after_a_check () =
+  let calls = ref 0 in
+  let engine = Jide_engine.Engine.create ~check:(counting_check calls) () in
+  let uri = uri_of "snapshot" in
+  let text =
+    "fn double(reg u32 a) -> reg u32 {\n\
+    \  reg u32 b;\n\
+    \  b = a;\n\
+    \  return b;\n\
+     }\n\
+     fn use_it(reg u32 c) -> reg u32 {\n\
+    \  c = double(c);\n\
+    \  return c;\n\
+     }\n"
+  in
+  open_text engine ~uri ~version:1 text;
+  ignore (Jide_engine.Engine.check engine ~uri);
+  check "snapshot: one analysis ran"
+    (Jide_engine.Engine.analysis_count engine = 1);
+  match Jide_engine.Engine.snapshot engine ~uri with
+  | None -> check "snapshot: an analysis has one" false
+  | Some snapshot ->
+      let index = snapshot.Jide_engine.Engine.index in
+      let resolve = snapshot.Jide_engine.Engine.resolve in
+      check "snapshot: the index is the document's own text"
+        (String.equal index.Jide_engine.Index.text text);
+      check "snapshot: the index names the document"
+        (match Jide_lang.Uri.path (Jide_lang.Uri.of_string uri) with
+        | Some path -> String.equal index.Jide_engine.Index.file path
+        | None -> false);
+      check "snapshot: the declarations are the text's own"
+        (List.mem ("double", "double") (declaration_texts index));
+      check "snapshot: a parameter and a local are declared"
+        (List.mem "a" (names_of_declarations index)
+        && List.mem "b" (names_of_declarations index));
+      check "snapshot: the function is in the outline"
+        (List.exists
+           (fun (item : Jide_engine.Index.item) ->
+             item.Jide_engine.Index.item_name = Some "double")
+           index.Jide_engine.Index.outline);
+      (* The resolver answers a known name at a use. [return b] is the second
+         use of [b]; the resolver must name the declaration of [b], not the
+         use, so the identity is the declaration's own name byte. *)
+      check "snapshot: the resolver answers the name at the return"
+        (match use_byte index ~name:"b" ~n:2 with
+        | None -> false
+        | Some byte -> (
+            match
+              Jide_engine.Resolve.answer_at resolve
+                ~file:index.Jide_engine.Index.file ~byte
+            with
+            | Some (_, Jide_engine.Resolve.Resolved declaration) ->
+                String.equal declaration.Jide_engine.Index.name "b"
+                && declaration.Jide_engine.Index.kind
+                   = Jide_engine.Index.Variable
+                && declaration.Jide_engine.Index.name_span
+                     .Jide_lang.Span.start_byte <> byte
+            | _ -> false));
+      (* The completion lane's own call, over the snapshot alone: the function
+         declared in the file is offered as a name in scope, and no check ran
+         to answer it. The offset is the start of the body of the second
+         function, where both functions are declared already. *)
+      let at =
+        match use_byte index ~name:"c" ~n:1 with Some byte -> byte | None -> 0
+      in
+      let completion =
+        Jide_engine.Complete.completion ~index ~resolve ~byte:at ()
+      in
+      check "snapshot: completion answers from it"
+        (match completion.Jide_engine.Complete.items with
+        | [] -> false
+        | items ->
+            List.exists
+              (fun (item : Jide_engine.Complete.item) ->
+                String.equal item.Jide_engine.Complete.label "double")
+              items);
+      check "snapshot: answering ran no check"
+        (Jide_engine.Engine.analysis_count engine = 1 && !calls = 1)
+
+(* (c) The contract the caller relies on: the snapshot is the LAST analysis's,
+   even after the text changed, because reading it must never recheck. The
+   staleness it costs is visible: the stored key and the current key differ. *)
+let test_snapshot_is_the_last_analysis () =
+  let calls = ref 0 in
+  let engine = Jide_engine.Engine.create ~check:(counting_check calls) () in
+  let uri = uri_of "stale-snapshot" in
+  let before = "fn f(reg u32 a) -> reg u32 {\n  return a;\n}\n" in
+  let after = "fn g(reg u32 a) -> reg u32 {\n  reg u32 b;\n  return b;\n}\n" in
+  open_text engine ~uri ~version:1 before;
+  ignore (Jide_engine.Engine.check engine ~uri);
+  let stored_key =
+    match Jide_engine.Engine.analysis engine ~uri with
+    | Some analysis -> analysis.Jide_engine.Engine.key
+    | None -> (-1, "")
+  in
+  let first = Jide_engine.Engine.snapshot engine ~uri in
+  Jide_engine.Engine.change_document engine ~uri ~version:2 ~text:after;
+  (* The change alone analyses nothing: the engine checks only when asked. *)
+  check "stale: a change runs no check"
+    (Jide_engine.Engine.analysis_count engine = 1 && !calls = 1);
+  (match (first, Jide_engine.Engine.snapshot engine ~uri) with
+  | Some old_snapshot, Some new_snapshot ->
+      check "stale: the snapshot is the same value, physically"
+        (old_snapshot == new_snapshot);
+      check "stale: it still holds the old text"
+        (String.equal
+           old_snapshot.Jide_engine.Engine.index.Jide_engine.Index.text before);
+      check "stale: it still declares the old name"
+        (List.mem "f"
+           (names_of_declarations old_snapshot.Jide_engine.Engine.index));
+      check "stale: it does not hold the new name yet"
+        (not
+           (List.mem "g"
+              (names_of_declarations old_snapshot.Jide_engine.Engine.index)))
+  | _ -> check "stale: a snapshot on both sides" false);
+  check "stale: reading it ran no check"
+    (Jide_engine.Engine.analysis_count engine = 1 && !calls = 1);
+  (* The staleness is what the caller compares: the document's key is now a
+     different value from the key of the analysis the snapshot came from. *)
+  check "stale: the current key is not the stored one"
+    (Jide_engine.Engine.analysis_key engine ~uri <> Some stored_key);
+  (* And a check makes them agree again, with the new text's snapshot. *)
+  ignore (Jide_engine.Engine.check engine ~uri);
+  (match Jide_engine.Engine.snapshot engine ~uri with
+  | Some snapshot ->
+      check "stale: after the check the snapshot is the new text's"
+        (String.equal snapshot.Jide_engine.Engine.index.Jide_engine.Index.text
+           after);
+      check "stale: and it declares the new name"
+        (List.mem "g" (names_of_declarations snapshot.Jide_engine.Engine.index))
+  | None -> check "stale: a snapshot after the check" false);
+  check "stale: the saved analysis is the current one"
+    (Jide_engine.Engine.analysis_key engine ~uri
+    = Option.map
+        (fun (analysis : Jide_engine.Engine.analysis) -> analysis.key)
+        (Jide_engine.Engine.analysis engine ~uri))
+
+(* (d) A file that does not parse still yields a snapshot, and its index still
+   holds the items the recovering parser kept: that is what the outline and
+   hover read while the file is broken (design section 1 goal 2, and the
+   invariant that a broken file keeps them working). The broken statement is
+   dropped, so the function is still there. *)
+let test_snapshot_of_a_broken_file () =
+  let calls = ref 0 in
+  let engine = Jide_engine.Engine.create ~check:(counting_check calls) () in
+  let uri = uri_of "broken-snapshot" in
+  let text =
+    "fn keep(reg u32 a) -> reg u32 {\n\
+    \  reg u32 b;\n\
+    \  b = ;\n\
+    \  return a;\n\
+     }\n\
+     fn also_kept(reg u32 c) -> reg u32 {\n\
+    \  return c;\n\
+     }\n"
+  in
+  open_text engine ~uri ~version:1 text;
+  ignore (Jide_engine.Engine.check engine ~uri);
+  match Jide_engine.Engine.snapshot engine ~uri with
+  | None -> check "broken: a snapshot is still there" false
+  | Some snapshot ->
+      let index = snapshot.Jide_engine.Engine.index in
+      let names = names_of_declarations index in
+      check "broken: the snapshot has the document's text"
+        (String.equal index.Jide_engine.Index.text text);
+      check "broken: the surviving functions are declared"
+        (List.mem "keep" names && List.mem "also_kept" names);
+      check "broken: the outline keeps the surviving items"
+        (List.length index.Jide_engine.Index.outline >= 2);
+      check "broken: the resolver answers a name in the kept function"
+        (match use_byte index ~name:"c" ~n:1 with
+        | None -> false
+        | Some byte -> (
+            match
+              Jide_engine.Resolve.scope_at snapshot.Jide_engine.Engine.resolve
+                ~file:index.Jide_engine.Index.file ~byte
+            with
+            | Some scope ->
+                List.exists
+                  (fun (binding : Jide_engine.Resolve.binding) ->
+                    String.equal binding.Jide_engine.Resolve.name "c")
+                  scope.Jide_engine.Resolve.vars
+            | None -> false));
+      check "broken: reading it ran no extra check"
+        (Jide_engine.Engine.analysis_count engine = 1 && !calls = 1)
+
 let () =
   test_change_without_open_is_ignored ();
   test_change_after_close_is_ignored ();
@@ -579,6 +845,10 @@ let () =
   test_the_settings_reach_the_checker ();
   test_a_settings_change_forgets_the_analysis ();
   test_an_exception_in_the_context_stage_is_internal ();
+  test_snapshot_without_an_analysis ();
+  test_snapshot_after_a_check ();
+  test_snapshot_is_the_last_analysis ();
+  test_snapshot_of_a_broken_file ();
   if !failures = 0 then print_endline "all engine tests passed"
   else (
     Printf.printf "%d engine test(s) failed\n" !failures;
