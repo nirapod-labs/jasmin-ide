@@ -3,6 +3,27 @@
 How to build the tree, run its tests, and compare the server with the Jasmin
 compiler over a corpus. Every command runs from the repository root.
 
+## Building
+
+You need opam, and for the extensions pnpm and a Rust toolchain with the
+`wasm32-wasip2` target.
+
+```
+opam switch create jasmin-ide --empty
+make deps
+make build
+```
+
+`make deps` installs `jasmin-lsp.opam.locked`, which names the compiler too,
+and then `vendor/requirements.opam`, into the switch `OPAM_SWITCH`
+(`jasmin-ide` by default). `make build` first runs `vendor/fetch.sh`, which
+downloads the Jasmin release pinned in `vendor/jasmin.lock`, checks its
+SHA-256 and copies the library into `vendor/jasmin/`. That directory isn't
+committed. A second run finds it assembled and does nothing.
+
+The server lands in `_build/default/lsp-server/native/main.exe`, and under
+its public name in `_build/install/default/bin/jasmin-lsp`.
+
 ## The edge channel
 
 The release channel builds against the tarball `vendor/jasmin.lock` pins. The
@@ -21,6 +42,17 @@ Don't use `make build` here: its vendor step puts the release tarball back.
 where the two Jasmin versions' interfaces differ. `jasmin-lsp --version` then
 says `built from vendored tarball sha256:<digest>`. Compare an edge build
 with the corpus of the same upstream commit, never with the release's.
+
+## Nix and opam
+
+`flake.nix` builds the server from the release tarball, and `default.nix`
+does the same without flakes. There's no `flake.lock` yet: `nix flake lock`
+writes one on a machine that can fetch the inputs, and that file is what to
+commit.
+
+`opam install .` from a clone builds the server against the released `jasmin`
+package instead of the vendored tree. The package isn't published in any
+opam repository.
 
 ## Layout
 

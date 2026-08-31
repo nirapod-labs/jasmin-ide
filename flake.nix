@@ -51,17 +51,26 @@
           ##################################################################
           lockText = builtins.readFile ./vendor/jasmin.lock;
 
+          # One `key = value` line, read as `vendor/fetch.sh` reads it: the
+          # key has to start the line (after optional whitespace) and be
+          # followed by `=`, and the value is the rest of the line. A prefix
+          # test would answer a `version_date` line when `version` was asked
+          # for, and taking the last `=`-separated field would cut a URL that
+          # carries a query string. `builtins.match` matches the whole line,
+          # so the pattern is anchored at both ends and `(.*)` holds the value.
           lockField =
             name:
             let
-              matching = builtins.filter (line: lib.hasPrefix name line) (
-                lib.splitString "\n" lockText
+              values = builtins.filter (value: value != null) (
+                map (line: builtins.match "[[:space:]]*${name}[[:space:]]*=[[:space:]]*(.*)" line) (
+                  lib.splitString "\n" lockText
+                )
               );
             in
-            if matching == [ ] then
+            if values == [ ] then
               throw "vendor/jasmin.lock has no ${name} line"
             else
-              lib.trim (lib.last (lib.splitString "=" (builtins.head matching)));
+              lib.trim (builtins.head (builtins.head values));
 
           version = lockField "version";
           sha256 = lockField "sha256";
@@ -209,8 +218,12 @@
           # is assembled by vendor/fetch.sh, which downloads, so it is not part
           # of a Nix build; the rest of vendor/ is source that no build reads,
           # and vendor/jasmin.lock stays because the opam contract test reads
-          # the release it pins. Without the tree dune finds an installed
-          # `jasmin` through findlib, which is the opam route as well.
+          # the release it pins. With the tree removed the library has to come
+          # from `jasminLibraryPackage` above, named `jasmin` by its `postPatch`
+          # rewrite; an installed opam `jasmin` does not stand in for it, since
+          # that package installs the library as `jasmin.jasmin` and a plain
+          # `(libraries jasmin)` then does not resolve. docs/nix.md records what
+          # is measured about the opam side.
           dropVendor = ''
             rm -rf vendor/jasmin
           '';
@@ -273,11 +286,11 @@
             jasmin-library = jasminLibraryPackage;
           };
 
-          # A shell with what the steps of `make ci` need that no library of
-          # the server pulls in: the OCaml toolchain and its formatter, Node
-          # and pnpm for the VS Code extension, the Rust toolchain for the
-          # Zed extension, the tree-sitter CLI for the grammar, and opam for
-          # the lock file.
+          # A shell with what the steps of `make ci` need: the libraries the
+          # server links, the OCaml toolchain and its formatter, Node and pnpm
+          # for the VS Code extension, the Rust toolchain for the Zed
+          # extension, the tree-sitter CLI for the grammar, and opam for the
+          # lock file.
           #
           # rustup rather than pkgs.rustc, because editor/zed/rust-toolchain.toml
           # pins the channel and the `wasm32-wasip2` target, and rustup is
@@ -285,7 +298,12 @@
           devShells.default = pkgs.mkShell {
             inputsFrom = [ jasmin-lsp ];
 
-            packages = [
+            # `inputsFrom` folds in the package's native and build inputs, not
+            # the ones it propagates, so the OCaml libraries the server links are
+            # named again here: a `nix develop` shell has to be able to build the
+            # same tree `nix build` builds, and without them it gets menhir and
+            # no `lsp`, `jsonrpc`, `yojson`, `zarith` or `menhirLib`.
+            packages = serverLibraries ++ [
               ocamlPackages.ocaml
               ocamlPackages.dune_3
               ocamlPackages.ocamlformat

@@ -2,17 +2,21 @@
 
    Two files describe the same package: `dune-project` carries the `depends`
    list and `jasmin-lsp.opam` is generated from it. This test reads both, plus
-   every `dune` file of the workspace, and answers three questions:
+   every `dune` file of the workspace and the two files the dependency install
+   reads, and answers four questions:
 
-   1. is every library a dune file names either a library of this workspace,
-      one the compiler ships, or a package the `depends` list names? A
-      dependency missing from the list is a defect even when another package
-      happens to pull the library in: the next release of that package would
-      take it away silently.
-   2. do `jasmin-lsp.opam` and `dune-project` name the same packages? A
-      dependency added to one file alone is a defect.
-   3. does the `jasmin` constraint hold for the release `vendor/jasmin.lock`
-      pins? A release that no longer satisfies the constraint is a defect.
+    1. is every library a dune file names either a library of this workspace,
+       one the compiler ships, or a package the `depends` list names? A
+       dependency missing from the list is a defect even when another package
+       happens to pull the library in: the next release of that package would
+       take it away silently.
+    2. do `jasmin-lsp.opam` and `dune-project` name the same packages? A
+       dependency added to one file alone is a defect.
+    3. does an install file provide every package the opam file names? The
+       Jasmin library is the one exception: this repository builds it from the
+       release tarball rather than installing a package for it.
+    4. does the `jasmin` constraint hold for the release `vendor/jasmin.lock`
+       pins? A release that no longer satisfies the constraint is a defect.
 
    The workspace root is the first argument, given by the dune stanza as
    `%{workspace_root}`: the test reads the copy of the tree the current build
@@ -137,9 +141,25 @@ let rec each node ~f =
   f node;
   List.iter (fun child -> each child ~f) (children node)
 
-let atoms_of node = List.filter_map atom (children node)
+let failures = ref 0
+let cases = ref 0
 
-(* The names in the `libraries` field of every stanza of one dune file. *)
+let case name =
+  incr cases;
+  Printf.printf "case %s\n%!" name
+
+let fail format =
+  Printf.ksprintf
+    (fun message ->
+      incr failures;
+      Printf.printf "FAIL %s\n%!" message)
+    format
+
+(* The names in the `libraries` field of every stanza of one dune file. A
+   nested form — `(re_export x)`, `(select …)`, `(:standard \ x)` — names a
+   library in a shape this test does not read, and answering it with nothing
+   would leave that library unchecked by the only case that exists to catch a
+   dependency going missing. So it is a failure, not a name. *)
 let libraries_of forms =
   let found = ref [] in
   List.iter
@@ -147,9 +167,18 @@ let libraries_of forms =
       each form ~f:(fun node ->
           match field node with
           | Some "libraries" -> (
-              match atoms_of node with
-              | [] -> ()
-              | _ :: names -> found := names @ !found)
+              match children node with
+              | Atom _ :: entries ->
+                  List.iter
+                    (function
+                      | Atom name -> found := name :: !found
+                      | List _ ->
+                          fail
+                            "a `libraries` field carries a nested form, which \
+                             this test does not read; name the library in \
+                             plain form or teach this test the form")
+                    entries
+              | _ -> ())
           | _ -> ()))
     forms;
   List.rev !found
@@ -364,23 +393,168 @@ let candidates name =
   | None -> [ name ]
   | Some dot -> [ name; String.sub name 0 dot ]
 
-let failures = ref 0
-let cases = ref 0
-
-let case name =
-  incr cases;
-  Printf.printf "case %s\n%!" name
-
-let fail format =
-  Printf.ksprintf
-    (fun message ->
-      incr failures;
-      Printf.printf "FAIL %s\n%!" message)
-    format
-
 let read path =
   try In_channel.with_open_bin path In_channel.input_all
   with Sys_error message ->
     fail "cannot read %s: %s" path message;
     ""
 
+let () =
+  let root =
+    if Array.length Sys.argv > 1 then Sys.argv.(1)
+    else Filename.concat ".." ".."
+  in
+  if not (Sys.file_exists (Filename.concat root "dune-project")) then (
+    Printf.eprintf "the workspace root %s holds no dune-project\n%!" root;
+    exit 2);
+  let project_path = Filename.concat root "dune-project" in
+  let project = parse (read project_path) in
+  let package_depends = project_depends project in
+  let package_names = List.map fst package_depends in
+  let dune_paths = dune_files root in
+  (* A path as it reads from the workspace root, not from the build tree this
+     action runs in: `jasmin/dune`, not `../../jasmin/dune`. *)
+  let shown path =
+    let prefix = root ^ Filename.dir_sep in
+    if
+      String.length path > String.length prefix
+      && String.equal (String.sub path 0 (String.length prefix)) prefix
+    then
+      String.sub path (String.length prefix)
+        (String.length path - String.length prefix)
+    else path
+  in
+  let dune_forms =
+    List.map (fun path -> (path, parse (read path))) dune_paths
+  in
+  let local =
+    List.concat_map (fun (_, forms) -> definitions_of forms) dune_forms
+  in
+  let libraries =
+    List.concat_map
+      (fun (path, forms) ->
+        List.map (fun name -> (path, name)) (libraries_of forms))
+      dune_forms
+  in
+
+  (* 1. Every library a dune file names is a library of this workspace, one the
+     compiler ships, or a package the depends list names. *)
+  case "libraries";
+  let provided = local @ from_compiler @ package_names in
+  let missing =
+    List.filter
+      (fun (_, name) ->
+        not
+          (List.exists
+             (fun candidate -> List.mem candidate provided)
+             (candidates name)))
+      libraries
+  in
+  List.iter
+    (fun (path, name) ->
+      fail
+        "%s names the library %s, which is neither a library of this workspace \
+         nor a package of the depends list in dune-project"
+        (shown path) name)
+    missing;
+  Printf.printf
+    "  %d dune files, %d library references, %d of them to a package\n%!"
+    (List.length dune_paths) (List.length libraries)
+    (List.length
+       (List.filter (fun (_, name) -> not (List.mem name local)) libraries));
+
+  (* 2. The generated opam file names the packages dune-project names, so a
+     dependency added to one file alone is a failure. *)
+  case "agreement";
+  let opam_path = Filename.concat root "jasmin-lsp.opam" in
+  let opam_names = opam_depends (read opam_path) in
+  let expected =
+    List.filter (fun name -> not (List.mem name written_by_dune)) opam_names
+  in
+  List.iter
+    (fun name ->
+      if not (List.mem name package_names) then
+        fail
+          "%s names %s, which the depends list in dune-project does not; a \
+           dependency belongs in dune-project, and the opam file is generated \
+           from it"
+          (shown opam_path) name)
+    expected;
+  List.iter
+    (fun name ->
+      if not (List.mem name expected) then
+        fail
+          "dune-project names %s, which %s does not; rebuild the opam file \
+           with dune build"
+          name (shown opam_path))
+    package_names;
+  Printf.printf "  %d packages in dune-project, %d in the opam file\n%!"
+    (List.length package_names)
+    (List.length expected);
+
+  (* 3. Every package the opam file names is installed by one of the two files
+     `make deps` reads, or is the Jasmin library this repository assembles for
+     itself. A package named in dune-project and in neither install file is one
+     `make deps` would leave out, and the build would fail on it late.
+
+     The Jasmin library is the second kind and not an installed package. The
+     server links the compiler's own parser and type checker, so the package
+     that carries them is named; but that package installs the library as
+     `jasmin.jasmin`, the dune files here ask for `jasmin`, and a build with
+     the tree removed therefore fails with `Library "jasmin" not found`. The
+     tree `vendor/fetch.sh` assembles is what supplies the library to every
+     build this repository runs, and no opam install of this package builds.
+     docs/nix.md records what is measured about that and what is not. *)
+  case "installs";
+  let installed_paths =
+    [
+      Filename.concat root "jasmin-lsp.opam.locked";
+      Filename.concat root "vendor/requirements.opam";
+    ]
+  in
+  let installed =
+    List.concat_map (fun path -> opam_depends (read path)) installed_paths
+  in
+  let supplied_by_the_tree = [ "jasmin" ] in
+  List.iter
+    (fun name ->
+      if
+        (not (List.mem name installed))
+        && not (List.mem name supplied_by_the_tree)
+      then
+        fail
+          "%s names %s, which neither %s nor %s installs and which this \
+           repository does not build"
+          (shown opam_path) name
+          (shown (List.nth installed_paths 0))
+          (shown (List.nth installed_paths 1)))
+    expected;
+  List.iter
+    (fun name ->
+      if List.mem name supplied_by_the_tree then
+        Printf.printf
+          "  %s is supplied by vendor/fetch.sh, not by an install\n%!" name)
+    expected;
+  Printf.printf "  %d packages installed by the two files, %d named here\n%!"
+    (List.length installed) (List.length expected);
+
+  (* 4. The vendored release satisfies the jasmin constraint the package
+     carries. *)
+  case "jasmin";
+  let lock = Filename.concat root "vendor/jasmin.lock" in
+  let version = lock_version (read lock) in
+  (match List.assoc_opt "jasmin" package_depends with
+  | None -> fail "dune-project does not depend on jasmin"
+  | Some constraint_ ->
+      let holds, written = satisfies ~version constraint_ in
+      if not holds then
+        fail
+          "the package requires jasmin %s, but %s pins %s, which does not \
+           satisfy it"
+          written lock version
+      else
+        Printf.printf "  jasmin %s satisfies the requirement %s\n%!" version
+          written);
+
+  Printf.printf "%d cases, %d failures\n%!" !cases !failures;
+  if !failures > 0 then exit 1
