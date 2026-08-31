@@ -536,28 +536,18 @@ let rec item session env (located : Syntax.pitem Location.located) : env =
         (match Location.unloc function_.pdf_body.pdb_ret with
         | None -> ()
         | Some returns ->
-            List.fold_left
-              (fun env (annotations_, stotype) ->
-                let env = annotations session env annotations_ in
-                ptype session env (snd stotype))
-              local returns
-      in
-      let final =
-        List.fold_left (instruction session) local function_.pdf_body.pdb_instr
-      in
-      (match Location.unloc function_.pdf_body.pdb_ret with
-      | None -> ()
-      | Some returns ->
-          List.iter
-            (fun ident -> ignore (use session final Use_var ident))
-            returns);
-      (* The function is declared after its body: pretyping pushes it into
-         the environment from before the parameters, so a body cannot call
-         itself. *)
-      let declaration =
-        declare session env Index.Function function_.pdf_name ~item_span
-      in
-      push_fun env declaration
+            List.iter
+              (fun ident -> ignore (use session final Use_var ident))
+              returns);
+        (* The function is declared after its body: pretyping pushes it into
+           the environment from before the parameters, so a body cannot call
+           itself. *)
+        let declaration =
+          declare session env Index.Function function_.pdf_name ~item_span
+        in
+        push_fun env declaration
+  in
+  mark_end session env item_span
 
 and require_file session env ~from written =
   let path = resolve_path ~idirs:session.idirs ~dir:env.dir ~from written in
@@ -579,6 +569,10 @@ and require_file session env ~from written =
             chain = path :: env.chain;
           }
         in
+        (* A file read into a namespace holds that namespace's names: the
+           marks of this visit replace the ones an earlier visit left, so the
+           last visit is the one a scope question answers from. *)
+        Hashtbl.replace session.snapshots path [];
         let resolved = List.fold_left (item session) inner index.Index.items in
         (* The frames the included file built stay; the file it came from is
            back for everything after the require. *)
@@ -599,6 +593,7 @@ let of_text ~idirs ~read ~file text : t =
       read;
       indexes = Hashtbl.create 16;
       answers = Hashtbl.create 256;
+      snapshots = Hashtbl.create 16;
       order_rev = [];
       loaded = [];
     }
@@ -618,6 +613,8 @@ let of_text ~idirs ~read ~file text : t =
       chain = [ file ];
     }
   in
+  Hashtbl.replace session.snapshots file [];
+  mark session env 0;
   ignore (List.fold_left (item session) env index.Index.items);
   {
     entry = file;
@@ -625,6 +622,13 @@ let of_text ~idirs ~read ~file text : t =
     answers = session.answers;
     order = List.rev session.order_rev;
     loaded = List.rev session.loaded;
+    snapshots =
+      Hashtbl.fold
+        (fun file marks snapshots ->
+          Hashtbl.add snapshots file (Array.of_list (List.rev marks));
+          snapshots)
+        session.snapshots
+        (Hashtbl.create (Hashtbl.length session.snapshots));
   }
 
 let of_file ~idirs ~read file =
@@ -670,3 +674,48 @@ let loaded (t : t) = t.loaded
 let declaration_of_answer = function
   | Resolved declaration -> Some declaration
   | Intrinsic | Annotation | Include_path | Unresolved -> None
+
+(* ------------------------------------------------------------------ *)
+(* The scope at a byte *)
+
+type binding = { name : string; declaration : Index.declaration }
+type scope = { types : binding list; funs : binding list; vars : binding list }
+
+(* The declarations one name space holds at a set of frames, innermost frame
+   first and names in order within a frame. A name declared twice is listed
+   once, with the declaration the lookup would find. The name is the frame's
+   own key, so a name a namespace merged into its parent is listed as the
+   qualified name a lookup there has to write. *)
+let visible (project : frame -> Index.declaration Names.t) frames =
+  let seen = Hashtbl.create 16 in
+  let rec loop acc = function
+    | [] -> List.rev acc
+    | frame :: rest ->
+        let acc =
+          Names.fold
+            (fun name declaration acc ->
+              if Hashtbl.mem seen name then acc
+              else (
+                Hashtbl.add seen name ();
+                { name; declaration } :: acc))
+            (project frame) acc
+        in
+        loop acc rest
+  in
+  loop [] frames
+
+let scope_at (t : t) ~file ~byte =
+  match Hashtbl.find_opt t.snapshots (normalise file) with
+  | None -> None
+  | Some marks ->
+      let frames = ref [] in
+      Array.iter
+        (fun (at, snapshot) -> if at <= byte then frames := snapshot)
+        marks;
+      let frames = !frames in
+      Some
+        {
+          types = visible (fun frame -> frame.types) frames;
+          funs = visible (fun frame -> frame.funs) frames;
+          vars = visible (fun frame -> frame.vars) frames;
+        }

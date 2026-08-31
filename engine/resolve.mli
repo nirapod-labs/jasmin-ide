@@ -70,4 +70,27 @@ val loaded : t -> (string * string) list
 (** The (namespace key, file) pairs the resolver read once each, for the
     tests of the require rule. *)
 
+type binding = { name : string; declaration : Index.declaration }
+(** One name in scope and what it names. [name] is the name a use of it has
+    to write where it is in scope, which is not always the declaration's own
+    [Index.name]: a namespace merges its contents into its parent qualified
+    with its own name, so outside the namespace [A::mul] is the name in scope
+    for a function written [mul] inside [namespace A]. *)
+
+type scope = { types : binding list; funs : binding list; vars : binding list }
+(** The declarations in scope at one byte, one list per name space the
+    compiler keeps: type aliases, functions and variables. Each list holds
+    one entry per visible declaration, the innermost frame's names first and
+    in order within a frame; a name declared twice in nested frames is
+    listed once, with the declaration a lookup would find. A function a
+    [require] brought in is in [funs]: the walk of a required file leaves its
+    declarations in the frames of the file that required it. *)
+
+val scope_at : t -> file:string -> byte:int -> scope option
+(** [scope_at t ~file ~byte] is the scope the walk had reached at that byte
+    of [file], or [None] when the resolution never reached the file. The
+    scope is the resolver's own, read from the environment it built as it
+    walked: it is not computed again from the declarations. A file read into
+    more than one namespace answers from the last visit. *)
+
 val declaration_of_answer : answer -> Index.declaration option

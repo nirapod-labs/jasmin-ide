@@ -94,14 +94,40 @@ val max_bytes : int
 (** The largest text that is analysed: 8 MiB. A larger one is not parsed and
     gets one diagnostic that says so. *)
 
+type snapshot = {
+  index : Index.t;
+      (** The index over the analysed text's untyped tree (design section 9):
+          every identifier occurrence, every declaration with its name and
+          item ranges, the outline and the [require] edges. Its
+          [Index.file] is the document's path, or its uri when it has none,
+          and its [Index.text] is the text the analysis read, byte-order mark
+          included, so a byte of {!Document.t} is used as it comes. *)
+  resolve : Resolve.t;
+      (** What each occurrence names, and the scope at every byte the walk
+          reached, over the analysed file and every file it requires. *)
+  facts : Jide_jasmin.Facts.t;
+      (** The typed facts the check of this document left: the items that
+          typed, with their variables, signatures and annotations. It holds
+          the items of this document only, which is the one file a signature
+          help of its own calls needs. *)
+}
+(** What the last analysis of a document built from it, as one value. The
+    three fields are exactly the arguments {!Complete.completion} and
+    {!Complete.signature_help} take, so a caller reads this and answers
+    without touching the compiler, the parser or a file. *)
+
 type analysis = {
   uri : string;  (** the name the document was opened with *)
   version : int;  (** the client's version of the text analysed *)
   key : int * string;  (** the version and digest the analysis belongs to *)
   text : string;  (** the text that was analysed, byte-order mark removed *)
   bom : int;  (** bytes removed from the front of the document: 0 or 3 *)
+  snapshot : snapshot;
+      (** the index, the resolver and the typed facts built from the text
+          analysed, kept so that a later request reads them instead of
+          building them again *)
   context : Context.t;
-      (** the entry this file is checked in the context of, worked out from
+      (** The entry this file is checked in the context of, worked out from
           the project and the [require] lines of the files on disk or in an
           open buffer; the file alone when the stage that works it out
           fails *)
@@ -124,6 +150,27 @@ val check : t -> uri:string -> analysis option
 
 val analysis : t -> uri:string -> analysis option
 (** The analysis stored for [uri], without doing any work. *)
+
+val snapshot : t -> uri:string -> snapshot option
+(** [snapshot t ~uri] is the index, the resolver and the typed facts the last
+    analysis of [uri] built, or [None] when no analysis is stored for it.
+
+    It reads what the last check left and does no work of its own: it does not
+    parse, type, resolve or read a file, and it never calls the check, so a
+    caller may ask on every keystroke (design section 5, section 10: completion
+    and signature help never trigger a check). It costs one hash lookup of the
+    uri, and it cannot raise.
+
+    The value is the last analysis's even when the document's text has changed
+    since, which is the point: an answer is always available while the client
+    is typing. A caller that must know how old it is compares the stored
+    analysis's {!analysis.key} with {!analysis_key} of the current text; the
+    two differ exactly when a check would do work.
+
+    [None] means the document has never been analysed, not that the analysis
+    failed. A document over {!max_bytes}, and one whose pipeline raised, have a
+    snapshot too, of an empty index over the empty text, so a caller need not
+    tell "nothing to show" from "nothing analysed". *)
 
 val context : t -> uri:string -> Context.t option
 (** The context the last analysis of [uri] used, without doing any work.
