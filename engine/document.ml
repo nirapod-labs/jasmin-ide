@@ -13,6 +13,52 @@ let create ~uri ~version ~text =
 let with_text t ~version text =
   { t with version; text; lines = Jide_lang.Line_index.create text }
 
+(* The largest file the reader accepts. A larger file would not be analysed,
+   so it is refused rather than read and then discarded. *)
+let max_file_bytes = 8 * 1024 * 1024
+
+(* A regular file no larger than [max_file_bytes]. A directory, a FIFO or a
+   device is refused before anything is read: reading a device either fails
+   or never ends, and a request must not wait on one. *)
+let regular_file path =
+  try
+    let stats = Unix.stat path in
+    match stats.Unix.st_kind with
+    | Unix.S_REG when stats.Unix.st_size <= max_file_bytes ->
+        Ok stats.Unix.st_size
+    | Unix.S_REG ->
+        Error
+          (Printf.sprintf "%s is %d bytes, over the limit of %d" path
+             stats.Unix.st_size max_file_bytes)
+    | _ -> Error (Printf.sprintf "%s is not a regular file" path)
+  with Unix.Unix_error (error, _, _) -> Error (Unix.error_message error)
+
+let readable path =
+  match regular_file path with Ok _ -> true | Error _ -> false
+
+(* One reader for both the file loader and the engine. The bytes are kept
+   as they are: stripping a byte-order mark belongs to the analysis, which
+   is the step that knows the lexer rejects it. *)
+let read_file path =
+  match regular_file path with
+  | Error message -> Error message
+  | Ok _ -> (
+      try Ok (In_channel.with_open_bin path In_channel.input_all)
+      with Sys_error message -> Error message)
+
+let of_file ~uri path =
+  match read_file path with
+  | Error message -> Error message
+  | Ok text ->
+      Ok
+        {
+          uri;
+          path = Some path;
+          version = 0;
+          text;
+          lines = Jide_lang.Line_index.create text;
+        }
+
 let uri t = t.uri
 let path t = t.path
 let version t = t.version
