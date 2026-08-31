@@ -1,0 +1,16 @@
+; The opam contract: the depends list in dune-project must cover every library
+; the workspace's dune files name, the opam file dune generates from it must
+; name the same packages, and the jasmin constraint must hold for the release
+; vendor/jasmin.lock pins. test_opam_contract.ml says what each case proves.
+;
+; The test reads the tree from the root the stanza hands it, so the stanza
+; depends on the whole source tree: a dune file that gains a library must make
+; this test run again, and naming the files one by one would let a new one
+; slip past unnoticed.
+
+(test
+ (name test_opam_contract)
+ (deps
+  (source_tree ../..))
+ (action
+  (run %{test} %{workspace_root})))
