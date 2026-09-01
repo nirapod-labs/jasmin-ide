@@ -1,0 +1,26 @@
+; Editing-request tests: the seven requests the controller routes to the
+; engine's editing features, layer 2 of the test design. Each `.t` drives the
+; built server through the test client over pipes, so every test runs the real
+; binary and the record is the protocol's own bytes, normalised.
+;
+; What these tests pin is the routing and the empty answer, not what the
+; engine computes: the engine's own answers are its lane's tests. A routed
+; request is no longer MethodNotFound, so a client that asks before the
+; engine can answer sees the empty answer its request has in the protocol
+; (null, or an empty list) and never an error, except for rename, which has
+; no empty answer and is refused with the engine's reason.
+;
+; The two executables are declared as dependencies even though dune would
+; build them anyway: the dependency is what makes a rebuilt server or client
+; re-run these tests instead of leaving a recorded pass from the previous
+; binary in place. A fixture a test reads that is not listed here would not
+; invalidate its record, so a fixture added later belongs in this list too.
+;
+; The stanza must never be given `(files ...)`, `(applies_to ...)` or
+; `(enabled_if false)`: each of those leaves a `.t` file in the tree with no
+; record, which `scripts/runtest.sh` refuses.
+
+(cram
+ (deps
+  %{exe:../../client/jide_test_client.exe}
+  %{exe:../../../lsp-server/native/main.exe}))
