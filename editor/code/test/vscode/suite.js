@@ -102,3 +102,184 @@ function captureOutputChannels() {
   }
 }
 
+captureOutputChannels();
+
+/** Every captured line joined by newlines, for the marker assertions. */
+function transcript() {
+  return captured.map((entry) => entry.text).join("\n");
+}
+
+/** How many captured lines hold the given text. */
+function count(text) {
+  return captured.filter((entry) => entry.text.includes(text)).length;
+}
+
+/** Waits until the predicate holds for the transcript, or fails. */
+async function waitFor(predicate, timeoutMs, message) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (predicate(transcript())) {
+      return;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`${message} (waited ${timeoutMs} ms)`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+/**
+ * The `jasmin-lsp` processes whose parent is this extension host, read from
+ * `ps` because the extension keeps its client private. The command line is
+ * matched against the path the run configured, so a server built under
+ * another name is found too; `-ww` keeps `ps` from cutting the line short.
+ */
+async function serverProcesses(serverPath) {
+  const { stdout } = await execute("ps", ["-Aww", "-o", "pid,ppid,command"]);
+  const rows = stdout.split("\n").slice(1);
+
+  return rows
+    .map((row) => /^\s*(\d+)\s+(\d+)\s+(.*)$/u.exec(row))
+    .filter((match) => match !== null && Number(match[2]) === process.pid)
+    .map((match) => ({pid: Number(match[1]), command: match[3]}))
+    .filter((entry) => entry.command.includes(serverPath));
+}
+
+/** Waits until the extension host has a server child, and returns it. */
+async function waitForServer(serverPath, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const found = await serverProcesses(serverPath);
+    if (found.length > 0) {
+      return found;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(
+        `no child of the extension host (${process.pid}) runs ${serverPath} after ${timeoutMs} ms`
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+async function run() {
+  const extension = vscode.extensions.getExtension(extensionId);
+  assert.ok(extension, `${extensionId} is not in the test window`);
+  assert.equal(
+    extension.isActive,
+    false,
+    "the extension was active before the suite ran, so its output channel was never captured"
+  );
+
+  await extension.activate();
+  assert.equal(extension.isActive, true, "the extension activated but is not active");
+
+  // The language contributes and the commands, read the way the API returns
+  // them: `getLanguages` is a plain array today and was a thenable before, so
+  // both are accepted.
+  const languages = Array.from(await vscode.languages.getLanguages());
+  assert.ok(languages.includes(languageId), `the ${languageId} language is not registered`);
+
+  const registered = await vscode.commands.getCommands(true);
+  for (const command of commands) {
+    assert.ok(registered.includes(command), `the ${command} command is not registered`);
+  }
+
+  const configured = vscode.workspace.getConfiguration("jasminIde").get("server.path");
+  assert.ok(typeof configured === "string" && configured !== "", "the run is not configured with a server path");
+
+  // The extension logs this line only after `LanguageClient.start()` resolved,
+  // which is after the initialize reply and after the initialized
+  // notification. A client that failed either step logs the failure instead
+  // and never this line.
+  await waitFor(
+    (text) => text.includes(running),
+    60000,
+    `the extension never reported the language client running; transcript:\n${transcript()}`
+  );
+  record("suite", "state", "the language client reported the running state");
+
+  const started = await waitForServer(configured, 30000);
+  assert.ok(started.length > 0, `the client did not start ${configured}`);
+  for (const entry of started) {
+    record("suite", "server-pid", `pid ${entry.pid}`);
+  }
+
+  // The protocol's own markers, from the server's stderr, which the client
+  // pipes into the same output channel.
+  await waitFor(
+    (text) => text.includes(initialized),
+    30000,
+    `the server never reported that it answered an initialize request; transcript:\n${transcript()}`
+  );
+
+  // A `.jazz` file from the repository's fixtures, opened the way a person
+  // opens one: the client selects it and sends it to the server.
+  const fixture = join(__dirname, "..", "..", "fixtures", "rotate-columns.jazz");
+  const document = await vscode.workspace.openTextDocument(fixture);
+  assert.equal(document.languageId, languageId, `a .jazz file does not open as ${languageId}`);
+  await vscode.window.showTextDocument(document);
+  record("suite", "state", `opened ${fixture} as ${document.languageId}`);
+
+  // A settings change makes the client re-read its trace setting, so the
+  // client's own record of the messages it sends covers the stop below.
+  await vscode.workspace
+    .getConfiguration("jasminIde")
+    .update("diagnostics.delay", 400, vscode.ConfigurationTarget.Workspace);
+
+  // The restart command stops the running client and starts another one, so
+  // both halves of the lifecycle run once more, both observed.
+  await vscode.commands.executeCommand("jasminIde.restartServer");
+  await waitFor(
+    () => count(running) >= 2,
+    60000,
+    `the restarted language client never reported the running state; transcript:\n${transcript()}`
+  );
+
+  const restarted = await waitForServer(configured, 30000);
+  assert.ok(restarted.length > 0, "the server is not running after the restart command");
+  for (const entry of restarted) {
+    record("suite", "server-pid", `pid ${entry.pid}`);
+  }
+
+  const text = transcript();
+  const occurrences = {
+    initialized: count(initialized),
+    running: count(running),
+    shutdown: count(shutdownRequested),
+    exiting: count(exiting)
+  };
+
+  assert.ok(
+    occurrences.initialized >= 2,
+    `the server answered ${occurrences.initialized} initialize request(s), expected 2 (one per client)`
+  );
+  assert.ok(occurrences.shutdown >= 1, `the server was never asked to shut down; transcript:\n${text}`);
+  assert.ok(occurrences.exiting >= 1, `the server was never sent an exit notification; transcript:\n${text}`);
+
+  // The order is what makes the pair a lifecycle rather than two coincidences:
+  // the first initialize came before the first running report, and the shutdown
+  // came before the exit. A shutdown ahead of the exit is also what makes the
+  // server's own exit code 0 rather than 1.
+  const order = captured.map((entry) => entry.text);
+  const first = (needle) => order.findIndex((line) => line.includes(needle));
+  assert.ok(
+    first(initialized) < first(running),
+    "the server's initialize marker does not come before the client's running report"
+  );
+  assert.ok(
+    first(shutdownRequested) >= 0 && first(shutdownRequested) < first(exiting),
+    "the exit notification does not come after a shutdown request"
+  );
+
+  const summary = {
+    initialized: occurrences.initialized,
+    running: occurrences.running,
+    shutdown: occurrences.shutdown,
+    exiting: occurrences.exiting,
+    restart: restarted.length
+  };
+  record("suite", "summary", JSON.stringify(summary));
+}
+
+module.exports = {run};
