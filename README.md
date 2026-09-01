@@ -30,3 +30,7 @@ The server is built against the Jasmin release pinned in `vendor/jasmin.lock`
 (2026.09.0). It can also be built against upstream `main`, which
 `docs/development.md` describes.
 
+## Licence
+
+MIT, see `LICENSE`. `NOTICE.md` lists the notices that come with it: the
+TextMate grammar, the tree-sitter grammar, the Jasmin library and GMP.
