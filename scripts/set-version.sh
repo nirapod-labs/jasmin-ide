@@ -95,3 +95,103 @@ version_of() {
 	sed -n "$expr" "$1"
 }
 
+lock_version() {
+	awk -v package="$LOCK_PACKAGE" '
+		/^\[\[package\]\]$/ { ours = 0; next }
+		$0 == "name = \"" package "\"" { ours = 1; next }
+		ours && /^version = "/ {
+			version = $0
+			sub(/^version = "/, "", version)
+			sub(/"$/, "", version)
+			print version
+			exit
+		}
+	' "$LOCK"
+}
+
+write_file() {
+	tmp=$(mktemp "${TMPDIR:-/tmp}/jasmin-set-version.XXXXXX") || exit 2
+	if ! sed "$2" "$1" >"$tmp"; then
+		rm -f "$tmp"
+		warn "sed could not rewrite $1"
+		exit 2
+	fi
+	if ! cat "$tmp" >"$1"; then
+		rm -f "$tmp"
+		warn "could not write $1"
+		exit 2
+	fi
+	rm -f "$tmp"
+}
+
+set_lock() {
+	old=$(lock_version) || exit 2
+	if [ -z "$old" ]; then
+		warn "$LOCK holds no $LOCK_PACKAGE package entry"
+		exit 2
+	fi
+	if [ "$old" = "$new" ]; then
+		say "already $new: $LOCK"
+		return 0
+	fi
+
+	tmp=$(mktemp "${TMPDIR:-/tmp}/jasmin-set-version.XXXXXX") || exit 2
+	if ! awk -v package="$LOCK_PACKAGE" -v version="$new" '
+		/^\[\[package\]\]$/ { ours = 0 }
+		$0 == "name = \"" package "\"" { ours = 1 }
+		ours && /^version = "/ { print "version = \"" version "\""; ours = 0; next }
+		{ print }
+	' "$LOCK" >"$tmp"; then
+		rm -f "$tmp"
+		warn "awk could not rewrite $LOCK"
+		exit 2
+	fi
+	if ! cat "$tmp" >"$LOCK"; then
+		rm -f "$tmp"
+		warn "could not write $LOCK"
+		exit 2
+	fi
+	rm -f "$tmp"
+	say "$old -> $new: $LOCK"
+}
+
+main() {
+	[ "$#" -eq 1 ] || usage
+	new=$1
+	well_formed "$new" ||
+		{ warn "not a version: '$new' (three dot-separated numbers, as in 0.1.0, with no leading zero)"; exit 2; }
+
+	cd "$(dirname "$0")/.." || exit 2
+
+	for file in $FILES; do
+		version_of "$file" >/dev/null || exit 2
+	done
+	if [ ! -f "$LOCK" ]; then
+		warn "no such file: $LOCK"
+		exit 2
+	fi
+	if [ -z "$(lock_version)" ]; then
+		warn "$LOCK holds no $LOCK_PACKAGE package entry"
+		exit 2
+	fi
+
+	for file in $FILES; do
+		old=$(version_of "$file") || exit 2
+		if [ "$old" = "$new" ]; then
+			say "already $new: $file"
+			continue
+		fi
+		write_file "$file" "$(write_expr "$file" "$new")"
+		say "$old -> $new: $file"
+	done
+
+	set_lock
+
+	sh scripts/check-version.sh "$new"
+	status=$?
+	if [ "$status" -ne 0 ]; then
+		exit "$status"
+	fi
+}
+
+main "$@"
