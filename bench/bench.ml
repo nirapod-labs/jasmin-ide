@@ -332,7 +332,9 @@ let measure_keystroke ~runs unit_ =
   let uri = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path unit_.file) in
   let log = ref [] in
   let server =
-    Jide_controller.Server.create ~log:(fun message -> log := message :: !log)
+    Jide_controller.Server.create
+      ~log:(fun message -> log := message :: !log)
+      ()
   in
   ignore
     (Jide_controller.Server.handle_packet server
