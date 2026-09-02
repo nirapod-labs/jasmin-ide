@@ -6,6 +6,7 @@ fixtures/**
 node_modules/**
 scripts/**
 src/**
+test/**
 tests/**
 esbuild.mjs
 pnpm-lock.yaml
