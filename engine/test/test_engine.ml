@@ -1166,38 +1166,63 @@ let test_resolve_special_paths () =
     (Engine.resolve engine "")
 
 let () =
-  test_change_without_open_is_ignored ();
-  test_change_after_close_is_ignored ();
-  test_open_then_change_updates_the_text ();
-  test_close_removes_the_document ();
-  test_analysis_key_follows_the_text ();
-  test_analysis_key_without_a_document ();
-  test_check_reuses_the_analysis ();
-  test_check_without_a_document ();
-  test_clean_document ();
-  test_type_error_span ();
-  test_bom_shifts_the_spans ();
-  test_bom_without_an_error ();
-  test_byte_order_mark_alone ();
-  test_span_after_a_bom_matches_the_plain_text ();
-  test_warning_becomes_a_diagnostic ();
-  test_warning_after_a_bom ();
-  test_errors_come_before_warnings ();
-  test_over_the_size_limit ();
-  test_at_the_size_limit_is_analysed ();
-  test_the_adapter_admits_what_the_engine_admits ();
-  test_exception_becomes_an_internal_diagnostic ();
-  test_a_failing_check_does_not_break_the_store ();
-  test_two_spellings_of_one_uri ();
-  test_settings ();
-  test_the_settings_reach_the_checker ();
-  test_a_settings_change_forgets_the_analysis ();
-  test_an_exception_in_the_context_stage_is_internal ();
-  test_snapshot_without_an_analysis ();
-  test_snapshot_after_a_check ();
-  test_snapshot_is_the_last_analysis ();
-  test_snapshot_of_a_broken_file ();
-  if !failures = 0 then print_endline "all engine tests passed"
-  else (
-    Printf.printf "%d engine test(s) failed\n" !failures;
+  test "change without open is ignored" test_change_without_open_is_ignored;
+  test "change after close is ignored" test_change_after_close_is_ignored;
+  test "open then change updates the document"
+    test_open_then_change_updates_the_text;
+  test "close removes the document" test_close_removes_the_document;
+  test "the analysis key follows the text" test_analysis_key_follows_the_text;
+  test "the analysis key without a document"
+    test_analysis_key_without_a_document;
+  test "a check reuses the analysis" test_check_reuses_the_analysis;
+  test "a check without a document" test_check_without_a_document;
+  test "a clean document" test_clean_document;
+  test "a type error's span" test_type_error_span;
+  test "a byte-order mark shifts the spans" test_bom_shifts_the_spans;
+  test "a byte-order mark without an error" test_bom_without_an_error;
+  test "a byte-order mark alone" test_byte_order_mark_alone;
+  test "a span after a byte-order mark matches the plain text"
+    test_span_after_a_bom_matches_the_plain_text;
+  test "a warning becomes a diagnostic" test_warning_becomes_a_diagnostic;
+  test "a warning after a byte-order mark" test_warning_after_a_bom;
+  test "errors come before warnings" test_errors_come_before_warnings;
+  test "a document over the size limit" test_over_the_size_limit;
+  test "a document at the size limit" test_at_the_size_limit_is_analysed;
+  test "the adapter admits what the engine admits"
+    test_the_adapter_admits_what_the_engine_admits;
+  test "an exception becomes an internal diagnostic"
+    test_exception_becomes_an_internal_diagnostic;
+  test "a failing check does not break the store"
+    test_a_failing_check_does_not_break_the_store;
+  test "two spellings of one uri" test_two_spellings_of_one_uri;
+  test "settings" test_settings;
+  test "the settings reach the checker" test_the_settings_reach_the_checker;
+  test "a settings change forgets the analysis"
+    test_a_settings_change_forgets_the_analysis;
+  test "an exception in the context stage is internal"
+    test_an_exception_in_the_context_stage_is_internal;
+  test "a snapshot without an analysis" test_snapshot_without_an_analysis;
+  test "a snapshot after a check" test_snapshot_after_a_check;
+  test "the snapshot is the last analysis" test_snapshot_is_the_last_analysis;
+  test "the snapshot of a broken file" test_snapshot_of_a_broken_file;
+  test "open and read back" test_open_and_read_back;
+  test "change and read the new text" test_change_and_read_the_new_text;
+  test "close and read from disk" test_close_then_read_from_disk;
+  test "two spellings of a URI are one document"
+    test_uri_spellings_are_one_document;
+  test "a missing file is a message" test_missing_file_is_a_message;
+  test "a file keeps its bytes" test_file_keeps_its_bytes;
+  test "reads are bounded to regular files" test_reads_are_bounded;
+  test "a relative path resolves against the root" test_resolve_relative_path;
+  test "a path that escapes the root is refused" test_resolve_refuses_escape;
+  test "a symlink that leaves the root is refused"
+    test_resolve_refuses_a_symlink_escape;
+  test "resolve compares names byte for byte"
+    test_resolve_compares_names_exactly;
+  test "resolve handles the empty path and the root" test_resolve_special_paths;
+  test "resolve without a root is refused" test_resolve_without_root;
+  test "the analysis key follows a file" test_analysis_key_follows_a_file;
+  if !failures > 0 then (
+    Printf.printf "\n%d tests, %d failed checks\n" !tests !failures;
     exit 1)
+  else Printf.printf "\n%d tests, no failed checks\n" !tests
