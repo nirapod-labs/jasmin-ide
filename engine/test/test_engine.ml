@@ -48,6 +48,87 @@ let span_of_single engine ~uri =
   | [ diagnostic ] -> diagnostic.Jide_lang.Diagnostic.span
   | _ -> Jide_lang.Span.make ~start_byte:(-1) ~end_byte:(-1)
 
+(* The store's file and path cases need names for the engine and the document,
+   a temporary directory, and a labelled check that prints both sides of a
+   comparison. Each case prints its name, so the output of a run doubles as
+   the list of what was checked. *)
+module Engine = Jide_engine.Engine
+module Document = Jide_engine.Document
+
+let tests = ref 0
+let current = ref ""
+
+let fail format =
+  Printf.ksprintf
+    (fun message ->
+      incr failures;
+      Printf.printf "FAIL %s: %s\n" !current message)
+    format
+
+let check_bool label condition =
+  if not condition then fail "%s: the condition does not hold" label
+
+let check_int label expected actual =
+  if expected <> actual then
+    fail "%s: expected %d, got %d" label expected actual
+
+let check_string label expected actual =
+  if not (String.equal expected actual) then
+    fail "%s: expected %S, got %S" label expected actual
+
+let test name body =
+  current := name;
+  incr tests;
+  let before = !failures in
+  (try body () with exn -> fail "raised %s" (Printexc.to_string exn));
+  if !failures = before then Printf.printf "ok   %s\n" name
+
+let uri_of_path path = "file://" ^ path
+
+(* [lstat], not [stat]: a symbolic link is removed as a link, so the tree
+   cannot reach its target, and a link whose target is already gone is still
+   removed. *)
+let rec remove_tree path =
+  match (Unix.lstat path).Unix.st_kind with
+  | Unix.S_DIR ->
+      Array.iter
+        (fun name -> remove_tree (Filename.concat path name))
+        (Sys.readdir path);
+      Sys.rmdir path
+  | _ -> Sys.remove path
+
+let with_temp_dir body =
+  let path = Filename.temp_file "jide-engine-test" "" in
+  Sys.remove path;
+  Sys.mkdir path 0o700;
+  Fun.protect ~finally:(fun () -> remove_tree path) (fun () -> body path)
+
+let write_file path text =
+  let channel = open_out_bin path in
+  Fun.protect
+    ~finally:(fun () -> close_out_noerr channel)
+    (fun () -> output_string channel text)
+
+let check_text label expected = function
+  | None -> fail "%s: expected %S, got None" label expected
+  | Some actual -> check_string label expected actual
+
+let check_version label expected = function
+  | None -> fail "%s: expected %d, got None" label expected
+  | Some actual -> check_int label expected actual
+
+let check_key label = function
+  | None -> fail "%s: expected a key, got None" label
+  | Some _ -> ()
+
+let check_path label expected = function
+  | Ok actual -> check_string label expected actual
+  | Error message -> fail "%s: expected %S, got Error %S" label expected message
+
+let check_refused label = function
+  | Error _ -> ()
+  | Ok path -> fail "%s: expected a refusal, got %S" label path
+
 (* The store's own contract, without the controller in the way: only a
    document the client opened may be changed, and a closed document must
    never come back from a change. *)
@@ -120,12 +201,23 @@ let test_analysis_key_follows_the_text () =
         (same <> Some key);
       Jide_engine.Engine.change_document engine ~uri ~version:2 ~text:invalid;
       check "key: other bytes at the same version give a new key"
-        (Jide_engine.Engine.analysis_key engine ~uri <> same)
+        (Jide_engine.Engine.analysis_key engine ~uri <> same);
+      (* The key is a function of the version and the bytes and nothing else,
+         so putting the earlier bytes back puts the earlier key back. *)
+      Jide_engine.Engine.change_document engine ~uri ~version:2 ~text:valid;
+      check "key: restored text restores the key"
+        (Jide_engine.Engine.analysis_key engine ~uri = same)
 
+(* The key is the text's, and the text of a closed document is the file's, so
+   a uri has no key only when nothing can be read for it. The path below is
+   inside a directory the case owns and has removed again, so no file can be
+   there whatever the host happens to hold in /tmp. *)
 let test_analysis_key_without_a_document () =
-  let engine = create () in
-  check "key: no document, no key"
-    (Jide_engine.Engine.analysis_key engine ~uri:(uri_of "absent") = None)
+  with_temp_dir (fun directory ->
+      let engine = create () in
+      let uri = uri_of_path (Filename.concat directory "absent.jazz") in
+      check "key: no document and no file, no key"
+        (Jide_engine.Engine.analysis_key engine ~uri = None))
 
 let test_check_reuses_the_analysis () =
   let engine = create () in
@@ -817,39 +909,320 @@ let test_snapshot_of_a_broken_file () =
       check "broken: reading it ran no extra check"
         (Jide_engine.Engine.analysis_count engine = 1 && !calls = 1)
 
+(* Reading a URI: the open buffer first, the file second. *)
+
+let test_open_and_read_back () =
+  let engine = Engine.create () in
+  let uri = uri_of "opened" in
+  let text = "fn f() -> reg u32 { return 0; }\n" in
+  Engine.open_document engine ~uri ~version:7 ~text;
+  check_text "open: the buffer's text" text (Engine.text engine ~uri);
+  check_version "open: the client's version" 7 (Engine.version engine ~uri)
+
+let test_change_and_read_the_new_text () =
+  let engine = Engine.create () in
+  let uri = uri_of "changed" in
+  Engine.open_document engine ~uri ~version:1 ~text:"fn f()";
+  Engine.change_document engine ~uri ~version:4 ~text:"fn g()";
+  check_text "change: the new text" "fn g()" (Engine.text engine ~uri);
+  check_version "change: the new version" 4 (Engine.version engine ~uri)
+
+let test_close_then_read_from_disk () =
+  with_temp_dir (fun directory ->
+      let path = Filename.concat directory "disk.jazz" in
+      write_file path "fn from_disk()\n";
+      let uri = uri_of_path path in
+      let engine = Engine.create () in
+      Engine.open_document engine ~uri ~version:5 ~text:"fn from_buffer()\n";
+      check_text "before close: the buffer wins" "fn from_buffer()\n"
+        (Engine.text engine ~uri);
+      check_version "before close: the client's version" 5
+        (Engine.version engine ~uri);
+      Engine.close_document engine ~uri;
+      check_text "after close: the file's text" "fn from_disk()\n"
+        (Engine.text engine ~uri);
+      check_version "after close: version 0" 0 (Engine.version engine ~uri))
+
+(* One document, however the client spells its URI: a percent-encoded path
+   and the decoded one, and a scheme in another case, are one key. The file
+   on disk holds other bytes, so a fall-through would be visible. *)
+let test_uri_spellings_are_one_document () =
+  with_temp_dir (fun directory ->
+      let path = Filename.concat directory "a b.jazz" in
+      write_file path "fn from_disk()\n";
+      let decoded = "file://" ^ path in
+      let encoded = String.concat "%20" (String.split_on_char ' ' decoded) in
+      let alternate_scheme =
+        "FILE" ^ String.sub decoded 4 (String.length decoded - 4)
+      in
+      let localhost = "file://localhost" ^ path in
+      let engine = Engine.create () in
+      Engine.open_document engine ~uri:encoded ~version:3
+        ~text:"fn from_buffer()\n";
+      check_int "spellings: one document" 1
+        (List.length (Engine.documents engine));
+      check_text "open encoded, read decoded: the buffer's text"
+        "fn from_buffer()\n"
+        (Engine.text engine ~uri:decoded);
+      check_version "open encoded, read decoded: the client's version" 3
+        (Engine.version engine ~uri:decoded);
+      check_text "open encoded, read through localhost: the buffer's text"
+        "fn from_buffer()\n"
+        (Engine.text engine ~uri:localhost);
+      check_bool "open encoded, read upper-case scheme: one analysis key"
+        (Engine.analysis_key engine ~uri:decoded
+        = Engine.analysis_key engine ~uri:alternate_scheme);
+      (match Engine.document engine ~uri:localhost with
+      | None -> fail "document lookup: expected the document, got None"
+      | Some document ->
+          check_string "document lookup: the URI it was opened with" encoded
+            (Document.uri document));
+      Engine.change_document engine ~uri:decoded ~version:4
+        ~text:"fn changed()\n";
+      check_text "change decoded, read encoded: the new text" "fn changed()\n"
+        (Engine.text engine ~uri:encoded);
+      check_version "change decoded, read encoded: the new version" 4
+        (Engine.version engine ~uri:encoded);
+      Engine.close_document engine ~uri:alternate_scheme;
+      check_text "close in another spelling: the file's text" "fn from_disk()\n"
+        (Engine.text engine ~uri:decoded);
+      check_bool "close in another spelling: no document"
+        (Engine.document engine ~uri:encoded = None);
+      check_int "close in another spelling: the store is empty" 0
+        (List.length (Engine.documents engine)))
+
+let test_missing_file_is_a_message () =
+  with_temp_dir (fun directory ->
+      let path = Filename.concat directory "missing.jazz" in
+      let uri = uri_of_path path in
+      (match Document.of_file ~uri path with
+      | Ok _ -> check_bool "missing: of_file fails" false
+      | Error message ->
+          check_bool "missing: the message is not empty"
+            (String.length message > 0));
+      let engine = Engine.create () in
+      check_bool "missing: text is None" (Engine.text engine ~uri = None);
+      check_bool "missing: version is None" (Engine.version engine ~uri = None);
+      check_bool "missing: the analysis key is None"
+        (Engine.analysis_key engine ~uri = None);
+      check_bool "a non-file uri has no text"
+        (Engine.text engine ~uri:"untitled:Untitled-1" = None))
+
+let test_file_keeps_its_bytes () =
+  with_temp_dir (fun directory ->
+      let path = Filename.concat directory "bytes.jazz" in
+      let bom = "\xEF\xBB\xBF" in
+      let text = bom ^ "fn f()\n" in
+      write_file path text;
+      let uri = uri_of_path path in
+      match Document.of_file ~uri path with
+      | Error message -> fail "file: expected the bytes, got Error %S" message
+      | Ok document -> (
+          check_string "file: the text" text (Document.text document);
+          check_int "file: version 0" 0 (Document.version document);
+          check_string "file: the uri" uri (Document.uri document);
+          match Document.path document with
+          | Some actual -> check_string "file: the path" path actual
+          | None -> check_bool "file: the path is recorded" false))
+
+(* A read is bounded: a regular file over the limit and anything that is not
+   a regular file are refused before a byte is read. The file exactly at the
+   limit is still read, so the bound is off by one in the safe direction
+   only. *)
+let test_reads_are_bounded () =
+  with_temp_dir (fun directory ->
+      let big = Filename.concat directory "big.jazz" in
+      write_file big "fn f()\n";
+      Unix.truncate big (Document.max_file_bytes + 1);
+      (match Document.read_file big with
+      | Ok _ -> fail "a file over the limit: expected a refusal"
+      | Error message ->
+          check_bool "a file over the limit: the message is not empty"
+            (String.length message > 0));
+      let uri = uri_of_path big in
+      let engine = Engine.create () in
+      check_bool "a file over the limit: the text is None"
+        (Engine.text engine ~uri = None);
+      check_bool "a file over the limit: the version is None"
+        (Engine.version engine ~uri = None);
+      check_bool "a file over the limit: the analysis key is None"
+        (Engine.analysis_key engine ~uri = None);
+      let at_limit = Filename.concat directory "at-limit.jazz" in
+      write_file at_limit "";
+      Unix.truncate at_limit Document.max_file_bytes;
+      (match Document.read_file at_limit with
+      | Error message ->
+          fail "a file at the limit: expected the bytes, got Error %S" message
+      | Ok text ->
+          check_int "a file at the limit: every byte is read"
+            Document.max_file_bytes (String.length text));
+      (match Document.read_file "/dev/null" with
+      | Ok _ -> fail "a device: expected a refusal"
+      | Error message ->
+          check_bool "a device: the message is not empty"
+            (String.length message > 0));
+      match Document.read_file directory with
+      | Ok _ -> fail "a directory: expected a refusal"
+      | Error message ->
+          check_bool "a directory: the message is not empty"
+            (String.length message > 0))
+
+let test_analysis_key_follows_a_file () =
+  with_temp_dir (fun directory ->
+      let path = Filename.concat directory "key.jazz" in
+      write_file path "fn a()\n";
+      let uri = uri_of_path path in
+      let engine = Engine.create () in
+      let key = Engine.analysis_key engine ~uri in
+      check_key "file key: present" key;
+      check_bool "file key: the same bytes keep the key"
+        (Engine.analysis_key engine ~uri = key);
+      (match key with
+      | Some (version, _) -> check_int "file key: version 0" 0 version
+      | None -> ());
+      write_file path "fn b()\n";
+      let changed = Engine.analysis_key engine ~uri in
+      check_bool "file key: changed bytes change the key" (changed <> key);
+      write_file path "fn a()\n";
+      check_bool "file key: the same bytes give the same key again"
+        (Engine.analysis_key engine ~uri = key))
+
+(* Paths inside the workspace root. *)
+
+let test_resolve_relative_path () =
+  let engine = Engine.create () in
+  Engine.set_root engine (Some "/tmp/jide-engine-root");
+  check_path "relative" "/tmp/jide-engine-root/src/main.jazz"
+    (Engine.resolve engine "src/main.jazz");
+  check_path "dot and dot dot" "/tmp/jide-engine-root/lib/main.jazz"
+    (Engine.resolve engine "src/../lib/./main.jazz");
+  check_path "absolute inside" "/tmp/jide-engine-root/main.jazz"
+    (Engine.resolve engine "/tmp/jide-engine-root/main.jazz");
+  Engine.set_root engine (Some "/tmp/jide-engine-root/");
+  check_path "root with a trailing slash" "/tmp/jide-engine-root/src/main.jazz"
+    (Engine.resolve engine "src/main.jazz")
+
+let test_resolve_refuses_escape () =
+  let engine = Engine.create () in
+  Engine.set_root engine (Some "/tmp/jide-engine-root");
+  check_refused "a parent component" (Engine.resolve engine "../outside.jazz");
+  check_refused "a deeper escape"
+    (Engine.resolve engine "src/../../outside.jazz");
+  check_refused "an absolute path outside" (Engine.resolve engine "/etc/passwd");
+  check_refused "a sibling sharing the prefix"
+    (Engine.resolve engine "/tmp/jide-engine-root-other/main.jazz")
+
+let test_resolve_without_root () =
+  let engine = Engine.create () in
+  check_refused "relative without a root" (Engine.resolve engine "main.jazz");
+  check_refused "absolute without a root"
+    (Engine.resolve engine "/tmp/main.jazz")
+
+(* A link that leaves the root is refused by the check on the real path of
+   the part that exists; a link that stays inside still resolves. *)
+let test_resolve_refuses_a_symlink_escape () =
+  with_temp_dir (fun directory ->
+      let inside = Filename.concat directory "inside.jazz" in
+      write_file inside "fn inside()\n";
+      let inside_link = Filename.concat directory "inside-link.jazz" in
+      Unix.symlink inside inside_link;
+      let elsewhere = Filename.temp_file "jide-engine-outside" ".jazz" in
+      Fun.protect
+        ~finally:(fun () -> try Sys.remove elsewhere with Sys_error _ -> ())
+        (fun () ->
+          write_file elsewhere "fn outside()\n";
+          let escape = Filename.concat directory "escape.jazz" in
+          Unix.symlink elsewhere escape;
+          let engine = Engine.create () in
+          Engine.set_root engine (Some directory);
+          check_path "a symlink that stays inside the root" inside_link
+            (Engine.resolve engine "inside-link.jazz");
+          check_refused "a symlink that leaves the root"
+            (Engine.resolve engine "escape.jazz")))
+
+(* The comparison is byte for byte, so a path that differs from the root
+   only in case is refused. That is the safe direction, and it is what a
+   volume whose names are case-sensitive does anyway. *)
+let test_resolve_compares_names_exactly () =
+  let engine = Engine.create () in
+  Engine.set_root engine (Some "/tmp/JIDE-Root");
+  check_refused "a root written in another case"
+    (Engine.resolve engine "/tmp/jide-root/a.jazz");
+  Engine.set_root engine (Some "/tmp/jide-engine-root");
+  check_refused "a parent written in another case"
+    (Engine.resolve engine "../JIDE-ENGINE-ROOT/a.jazz")
+
+(* The two edges of the lexical rule: the root of the filesystem accepts
+   every absolute path, and the empty path is the root itself. *)
+let test_resolve_special_paths () =
+  let engine = Engine.create () in
+  Engine.set_root engine (Some "/");
+  check_path "a relative path under the root of the filesystem" "/tmp/main.jazz"
+    (Engine.resolve engine "tmp/main.jazz");
+  check_path "an absolute path under the root of the filesystem" "/etc/passwd"
+    (Engine.resolve engine "/etc/passwd");
+  Engine.set_root engine (Some "/tmp/jide-engine-root");
+  check_path "the empty path is the root" "/tmp/jide-engine-root"
+    (Engine.resolve engine "")
+
 let () =
-  test_change_without_open_is_ignored ();
-  test_change_after_close_is_ignored ();
-  test_open_then_change_updates_the_text ();
-  test_close_removes_the_document ();
-  test_analysis_key_follows_the_text ();
-  test_analysis_key_without_a_document ();
-  test_check_reuses_the_analysis ();
-  test_check_without_a_document ();
-  test_clean_document ();
-  test_type_error_span ();
-  test_bom_shifts_the_spans ();
-  test_bom_without_an_error ();
-  test_byte_order_mark_alone ();
-  test_span_after_a_bom_matches_the_plain_text ();
-  test_warning_becomes_a_diagnostic ();
-  test_warning_after_a_bom ();
-  test_errors_come_before_warnings ();
-  test_over_the_size_limit ();
-  test_at_the_size_limit_is_analysed ();
-  test_the_adapter_admits_what_the_engine_admits ();
-  test_exception_becomes_an_internal_diagnostic ();
-  test_a_failing_check_does_not_break_the_store ();
-  test_two_spellings_of_one_uri ();
-  test_settings ();
-  test_the_settings_reach_the_checker ();
-  test_a_settings_change_forgets_the_analysis ();
-  test_an_exception_in_the_context_stage_is_internal ();
-  test_snapshot_without_an_analysis ();
-  test_snapshot_after_a_check ();
-  test_snapshot_is_the_last_analysis ();
-  test_snapshot_of_a_broken_file ();
-  if !failures = 0 then print_endline "all engine tests passed"
-  else (
-    Printf.printf "%d engine test(s) failed\n" !failures;
+  test "change without open is ignored" test_change_without_open_is_ignored;
+  test "change after close is ignored" test_change_after_close_is_ignored;
+  test "open then change updates the document"
+    test_open_then_change_updates_the_text;
+  test "close removes the document" test_close_removes_the_document;
+  test "the analysis key follows the text" test_analysis_key_follows_the_text;
+  test "the analysis key without a document"
+    test_analysis_key_without_a_document;
+  test "a check reuses the analysis" test_check_reuses_the_analysis;
+  test "a check without a document" test_check_without_a_document;
+  test "a clean document" test_clean_document;
+  test "a type error's span" test_type_error_span;
+  test "a byte-order mark shifts the spans" test_bom_shifts_the_spans;
+  test "a byte-order mark without an error" test_bom_without_an_error;
+  test "a byte-order mark alone" test_byte_order_mark_alone;
+  test "a span after a byte-order mark matches the plain text"
+    test_span_after_a_bom_matches_the_plain_text;
+  test "a warning becomes a diagnostic" test_warning_becomes_a_diagnostic;
+  test "a warning after a byte-order mark" test_warning_after_a_bom;
+  test "errors come before warnings" test_errors_come_before_warnings;
+  test "a document over the size limit" test_over_the_size_limit;
+  test "a document at the size limit" test_at_the_size_limit_is_analysed;
+  test "the adapter admits what the engine admits"
+    test_the_adapter_admits_what_the_engine_admits;
+  test "an exception becomes an internal diagnostic"
+    test_exception_becomes_an_internal_diagnostic;
+  test "a failing check does not break the store"
+    test_a_failing_check_does_not_break_the_store;
+  test "two spellings of one uri" test_two_spellings_of_one_uri;
+  test "settings" test_settings;
+  test "the settings reach the checker" test_the_settings_reach_the_checker;
+  test "a settings change forgets the analysis"
+    test_a_settings_change_forgets_the_analysis;
+  test "an exception in the context stage is internal"
+    test_an_exception_in_the_context_stage_is_internal;
+  test "a snapshot without an analysis" test_snapshot_without_an_analysis;
+  test "a snapshot after a check" test_snapshot_after_a_check;
+  test "the snapshot is the last analysis" test_snapshot_is_the_last_analysis;
+  test "the snapshot of a broken file" test_snapshot_of_a_broken_file;
+  test "open and read back" test_open_and_read_back;
+  test "change and read the new text" test_change_and_read_the_new_text;
+  test "close and read from disk" test_close_then_read_from_disk;
+  test "two spellings of a URI are one document"
+    test_uri_spellings_are_one_document;
+  test "a missing file is a message" test_missing_file_is_a_message;
+  test "a file keeps its bytes" test_file_keeps_its_bytes;
+  test "reads are bounded to regular files" test_reads_are_bounded;
+  test "a relative path resolves against the root" test_resolve_relative_path;
+  test "a path that escapes the root is refused" test_resolve_refuses_escape;
+  test "a symlink that leaves the root is refused"
+    test_resolve_refuses_a_symlink_escape;
+  test "resolve compares names byte for byte"
+    test_resolve_compares_names_exactly;
+  test "resolve handles the empty path and the root" test_resolve_special_paths;
+  test "resolve without a root is refused" test_resolve_without_root;
+  test "the analysis key follows a file" test_analysis_key_follows_a_file;
+  if !failures > 0 then (
+    Printf.printf "\n%d tests, %d failed checks\n" !tests !failures;
     exit 1)
+  else Printf.printf "\n%d tests, no failed checks\n" !tests
