@@ -261,3 +261,146 @@ let test_definition_through_a_namespace () =
        (Jide_engine.Locate.definition locate ~file:names_file
           ~byte:(at names ~within:"x = box::put(a);" ~name:"box")))
 
+let test_references_of_a_local () =
+  let locate = single names_file names in
+  let byte = at names ~within:"reg u32 result;" ~name:"result" in
+  let all =
+    Jide_engine.Locate.references locate ~file:names_file ~byte
+      ~include_declaration:true
+  in
+  let without_the_declaration =
+    Jide_engine.Locate.references locate ~file:names_file ~byte
+      ~include_declaration:false
+  in
+  let declaration = expected names ~within:"reg u32 result;" ~name:"result" in
+  let write = expected names ~within:"result = a + a;" ~name:"result" in
+  let read = expected names ~within:"a + a;\n  return result;" ~name:"result" in
+  check "references: the declaration and both of its uses, in source order"
+    (spans all = [ declaration; write; read ]);
+  check "references: without the declaration there are two"
+    (spans without_the_declaration = [ write; read ]);
+  check "references: every one names the file it is in"
+    (files_of all = [ uri_of names_file; uri_of names_file; uri_of names_file ]);
+  check "references: a keyword has none"
+    (Jide_engine.Locate.references locate ~file:names_file ~byte:0
+       ~include_declaration:true
+    = [])
+
+(* Two variables of one name are two declarations, and neither answers for
+   the other. *)
+let test_two_declarations_of_one_name () =
+  let locate = single names_file names in
+  let in_double =
+    Jide_engine.Locate.references locate ~file:names_file
+      ~byte:(at names ~within:"reg u32 result;" ~name:"result")
+      ~include_declaration:true
+  in
+  let negate_declaration =
+    expected names
+      ~within:"fn negate(reg u32 a) -> reg u32 {\n  reg u32 result;"
+      ~name:"result"
+  in
+  let in_negate =
+    Jide_engine.Locate.references locate ~file:names_file
+      ~byte:
+        (at names ~within:"fn negate(reg u32 a) -> reg u32 {\n  reg u32 result;"
+           ~name:"result")
+      ~include_declaration:true
+  in
+  let negate_spans =
+    [
+      negate_declaration;
+      expected names ~within:"result = a - a;" ~name:"result";
+      expected names ~within:"a - a;\n  return result;" ~name:"result";
+    ]
+  in
+  check "identity: the local in the second function has its own three"
+    (spans in_negate = negate_spans);
+  check "identity: the two locals share no reference"
+    (List.for_all
+       (fun span -> not (List.mem span negate_spans))
+       (spans in_double));
+  check "identity: a use of the second local points at the second declaration"
+    (match
+       Jide_engine.Locate.definition locate ~file:names_file
+         ~byte:(at names ~within:"result = a - a;" ~name:"result")
+     with
+    | Some location -> is_at location ~file:names_file ~span:negate_declaration
+    | None -> false)
+
+let test_the_outline_nests_namespaces () =
+  let locate = single names_file names in
+  let symbols = Jide_engine.Locate.symbols locate ~file:names_file in
+  check "outline: the items in source order, the namespace's inside it"
+    (String.equal (outline_text symbols)
+       "word, double, box[put], caller, negate");
+  check "outline: each item's kind"
+    (List.map kind_text (List.map (fun (s : Types.symbol) -> s.kind) symbols)
+    = [ "type alias"; "function"; "namespace"; "function"; "function" ]);
+  check "outline: the namespace holds one function"
+    (match List.find_opt (fun (s : Types.symbol) -> s.name = "box") symbols with
+    | Some box -> (
+        match box.children with
+        | [ put ] -> String.equal put.name "put" && put.kind = Types.Function
+        | _ -> false)
+    | None -> false);
+  check
+    "outline: a function carries the signature the index cut from the source"
+    (match
+       List.find_opt (fun (s : Types.symbol) -> s.name = "double") symbols
+     with
+    | Some double -> double.detail = Some "fn double(reg u32 a) -> reg u32"
+    | None -> false);
+  check "outline: the name range is the name and the item range holds it"
+    (match
+       List.find_opt (fun (s : Types.symbol) -> s.name = "caller") symbols
+     with
+    | Some caller ->
+        caller.name_span = expected names ~within:"fn caller" ~name:"caller"
+        && caller.span.start_byte <= caller.name_span.start_byte
+        && caller.span.end_byte >= caller.name_span.end_byte
+    | None -> false);
+  check "outline: a file the resolution never reached has none"
+    (Jide_engine.Locate.symbols locate ~file:"/work/other.jazz" = [])
+
+let test_hover_from_the_index () =
+  let locate = single names_file names in
+  let at_call =
+    Jide_engine.Locate.hover locate ~file:names_file
+      ~byte:(at names ~within:"x = double(a);" ~name:"double")
+  in
+  let at_local =
+    Jide_engine.Locate.hover locate ~file:names_file
+      ~byte:(at names ~within:"result = a + a;" ~name:"result")
+  in
+  let at_alias =
+    Jide_engine.Locate.hover locate ~file:names_file
+      ~byte:(at names ~within:"reg word w;" ~name:"word")
+  in
+  check "hover: a function's signature, in a fenced block"
+    (String.equal (hover_text at_call)
+       "```jasmin\nfn double(reg u32 a) -> reg u32\n```");
+  check "hover: the range is the occurrence under the cursor"
+    (match at_call with
+    | Some hover ->
+        hover.span = expected names ~within:"x = double(a);" ~name:"double"
+    | None -> false);
+  check "hover: a local's storage and type, with its name"
+    (String.equal (hover_text at_local) "```jasmin\nreg u32 result\n```");
+  check "hover: an alias as it was written"
+    (String.equal (hover_text at_alias) "```jasmin\ntype word = u32[4]\n```");
+  check "hover: a keyword says nothing"
+    (Jide_engine.Locate.hover locate ~file:names_file ~byte:0 = None);
+  check "hover: a namespace names itself"
+    (String.equal
+       (hover_text
+          (Jide_engine.Locate.hover locate ~file:names_file
+             ~byte:(at names ~within:"namespace box {" ~name:"box")))
+       "```jasmin\nnamespace box\n```");
+  check "hover: a function inside a namespace"
+    (String.equal
+       (hover_text
+          (Jide_engine.Locate.hover locate ~file:names_file
+             ~byte:(at names ~within:"fn put" ~name:"put")))
+       "```jasmin\nfn put(reg u64 v) -> reg u64\n```")
+
