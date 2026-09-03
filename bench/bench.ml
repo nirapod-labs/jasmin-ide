@@ -1,10 +1,13 @@
-(* Timing for the two budgets a whole check decides: the whole check of a
-   unit, and the interval from a keystroke to the diagnostics it produces.
+(* Timing for the budgets of design section 15 that the server itself
+   decides: the whole check of a unit, the interval from a keystroke to the
+   diagnostics it produces, and the editor requests (completion, signature
+   help, hover and definition from a snapshot, and references and rename over
+   a project).
 
-   Both run the server's own code in this process, so a number is the work
-   the server does and not a model of it. A build must not run beside a
-   measurement: `make bench` refuses to start while one is running, and
-   bench/run.sh says how it decides. *)
+   Every measurement runs the server's own code in this process, so a number
+   is the work the server does and not a model of it. A build must not run
+   beside a measurement: `make bench` refuses to start while one is running,
+   and bench/run.sh says how it decides. *)
 
 let now = Unix.gettimeofday
 let default_runs = 20
@@ -40,6 +43,8 @@ let usage =
       "commands:";
       "  whole      time a whole check (parse and type) of each unit";
       "  keystroke  time a didChange from the protocol loop to the diagnostics";
+      "  request    time completion, signature help, hover, definition,";
+      "             references and rename on a warm snapshot of each unit";
       "  largest    print the largest Jasmin files under a directory";
       "";
       "options:";
@@ -60,6 +65,13 @@ let usage =
       "A file named on the command line without --arch takes the architecture";
       "its path names, so a corpus that keeps one directory per architecture";
       "needs no options.";
+      "";
+      "A request row is compared with its budget, in milliseconds: completion,";
+      "signature help, hover and definition answer to 20, and references and";
+      "rename to 100 over the project, which is every Jasmin file under the";
+      "entry's directory. A request the server does not answer is reported as";
+      "unavailable, one row for each, so the table is complete before the";
+      "features are.";
       "";
       "The exit status is 0 when every unit ran, and 2 when the command line";
       "or an input is wrong.";
@@ -245,6 +257,17 @@ let notification method_ params =
 
 let initialize_params : Yojson.Safe.t = `Assoc [ ("capabilities", `Assoc []) ]
 
+(* A server that is told the workspace root reads a project file there and
+   takes the entries of the context rule from that directory, which is what a
+   client sends and what a request over a project needs. *)
+let initialize_params_at directory : Yojson.Safe.t =
+  `Assoc
+    [
+      ("capabilities", `Assoc []);
+      ( "rootUri",
+        `String (Jide_lang.Uri.to_string (Jide_lang.Uri.of_path directory)) );
+    ]
+
 let open_params ~uri ~text : Yojson.Safe.t =
   `Assoc
     [
@@ -388,7 +411,145 @@ let print_keystroke_table results =
         result.log)
     results
 
-(* -- the largest corpus files -------------------------------------------- *)
+(* -- the editor requests -------------------------------------------------- *)
+
+(* Two budgets of design section 15 are decided by one request on a snapshot
+   the server already holds: completion, signature help, hover and definition
+   within 20 ms, and references and rename over a project of a library tree's
+   size within 100 ms.
+
+   Each request is sent through the server's own request path, the one an
+   editor's client takes, and the interval is that path alone: the snapshot is
+   open and analysed before the first run, so a number is the work the request
+   does and not the check that came before it.
+
+   A request the server does not answer yet is reported as unavailable, one
+   row for each of the six requests. The harness is then complete before the
+   features are, and the day a handler lands the same row measures it with no
+   change here: the row is the server's answer, not a stand-in for it. *)
+
+type feature =
+  | Completion
+  | Signature_help
+  | Hover
+  | Definition
+  | References
+  | Rename
+
+let features =
+  [ Completion; Signature_help; Hover; Definition; References; Rename ]
+
+let feature_name = function
+  | Completion -> "completion"
+  | Signature_help -> "signature-help"
+  | Hover -> "hover"
+  | Definition -> "definition"
+  | References -> "references"
+  | Rename -> "rename"
+
+let method_of_feature = function
+  | Completion -> "textDocument/completion"
+  | Signature_help -> "textDocument/signatureHelp"
+  | Hover -> "textDocument/hover"
+  | Definition -> "textDocument/definition"
+  | References -> "textDocument/references"
+  | Rename -> "textDocument/rename"
+
+(* The budget each request answers to, in milliseconds. *)
+let snapshot_budget = 20.0
+let project_budget = 100.0
+
+let budget_of_feature = function
+  | Completion | Signature_help | Hover | Definition -> snapshot_budget
+  | References | Rename -> project_budget
+
+(* References and rename work over the project rather than one file, so they
+   are measured with every Jasmin file under the entry's directory open: that
+   is the project, and its size is printed beside the rows. *)
+let over_project = function
+  | References | Rename -> true
+  | Completion | Signature_help | Hover | Definition -> false
+
+let position_json (position : Jide_lang.Position.t) =
+  `Assoc
+    [ ("line", `Int position.line); ("character", `Int position.character) ]
+
+(* The name every rename asks for. A symbol of the project, so the request
+   reaches the rename rules rather than a refusal for a keyword. *)
+let rename_name = "renamed_by_the_benchmark"
+
+(* The parameters of the six requests: the document and the position, then
+   the one field a references or a rename request adds. *)
+let request_params feature ~uri ~position =
+  let base =
+    [
+      ("textDocument", `Assoc [ ("uri", `String uri) ]);
+      ("position", position_json position);
+    ]
+  in
+  match feature with
+  | References ->
+      `Assoc
+        (base @ [ ("context", `Assoc [ ("includeDeclaration", `Bool true) ]) ])
+  | Rename -> `Assoc (base @ [ ("newName", `String rename_name) ])
+  | Completion | Signature_help | Hover | Definition -> `Assoc base
+
+(* The byte a request is made at. The name of the first function the entry
+   declares is a symbol every Jasmin file has; signature help asks at the
+   first call instead, because a signature belongs to a call, and falls back
+   to the function's name when the file calls nothing. A file that declares
+   and calls nothing is asked at its first byte. *)
+let request_byte (index : Jide_engine.Index.t) feature =
+  let declaration_byte =
+    match
+      List.find_opt
+        (fun (declaration : Jide_engine.Index.declaration) ->
+          declaration.kind = Jide_engine.Index.Function)
+        index.declarations
+    with
+    | Some declaration -> Some declaration.name_span.start_byte
+    | None -> (
+        match index.declarations with
+        | declaration :: _ -> Some declaration.name_span.start_byte
+        | [] -> None)
+  in
+  let call_byte =
+    match
+      List.find_opt
+        (fun (occurrence : Jide_engine.Index.occurrence) ->
+          occurrence.role = Jide_engine.Index.Call)
+        index.occurrences
+    with
+    | Some occurrence -> Some occurrence.span.start_byte
+    | None -> None
+  in
+  match (feature, call_byte, declaration_byte) with
+  | Signature_help, Some byte, _ -> byte
+  | _, _, Some byte -> byte
+  | _, Some byte, None -> byte
+  | _, None, None -> 0
+
+(* The analysis the server asks for, over its own engine: the same adapter the
+   executable wires, so the snapshot a request reads is the one the server
+   stores. *)
+let engine_analysis engine : Jide_controller.Server.analysis =
+  {
+    check = (fun ~uri -> ignore (Jide_engine.Engine.check engine ~uri));
+    diagnostics =
+      (fun ~uri ->
+        match Jide_engine.Engine.check engine ~uri with
+        | Some (analysis : Jide_engine.Engine.analysis) ->
+            Some (analysis.version, analysis.diagnostics)
+        | None -> None);
+    forget = (fun ~uri:_ -> ());
+  }
+
+let absolute path =
+  match Unix.realpath path with
+  | real -> real
+  | exception Unix.Unix_error _ ->
+      if Filename.is_relative path then Filename.concat (Sys.getcwd ()) path
+      else path
 
 let is_jasmin_file name =
   Filename.check_suffix name ".jazz" || Filename.check_suffix name ".jinc"
