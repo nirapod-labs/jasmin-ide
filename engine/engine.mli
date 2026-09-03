@@ -3,7 +3,13 @@
     Every function that takes a [uri] keys it through [Jide_lang.Uri], so two
     spellings of one document are one entry: a scheme written in another
     case, a percent-encoded path and the decoded one, and an empty authority
-    and [localhost] all name the same document. *)
+    and [localhost] all name the same document. The document keeps the URI it
+    was opened with; only the key is normalised.
+
+    A document is analysed under the project file nearest above it, found by
+    walking up from its own directory (design note, section 3). Two documents
+    in one workspace may therefore be under two different projects, and one
+    under neither is analysed with the defaults and told nothing about it. *)
 
 type t
 
@@ -20,15 +26,19 @@ val default_settings : settings
 (** x86-64, the Linux calling convention, no include path. *)
 
 val settings : t -> settings
+(** The settings of the workspace root's own project, over the base. It is
+    what a caller asks when it is not looking at one document; a check uses
+    the project above the document it is checking. *)
 
 val set_settings : t -> settings -> unit
-(** [set_settings t settings] is the settings every later check runs under.
-    A settings change forgets the stored analyses, as [set_root] does: the
-    architecture and the include paths are part of what an analysis says, and
-    neither is part of the version-and-digest key it is found by. *)
+(** [set_settings t settings] is the base every later check starts from: the
+    client's own choice, which a project file overrides. A settings change
+    forgets the stored analyses, as [set_root] does: the architecture and the
+    include paths are part of what an analysis says, and neither is part of
+    the version-and-digest key it is found by. *)
 
 val project : t -> Project.loaded option
-(** The project file read last, when one was read. *)
+(** The project file above the workspace root, when one was found. *)
 
 val context_entry : t -> string option
 (** The entry the client chose for the context rule, which replaces the
@@ -40,8 +50,8 @@ val set_context_entry : t -> string option -> unit
     [None]. *)
 
 val project_diagnostics : t -> Jide_lang.Diagnostic.t list
-(** The problems the project file has, with the spans [Project.diagnostics]
-    gives them. Empty when the file is fine or absent. *)
+(** The problems the workspace root's project file has, with the spans
+    [Project.diagnostics] gives them. Empty when the file is fine or absent. *)
 
 type checker =
   arch:Jide_jasmin.Adapter.arch ->
@@ -68,15 +78,27 @@ val create : ?check:checker -> ?context:context_stage -> unit -> t
     [Jide_jasmin.Adapter.check] and [context] to [Context.of_file]. *)
 
 val set_root : t -> string option -> unit
-(** [set_root t root] records the workspace root and reads
-    [Project.file_name] inside it. The architecture, the calling convention
-    and the include paths then come from that file where it sets them and
-    from the defaults where it does not, and a value the adapter does not
-    know is reported as a problem rather than reaching the library. [None]
-    means the client named no root: the defaults apply and no file is read. *)
+(** [set_root t root] records the workspace root and reads the project file at
+    it or above it, so that [project] and [project_diagnostics] report it.
+    [None] means the client named no root: no project file is read here, and
+    every document falls back on [settings] and the defaults; [resolve]
+    refuses every path until a root is recorded.
+
+    Every check finds its own document's project by walking up from the
+    document, whether or not a root was named: a file under a
+    [jasmin.project] is analysed under it. The architecture, the calling
+    convention and the include paths come from that file where it sets them
+    and from the defaults where it does not, and a value the adapter does not
+    know is reported as a problem rather than reaching the library. *)
 
 val root : t -> string option
+(** The root [set_root] recorded, unchanged. *)
+
 val open_document : t -> uri:string -> version:int -> text:string -> unit
+(** [open_document t ~uri ~version ~text] records an open document. [uri] is
+    the name the document keeps; the store keys it on the normalised
+    identifier, so a second spelling replaces the first rather than creating
+    a second document. *)
 
 val change_document : t -> uri:string -> version:int -> text:string -> unit
 (** Replace the text of an open document.
@@ -87,8 +109,43 @@ val change_document : t -> uri:string -> version:int -> text:string -> unit
     documents, so the store must not invent one from a change. *)
 
 val close_document : t -> uri:string -> unit
+(** Remove the document [uri] names, whichever spelling of the identifier the
+    client uses. A close for a document that is not open does nothing. *)
+
 val document : t -> uri:string -> Document.t option
+(** The open document [uri] names, found through the normalised key. *)
+
 val documents : t -> Document.t list
+(** Every open document, one per normalised identifier. *)
+
+val text : t -> uri:string -> string option
+(** [text t ~uri] is the text of the open document when there is one, and
+    otherwise the text of the file the URI names. It is [None] when there is
+    neither: no open document and no readable file. A closed document is read
+    from disk again. *)
+
+val version : t -> uri:string -> int option
+(** [version t ~uri] is the version the client gave an open document, and 0
+    for a file on disk. It is [None] exactly when there is neither an open
+    document nor a readable file. A file's status decides, not its bytes, so a
+    path that exists but cannot be read gives [None] here without a read of
+    the file. *)
+
+val resolve : t -> string -> (string, string) result
+(** [resolve t path] is the absolute, normalised path of [path] inside the
+    workspace root, or [Error message] when it would lie outside it.
+
+    A relative path is joined to the root and an absolute path is accepted
+    only when it is already inside the root. The empty path resolves to the
+    root itself. [.] and [..] are resolved in the text, so a path that does
+    not exist yet still resolves; for the part of the path that does exist,
+    symbolic links are followed as well, and a link that leaves the root is
+    refused. A link whose target does not exist is not followed. Names are
+    compared byte for byte: a path that does not exist and differs from the
+    root only in case is refused, which is the safe direction; a path that
+    does exist is compared by its real path, so the volume's own case rules
+    apply. Every path is refused when no root is recorded, and when the
+    recorded root is not absolute. *)
 
 val max_bytes : int
 (** The largest text that is analysed: 8 MiB. A larger one is not parsed and
@@ -177,11 +234,17 @@ val context : t -> uri:string -> Context.t option
     [None] means no such document is open or it has not been analysed. *)
 
 val analysis_key : t -> uri:string -> (int * string) option
-(** [analysis_key t ~uri] is the version and a digest of the text of the open
-    document [uri], so work whose bytes did not change can be skipped. The
-    digest is the hexadecimal MD5 from [Stdlib.Digest]: it is stable across
-    runs and platforms, needs no extra library, and detects a change rather
-    than resisting an attacker. [None] means no such document is open. *)
+(** [analysis_key t ~uri] is the version and a digest of the text [text]
+    returns, whether that is an open buffer's or a file's, so work whose bytes
+    did not change can be skipped. The digest is the hexadecimal MD5 from
+    [Stdlib.Digest]: it is stable across runs and platforms, needs no extra
+    library, and detects a change rather than resisting an attacker. The key
+    is [None] exactly when [text] is [None].
+
+    The version half is not a document identity: it is the client's version
+    for an open document and 0 for a file on disk, so it is not comparable
+    across an open and a closed period. The pair is a change detector for one
+    normalised uri, not a name for the document. *)
 
 val analysis_count : t -> int
 (** How many analyses this engine has run, which a test uses to see that a
