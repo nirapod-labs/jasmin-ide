@@ -554,6 +554,240 @@ let absolute path =
 let is_jasmin_file name =
   Filename.check_suffix name ".jazz" || Filename.check_suffix name ".jinc"
 
+let skip_directory name =
+  String.equal name "_build"
+  || String.equal name "node_modules"
+  || (String.length name > 0 && Char.equal name.[0] '.')
+
+(* Open every Jasmin file under [directory] in the server's store, except
+   [skip], which is the entry the snapshot already holds: the project a
+   references or a rename request reads. The count and the bytes come back so
+   the table can print the size of the tree a number belongs to. *)
+let open_project ~skip server directory =
+  let files = ref 0 in
+  let bytes = ref 0 in
+  let rec walk path =
+    match Sys.readdir path with
+    | exception Sys_error _ -> ()
+    | entries ->
+        Array.iter
+          (fun entry ->
+            let child = Filename.concat path entry in
+            match Unix.stat child with
+            | { Unix.st_kind = Unix.S_DIR; _ } ->
+                if not (skip_directory entry) then walk child
+            | { Unix.st_kind = Unix.S_REG; _ }
+              when is_jasmin_file entry && not (String.equal child skip) -> (
+                match In_channel.with_open_bin child In_channel.input_all with
+                | text ->
+                    let uri =
+                      Jide_lang.Uri.to_string (Jide_lang.Uri.of_path child)
+                    in
+                    ignore
+                      (Jide_controller.Server.handle_packet server
+                         (notification "textDocument/didOpen"
+                            (open_params ~uri ~text)));
+                    incr files;
+                    bytes := !bytes + String.length text
+                | exception Sys_error _ -> ())
+            | _ -> ()
+            | exception Unix.Unix_error _ -> ())
+          entries
+  in
+  walk directory;
+  (!files, !bytes)
+
+type request_status = Answered | Unavailable | Refused of string
+
+type feature_result = {
+  feature : feature;
+  status : request_status;
+  samples : float list;  (** milliseconds, one per run *)
+}
+
+type request_result = {
+  request_unit : unit_;
+  rows : feature_result list;
+  project_files : int;  (** 0 when no project request was measured *)
+  project_bytes : int;
+}
+
+let answer_of_response (response : Jsonrpc.Response.t) =
+  match response.result with
+  | Ok _ -> Answered
+  | Error error -> (
+      match error.Jsonrpc.Response.Error.code with
+      | Jsonrpc.Response.Error.Code.MethodNotFound -> Unavailable
+      | _ -> Refused error.message)
+
+let measure_requests ~runs unit_ =
+  let text = read_file unit_.file in
+  let uri = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path unit_.file) in
+  let directory = absolute (Filename.dirname unit_.file) in
+  let engine = Jide_engine.Engine.create () in
+  let server =
+    Jide_controller.Server.create
+      ~log:(fun _ -> ())
+      ~engine ~analysis:(engine_analysis engine) ()
+  in
+  ignore
+    (Jide_controller.Server.handle_packet server
+       (request 1 "initialize" (initialize_params_at directory)));
+  (match Jide_controller.Server.state server with
+  | Jide_controller.Server.Running -> ()
+  | _ -> die (unit_.label ^ ": the server did not reach the running state"));
+  Jide_engine.Engine.set_settings engine
+    {
+      Jide_engine.Engine.arch = unit_.arch;
+      call_conv = unit_.call_conv;
+      idirs = unit_.idirs;
+    };
+  let index, _ = Jide_engine.Index.of_text ~file:unit_.file text in
+  ignore
+    (Jide_controller.Server.handle_packet server
+       (notification "textDocument/didOpen" (open_params ~uri ~text)));
+  ignore (Jide_controller.Server.ensure_checked server ~uri);
+  let document =
+    match Jide_engine.Engine.document engine ~uri with
+    | Some document -> document
+    | None -> die (unit_.label ^ ": the loop left the document out of the store")
+  in
+  if not (String.equal (Jide_engine.Document.text document) text) then
+    die (unit_.label ^ ": the loop stored other text than the one opened");
+  (match Jide_engine.Engine.analysis engine ~uri with
+  | Some _ -> ()
+  | None -> die (unit_.label ^ ": the snapshot holds no analysis of the entry"));
+  let next_id = ref 1 in
+  let ask feature =
+    incr next_id;
+    let id = !next_id in
+    let position =
+      Jide_engine.Document.position_of_byte document
+        (request_byte index feature)
+    in
+    let packets =
+      Jide_controller.Server.handle_packet server
+        (request id
+           (method_of_feature feature)
+           (request_params feature ~uri ~position))
+    in
+    match
+      List.find_map
+        (function
+          | Jsonrpc.Packet.Response response
+            when Jsonrpc.Id.equal response.Jsonrpc.Response.id (`Int id) ->
+              Some response
+          | _ -> None)
+        packets
+    with
+    | Some response -> response
+    | None ->
+        die
+          (Printf.sprintf "%s: no answer to %s" unit_.label
+             (method_of_feature feature))
+  in
+  let project = ref None in
+  let open_the_project () =
+    match !project with
+    | Some sizes -> sizes
+    | None ->
+        (* The entry is already open, so it is not opened twice; it is still
+           part of the project the size counts. *)
+        let files, bytes =
+          open_project ~skip:(absolute unit_.file) server directory
+        in
+        let sizes = (files + 1, bytes + String.length text) in
+        project := Some sizes;
+        sizes
+  in
+  let measure feature =
+    if over_project feature then ignore (open_the_project ());
+    match answer_of_response (ask feature) with
+    | Unavailable -> { feature; status = Unavailable; samples = [] }
+    | Refused message -> { feature; status = Refused message; samples = [] }
+    | Answered ->
+        let samples =
+          List.init runs (fun _ -> fst (time (fun () -> ignore (ask feature))))
+        in
+        { feature; status = Answered; samples }
+  in
+  let rows = List.map measure features in
+  let project_files, project_bytes =
+    match !project with Some sizes -> sizes | None -> (0, 0)
+  in
+  { request_unit = unit_; rows; project_files; project_bytes }
+
+let request_state row =
+  match row.status with
+  | Unavailable -> "unavailable"
+  | Refused message -> "refused: " ^ message
+  | Answered ->
+      if percentile 0.95 row.samples <= budget_of_feature row.feature then "met"
+      else "missed"
+
+let print_request_samples results =
+  List.iter
+    (fun result ->
+      List.iter
+        (fun row ->
+          List.iteri
+            (fun index milliseconds ->
+              Printf.printf "request %s %s %d %.4f\n" result.request_unit.label
+                (feature_name row.feature) (index + 1) milliseconds)
+            row.samples)
+        result.rows)
+    results
+
+let print_request_table results =
+  Printf.printf "%-44s %-14s %-7s %3s %7s %10s %8s %8s %s\n" "unit" "request"
+    "arch" "n" "budget" "median" "p95" "max" "status";
+  List.iter
+    (fun result ->
+      List.iter
+        (fun row ->
+          let number f =
+            match row.samples with
+            | [] -> "-"
+            | samples -> Printf.sprintf "%.3f" (f samples)
+          in
+          Printf.printf "%-44s %-14s %-7s %3d %7.1f %10s %8s %8s %s\n"
+            result.request_unit.label (feature_name row.feature)
+            result.request_unit.arch_name (List.length row.samples)
+            (budget_of_feature row.feature)
+            (number median)
+            (number (percentile 0.95))
+            (number maximum) (request_state row))
+        result.rows;
+      if result.project_files > 0 then
+        Printf.printf "  project %s: %d files, %d bytes\n"
+          result.request_unit.label result.project_files result.project_bytes)
+    results
+
+(* The rows in one line: a reader of a gate log sees whether the measurement
+   is complete before reading any number. *)
+let print_request_tally results =
+  let rows = List.concat_map (fun result -> result.rows) results in
+  let count what =
+    List.fold_left
+      (fun total row -> if what row then total + 1 else total)
+      0 rows
+  in
+  let measured = count (fun row -> row.status = Answered) in
+  let met = count (fun row -> String.equal (request_state row) "met") in
+  let missed = count (fun row -> String.equal (request_state row) "missed") in
+  let unavailable = count (fun row -> row.status = Unavailable) in
+  let refused =
+    count (function { status = Refused _; _ } -> true | _ -> false)
+  in
+  Printf.printf
+    "request: %d rows, %d measured (%d met, %d missed), %d unavailable"
+    (List.length rows) measured met missed unavailable;
+  if refused > 0 then Printf.printf ", %d refused" refused;
+  print_newline ();
+  if refused > 0 then die "the server refused a request; the table says which"
+
+(* -- the largest corpus files -------------------------------------------- *)
+
 let largest ~count directory =
   if not (Sys.is_directory directory) then die ("not a directory: " ^ directory);
   let found = ref [] in
