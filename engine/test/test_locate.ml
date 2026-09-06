@@ -404,3 +404,483 @@ let test_hover_from_the_index () =
              ~byte:(at names ~within:"fn put" ~name:"put")))
        "```jasmin\nfn put(reg u64 v) -> reg u64\n```")
 
+let test_hover_on_a_primitive_and_an_annotation () =
+  let text =
+    "#[returnaddress=stack]\n\
+     fn f(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = #add(a, a);\n\
+    \  return x;\n\
+     }\n"
+  in
+  let file = "/work/prim.jazz" in
+  let locate = single file text in
+  let primitive =
+    Jide_engine.Locate.hover locate ~file
+      ~byte:(at text ~within:"x = #add(a, a);" ~name:"add")
+  in
+  let annotation =
+    Jide_engine.Locate.hover locate ~file
+      ~byte:(at text ~within:"#[returnaddress=stack]" ~name:"returnaddress")
+  in
+  check "hover: a primitive names itself"
+    (String.equal (hover_text primitive) "```jasmin\n#add\na primitive\n```");
+  check "hover: an annotation label names itself and its value"
+    (String.equal (hover_text annotation)
+       "```jasmin\n#[returnaddress=\"stack\"]\n```");
+  check "definition: a primitive is not a declaration"
+    (Jide_engine.Locate.definition locate ~file
+       ~byte:(at text ~within:"x = #add(a, a);" ~name:"add")
+    = None)
+
+(* pretyping has no forward declaration, so a name used above its declaration
+   is not a declaration at all: nothing to go to and nothing to say. *)
+let test_a_name_used_before_its_declaration () =
+  let text =
+    "fn f(reg u32 a) -> reg u32 {\n\
+    \  reg u32 x;\n\
+    \  x = below(a);\n\
+    \  return x;\n\
+     }\n\
+     fn below(reg u32 a) -> reg u32 { return a; }\n"
+  in
+  let file = "/work/forward.jazz" in
+  let locate = single file text in
+  let byte = at text ~within:"x = below(a);" ~name:"below" in
+  check "forward: a call above the declaration has no definition"
+    (Jide_engine.Locate.definition locate ~file ~byte = None);
+  check "forward: and no hover"
+    (Jide_engine.Locate.hover locate ~file ~byte = None);
+  check "forward: and no reference"
+    (Jide_engine.Locate.references locate ~file ~byte ~include_declaration:true
+    = []);
+  check "forward: the declaration itself is still a definition"
+    (match
+       Jide_engine.Locate.definition locate ~file
+         ~byte:(at text ~within:"fn below" ~name:"below")
+     with
+    | Some location ->
+        is_at location ~file
+          ~span:(expected text ~within:"fn below" ~name:"below")
+    | None -> false);
+  check "of_file: the bytes a reader gives are the ones indexed"
+    (match
+       Jide_engine.Locate.of_file
+         ~read:(read_of [ (Filename.basename file, text) ])
+         ~idirs:[] file
+     with
+    | Some from_file ->
+        String.equal (Jide_engine.Locate.entry from_file) file
+        && Jide_engine.Locate.symbols from_file ~file
+           |> outline_text = "f, below"
+    | None -> false)
+
+(* ------------------------------------------------------------------ *)
+(* Project two: a require across files *)
+
+let linked ?facts () =
+  project ?facts
+    ~files:[ (Filename.basename library_file, library) ]
+    entry_file entry
+
+let test_definition_across_a_require () =
+  let locate = linked () in
+  let call =
+    Jide_engine.Locate.definition locate ~file:entry_file
+      ~byte:(at entry ~within:"x = lib_f(a);" ~name:"lib_f")
+  in
+  let declaration =
+    Jide_engine.Locate.definition locate ~file:library_file
+      ~byte:(at library ~within:"fn lib_f" ~name:"lib_f")
+  in
+  check "require: a call in the entry points into the library's file"
+    (match call with
+    | Some location ->
+        is_at location ~file:library_file
+          ~span:(expected library ~within:"fn lib_f" ~name:"lib_f")
+    | None -> false);
+  check "require: the declaration in the library points at itself"
+    (match declaration with
+    | Some location ->
+        is_at location ~file:library_file
+          ~span:(expected library ~within:"fn lib_f" ~name:"lib_f")
+    | None -> false);
+  check "require: the snapshot holds both files, the entry first"
+    (List.map
+       (fun (index : Jide_engine.Index.t) -> index.file)
+       (Jide_engine.Locate.files locate)
+    = [ entry_file; library_file ]);
+  check "require: a file the resolution never read has no index"
+    (Jide_engine.Locate.file locate "/work/absent.jinc" = None);
+  check "require: reading the library on its own is the same declaration"
+    (Jide_engine.Locate.declaration_at locate ~file:library_file
+       ~byte:(at library ~within:"fn lib_f" ~name:"lib_f")
+    <> None)
+
+let test_references_across_a_require () =
+  let locate = linked () in
+  let from_the_library =
+    Jide_engine.Locate.references locate ~file:library_file
+      ~byte:(at library ~within:"fn lib_f" ~name:"lib_f")
+      ~include_declaration:true
+  in
+  let without_the_declaration =
+    Jide_engine.Locate.references locate ~file:entry_file
+      ~byte:(at entry ~within:"x = lib_f(a);" ~name:"lib_f")
+      ~include_declaration:false
+  in
+  check "references: the entry's calls and the library's declaration"
+    (spans from_the_library
+    = [
+        expected entry ~within:"x = lib_f(a);" ~name:"lib_f";
+        expected entry ~within:"x = lib_f(x);" ~name:"lib_f";
+        expected library ~within:"fn lib_f" ~name:"lib_f";
+      ]);
+  check "references: each one names the file it is in"
+    (files_of from_the_library
+    = [ uri_of entry_file; uri_of entry_file; uri_of library_file ]);
+  check "references: without the declaration only the entry's two"
+    (spans without_the_declaration
+    = [
+        expected entry ~within:"x = lib_f(a);" ~name:"lib_f";
+        expected entry ~within:"x = lib_f(x);" ~name:"lib_f";
+      ])
+
+let test_hover_prefers_the_typed_facts () =
+  let facts = checked_facts ~file:library_file library in
+  let with_facts = linked ~facts:[ (library_file, facts) ] () in
+  let without_facts = linked () in
+  let call_byte = at entry ~within:"x = lib_f(a);" ~name:"lib_f" in
+  let checked =
+    Jide_engine.Locate.hover with_facts ~file:entry_file ~byte:call_byte
+  in
+  let indexed =
+    Jide_engine.Locate.hover without_facts ~file:entry_file ~byte:call_byte
+  in
+  check "facts: the compiler's signature wins where it has one"
+    (String.equal (hover_text checked) "```jasmin\nfn lib_f(u32) -> u32\n```");
+  check "facts: the index's own rendering when there are none"
+    (String.equal (hover_text indexed)
+       "```jasmin\nfn lib_f(reg u32 a) -> reg u32\n```");
+  check "facts: the snapshot keeps the facts it was given"
+    (match Jide_engine.Locate.facts with_facts library_file with
+    | Some kept -> List.length kept.Jide_jasmin.Facts.items = 1
+    | None -> false);
+  check "facts: a variable hovers from the compiler's kind and type"
+    (String.equal
+       (hover_text
+          (Jide_engine.Locate.hover with_facts ~file:library_file
+             ~byte:(at library ~within:"tmp = a;" ~name:"tmp")))
+       "```jasmin\nreg u32 tmp\n```");
+
+  (* A snapshot with its facts replaced is a new value; the one it came from
+     keeps what it had. *)
+  let replaced =
+    Jide_engine.Locate.with_facts with_facts ~file:library_file
+      Jide_jasmin.Facts.empty
+  in
+  check "facts: replacing them changes the new snapshot only"
+    (Jide_engine.Locate.facts replaced library_file
+     = Some Jide_jasmin.Facts.empty
+    && Jide_engine.Locate.facts with_facts library_file
+       <> Some Jide_jasmin.Facts.empty);
+  check "facts: with the facts gone the index answers again"
+    (String.equal
+       (hover_text
+          (Jide_engine.Locate.hover replaced ~file:entry_file ~byte:call_byte))
+       "```jasmin\nfn lib_f(reg u32 a) -> reg u32\n```")
+
+let test_the_outline_of_a_required_file () =
+  let locate = linked () in
+  check "outline: the library's one function"
+    (String.equal
+       (outline_text (Jide_engine.Locate.symbols locate ~file:library_file))
+       "lib_f");
+  check "outline: the entry's require, the file it names, then the function"
+    (String.equal
+       (outline_text (Jide_engine.Locate.symbols locate ~file:entry_file))
+       "require[lib.jinc], main")
+
+(* ------------------------------------------------------------------ *)
+(* Project three: the same pair with a byte-order mark on both files *)
+
+let test_a_byte_order_mark_changes_no_answer () =
+  let locate =
+    project
+      ~files:[ (Filename.basename library_file, marked_library) ]
+      entry_file marked_entry
+  in
+  let call =
+    Jide_engine.Locate.definition locate ~file:entry_file
+      ~byte:(at marked_entry ~within:"x = lib_f(a);" ~name:"lib_f")
+  in
+  check "bom: a definition across the require lands after the mark's bytes"
+    (match call with
+    | Some location ->
+        is_at location ~file:library_file
+          ~span:(expected marked_library ~within:"fn lib_f" ~name:"lib_f")
+    | None -> false);
+  check "bom: the required file's declaration sits three bytes further"
+    (expected marked_library ~within:"fn lib_f" ~name:"lib_f"
+    = Jide_lang.Span.shift (expected library ~within:"fn lib_f" ~name:"lib_f") 3
+    );
+  check "bom: a local in the marked entry points inside it"
+    (match
+       Jide_engine.Locate.definition locate ~file:entry_file
+         ~byte:(at marked_entry ~within:"x = lib_f(a);" ~name:"x")
+     with
+    | Some location ->
+        is_at location ~file:entry_file
+          ~span:(expected marked_entry ~within:"reg u32 x;" ~name:"x")
+    | None -> false);
+  check "bom: hover names the local"
+    (String.equal
+       (hover_text
+          (Jide_engine.Locate.hover locate ~file:entry_file
+             ~byte:(at marked_entry ~within:"x = lib_f(a);" ~name:"x")))
+       "```jasmin\nreg u32 x\n```");
+  check "bom: references keep the marked ranges"
+    (spans
+       (Jide_engine.Locate.references locate ~file:library_file
+          ~byte:(at marked_library ~within:"fn lib_f" ~name:"lib_f")
+          ~include_declaration:true)
+    = [
+        expected marked_entry ~within:"x = lib_f(a);" ~name:"lib_f";
+        expected marked_entry ~within:"x = lib_f(x);" ~name:"lib_f";
+        expected marked_library ~within:"fn lib_f" ~name:"lib_f";
+      ]);
+  check "bom: the outline is shifted with the mark"
+    (match
+       List.find_opt
+         (fun (s : Types.symbol) -> String.equal s.name "main")
+         (Jide_engine.Locate.symbols locate ~file:entry_file)
+     with
+    | Some main ->
+        main.name_span = expected marked_entry ~within:"fn main" ~name:"main"
+    | None -> false);
+  check "bom: a byte inside the mark holds nothing"
+    (Jide_engine.Locate.definition locate ~file:entry_file ~byte:1 = None
+    && Jide_engine.Locate.hover locate ~file:entry_file ~byte:2 = None)
+
+(* ------------------------------------------------------------------ *)
+(* Project four: a file that does not parse *)
+
+let test_a_file_that_does_not_parse () =
+  let broken = "fn broken( {\n" in
+  let file = "/work/broken.jazz" in
+  let locate = single file broken in
+  check "broken: no outline" (Jide_engine.Locate.symbols locate ~file = []);
+  check "broken: nothing to go to anywhere in it"
+    (List.for_all
+       (fun byte -> Jide_engine.Locate.definition locate ~file ~byte = None)
+       [ 0; 1; 3; 5; 10 ]);
+  check "broken: no hover"
+    (List.for_all
+       (fun byte -> Jide_engine.Locate.hover locate ~file ~byte = None)
+       [ 0; 1; 3; 5; 10 ]);
+  check "broken: no references"
+    (Jide_engine.Locate.references locate ~file ~byte:3
+       ~include_declaration:true
+    = []);
+  check "broken: of_file with nothing to read is None"
+    (Jide_engine.Locate.of_file ~idirs:[] ~read:(fun _ -> None) file = None)
+
+(* ------------------------------------------------------------------ *)
+(* A qualified name of three segments, the way pretyping resolves it:
+   [A::B::x] is a namespace holding a namespace holding a name. *)
+
+let nested =
+  "namespace outer {\n\
+  \  namespace inner {\n\
+  \    fn deep(reg u32 a) -> reg u32 { return a; }\n\
+  \  }\n\
+   }\n\n\
+   fn user(reg u32 a) -> reg u32 {\n\
+  \  return outer::inner::deep(a);\n\
+   }\n"
+
+let nested_file = "/work/nested.jazz"
+
+let test_a_three_segment_qualified_name () =
+  let locate = single nested_file nested in
+  let deep = expected nested ~within:"fn deep" ~name:"deep" in
+  let same = function
+    | Some location -> is_at location ~file:nested_file ~span:deep
+    | None -> false
+  in
+  check "qualified: the whole A::B::x name is the declaration"
+    (same
+       (Jide_engine.Locate.definition locate ~file:nested_file
+          ~byte:
+            (at nested ~within:"return outer::inner::deep(a);"
+               ~name:"outer::inner::deep")));
+  check "qualified: the last segment is the same declaration"
+    (same
+       (Jide_engine.Locate.definition locate ~file:nested_file
+          ~byte:(at nested ~within:"outer::inner::deep(a)" ~name:"deep")));
+  check "qualified: the outermost segment reaches it too"
+    (same
+       (Jide_engine.Locate.definition locate ~file:nested_file
+          ~byte:
+            (at nested ~within:"return outer::inner::deep(a);" ~name:"outer")));
+  check "qualified: an intermediate segment reaches it"
+    (same
+       (Jide_engine.Locate.definition locate ~file:nested_file
+          ~byte:(at nested ~within:"outer::inner::deep(a)" ~name:"inner")));
+  check "qualified: the outline nests both namespaces"
+    (String.equal
+       (outline_text (Jide_engine.Locate.symbols locate ~file:nested_file))
+       "outer[inner[deep]], user")
+
+(* ------------------------------------------------------------------ *)
+(* A position that holds no name is the empty answer, never an error. *)
+
+let test_a_position_in_whitespace_and_in_a_comment () =
+  let blank = "\n\n   \t\n" in
+  let blank_file = "/work/blank.jazz" in
+  let locate = single blank_file blank in
+  check "whitespace: every byte of a blank file is empty"
+    (List.for_all
+       (fun byte ->
+         Jide_engine.Locate.definition locate ~file:blank_file ~byte = None
+         && Jide_engine.Locate.hover locate ~file:blank_file ~byte = None
+         && Jide_engine.Locate.references locate ~file:blank_file ~byte
+              ~include_declaration:true
+            = [])
+       (List.init (String.length blank) (fun index -> index)));
+  check "whitespace: an empty file has no outline either"
+    (Jide_engine.Locate.symbols locate ~file:blank_file = []);
+
+  let text =
+    "// a comment names nothing: no words are here but these\n\
+     fn f(reg u32 a) -> reg u32 {\n\
+    \  /* nor here, not even a name like a or f */\n\
+    \  return a;\n\
+     }\n"
+  in
+  let file = "/work/commented.jazz" in
+  let locate = single file text in
+  let in_line_comment = at text ~within:"// a comment" ~name:"comment" in
+  let in_block_comment = at text ~within:"/* nor here" ~name:"nor" in
+  check "comment: a word in a line comment names nothing"
+    (Jide_engine.Locate.definition locate ~file ~byte:in_line_comment = None
+    && Jide_engine.Locate.hover locate ~file ~byte:in_line_comment = None
+    && Jide_engine.Locate.references locate ~file ~byte:in_line_comment
+         ~include_declaration:true
+       = []);
+  check "comment: a word in a block comment names nothing"
+    (Jide_engine.Locate.definition locate ~file ~byte:in_block_comment = None
+    && Jide_engine.Locate.hover locate ~file ~byte:in_block_comment = None);
+  check "comment: a name the comment quotes is not an occurrence"
+    (Jide_engine.Locate.definition locate ~file
+       ~byte:(at text ~within:"// a comment" ~name:"f")
+    = None);
+  (* The code beside the comments still answers, so the test above is about
+     the comment and not about a file that answers nothing. *)
+  check "comment: the code beside them still answers"
+    (match
+       Jide_engine.Locate.definition locate ~file
+         ~byte:(at text ~within:"  return a;" ~name:"a")
+     with
+    | Some location ->
+        is_at location ~file
+          ~span:(expected text ~within:"fn f(reg u32 a)" ~name:"a")
+    | None -> false)
+
+(* A file the snapshot never reached is empty on every question. *)
+let test_an_unopened_document () =
+  let locate = single names_file names in
+  let absent = "/work/never-opened.jazz" in
+  check "unopened: it has no outline"
+    (Jide_engine.Locate.symbols locate ~file:absent = []);
+  check "unopened: it has no definition"
+    (Jide_engine.Locate.definition locate ~file:absent ~byte:0 = None);
+  check "unopened: it has no hover"
+    (Jide_engine.Locate.hover locate ~file:absent ~byte:0 = None);
+  check "unopened: it has no references"
+    (Jide_engine.Locate.references locate ~file:absent ~byte:0
+       ~include_declaration:true
+    = []);
+  check "unopened: the resolution holds no index for it"
+    (Jide_engine.Locate.file locate absent = None);
+  check "unopened: the file's own questions still answer"
+    (Jide_engine.Locate.symbols locate ~file:names_file <> [])
+
+(* ------------------------------------------------------------------ *)
+(* Rename-adjacent: two declarations of one name in different blocks of one
+   function. They are two identities and must not be conflated, which is what
+   rename will rely on. *)
+
+let shadowed =
+  "fn blocks(reg u32 a) -> reg u32 {\n\
+  \  reg u32 total;\n\
+  \  total = a;\n\
+  \  if a {\n\
+  \    reg u32 total;\n\
+  \    total = a;\n\
+  \    total = total;\n\
+  \  }\n\
+  \  return total;\n\
+   }\n"
+
+let shadowed_file = "/work/blocks.jazz"
+
+let test_two_blocks_of_one_name () =
+  let locate = single shadowed_file shadowed in
+  let outer_declaration =
+    expected shadowed ~within:"  reg u32 total;\n  total = a;" ~name:"total"
+  in
+  let inner_declaration =
+    expected shadowed ~within:"    reg u32 total;\n    total = a;" ~name:"total"
+  in
+  let outer =
+    Jide_engine.Locate.references locate ~file:shadowed_file
+      ~byte:(at shadowed ~within:"reg u32 total;\n  total = a;" ~name:"total")
+      ~include_declaration:true
+  in
+  let inner =
+    Jide_engine.Locate.references locate ~file:shadowed_file
+      ~byte:
+        (at shadowed ~within:"    reg u32 total;\n    total = a;" ~name:"total")
+      ~include_declaration:true
+  in
+  check "blocks: the outer name has its declaration, its write and its return"
+    (spans outer
+    = [
+        outer_declaration;
+        expected shadowed ~within:"total = a;\n  if a" ~name:"total";
+        expected shadowed ~within:"\n  return total;" ~name:"total";
+      ]);
+  check "blocks: the inner name has its own declaration and its two uses"
+    (spans inner
+    = [
+        inner_declaration;
+        expected shadowed ~within:"if a {\n    reg u32 total;\n    total = a;"
+          ~name:"total";
+        expected shadowed ~within:"total = a;\n    total = total;" ~name:"total";
+      ]);
+  check "blocks: the outer declaration quotes the outer name here"
+    (inner_declaration <> outer_declaration);
+  check "blocks: no range is in both answers"
+    (List.for_all (fun span -> not (List.mem span (spans inner))) (spans outer));
+  check "blocks: a use in the inner block points at the inner declaration"
+    (match
+       Jide_engine.Locate.definition locate ~file:shadowed_file
+         ~byte:
+           (at shadowed ~within:"total = a;\n    total = total;" ~name:"total")
+     with
+    | Some location ->
+        is_at location ~file:shadowed_file ~span:inner_declaration
+    | None -> false);
+  check "blocks: a use after the block points at the outer declaration"
+    (match
+       Jide_engine.Locate.definition locate ~file:shadowed_file
+         ~byte:(at shadowed ~within:"\n  return total;" ~name:"total")
+     with
+    | Some location ->
+        is_at location ~file:shadowed_file ~span:outer_declaration
+    | None -> false)
+
+(* ------------------------------------------------------------------ *)
+(* Hover shows the strings a declaration carries, and validates them first *)
+
