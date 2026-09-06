@@ -9,12 +9,15 @@ repository = "https://github.com/jasmin-lang/tree-sitter-jasmin"
 # `commit` is an alias of `rev`; naming the same commit in both keys makes Zed
 # reject this file as a duplicate field, so the commit is written once.
 #
-# This is the grammar head that carries the fixes the queries are written
-# for: `intrinsic_instr` for `#spill(x);`, `assert_statement` for
-# `assert("message", condition);`, annotation values parsed as expressions,
-# and the compiler's operator precedence. The queries name only nodes this
-# commit has, and `test/queries.sh` refuses any other grammar.
-rev = "ada182798ca67fa2e241e2882c90632f948730d1"
+# The pin is the official upstream `jasmin-lang/tree-sitter-jasmin` (D11), and
+# it stays upstream: a commit that exists only in the lab's grammar clone can
+# never be fetched from this repository, so a released extension would find no
+# grammar at all and break for every user. The fixes in the clone reach users
+# only once the project goes public (R18), which is RESERVED and waits on the
+# user. Until then they are checked through `JASMIN_GRAMMAR_DIR`, which names
+# a checkout of the clone to `editor/zed/test/queries.sh` and `make
+# zed-queries` — never by changing this pin.
+rev = "4e678d93d80f4e698a540981008bb44c105ffeff"
 
 [language_servers.jasmin-lsp]
 name = "Jasmin LSP"

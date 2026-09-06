@@ -1,0 +1,17 @@
+// Sample input for the patterns only the lab's grammar clone can parse. MIT,
+// see LICENSE.
+//
+// The pinned upstream grammar parses neither `#spill(x);` nor
+// `assert("message", condition);`, so `test/queries.sh` runs this sample only
+// against a grammar whose `src/node-types.json` has both nodes, and always
+// through `highlights.local.scm` rather than a query file Zed reads.
+
+from CRYPTO require "crypto.jinc"
+
+namespace CRYPTO {
+  fn local(reg u64 acc) -> reg u64 {
+    #spill(acc);
+    assert("mix: acc below the bound", acc < 8);
+    return acc;
+  }
+}
