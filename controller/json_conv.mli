@@ -42,6 +42,57 @@ val publish_params :
     the version of the text the diagnostics describe when it is known, and
     the full set. An empty list clears the file's diagnostics. *)
 
+val completion_json : Jide_engine.Types.completion_item list -> Yojson.Safe.t
+(** [completion_json items] is the answer of [textDocument/completion]: one
+    object per item, each with its label and its kind always, and with its
+    detail, documentation, insert text and sort text only where the engine
+    gave them. An absent field is left out rather than written null, because
+    the protocol tells the two apart. The items keep the engine's order, which
+    is by label; the protocol reads them as a list of the same weight and lets
+    the client decide otherwise. *)
+
+val signature_help_json : Jide_engine.Types.signature_help -> Yojson.Safe.t
+(** [signature_help_json help] is the answer of [textDocument/signatureHelp]:
+    the signatures with their parameters and documentation, and the active
+    signature and argument as zero-based indexes into them. A signature the
+    engine gave no parameters for carries no [parameters] field, because an
+    empty list would say the call takes no argument. *)
+
+val workspace_edit_json : Features.edit list -> Yojson.Safe.t
+(** [workspace_edit_json edits] is the [WorkspaceEdit] of a rename: [changes]
+    with one key per file, each holding that file's edits as ranges in its own
+    text and their new text. *)
+
+val symbols_json : Features.located_symbol list -> Yojson.Safe.t
+(** [symbols_json symbols] is the answer of [workspace/symbol]: one
+    [SymbolInformation] per symbol, and one per symbol nested in it, which
+    names its parent as its container. The location range is the name's own. *)
+
+val highlights_json :
+  Jide_lang.Line_index.t -> Jide_engine.Types.highlight list -> Yojson.Safe.t
+(** [highlights_json lines highlights] is the answer of
+    [textDocument/documentHighlight]: one range per occurrence with the
+    protocol's number for its kind, 1 text, 2 read, 3 write. *)
+
+val semantic_token_types : string list
+(** The token types of the legend the server advertises, in the order
+    {!semantic_tokens_json} numbers them. *)
+
+val semantic_token_modifiers : string list
+(** The token modifiers of that legend, in the order
+    {!semantic_tokens_json} sets their bits. *)
+
+val semantic_tokens_json :
+  Jide_lang.Line_index.t ->
+  Jide_engine.Types.semantic_token list ->
+  Yojson.Safe.t
+(** [semantic_tokens_json lines tokens] is the answer of
+    [textDocument/semanticTokens/full]: [data], five integers per token, each
+    token given relative to the one before it as the protocol encodes them,
+    in source order. A token with no length and a token that overlaps the one
+    before it are dropped, because the protocol's encoding can carry
+    neither. *)
+
 val delay_of_settings : Yojson.Safe.t -> int option
 (** [delay_of_settings settings] is the value of [diagnostics.delay] in an
     editor's settings object, or [None] when the object does not carry one.
