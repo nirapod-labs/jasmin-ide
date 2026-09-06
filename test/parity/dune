@@ -126,3 +126,21 @@
 (cram
  (applies_to tree)
  (deps %{exe:parity_tree.exe}))
+
+; The parity run against the compiler or the release's record. `dune runtest`
+; runs the readers' self-test and parity.t, which drives the run over a corpus
+; it writes itself with stand-ins for the checker and the compiler.
+
+(executable
+ (name parity)
+ (modules parity)
+ (libraries jide_harness unix))
+
+(rule
+ (alias runtest)
+ (action
+  (run %{exe:parity.exe} --selftest)))
+
+(cram
+ (applies_to parity)
+ (deps %{exe:parity.exe}))
