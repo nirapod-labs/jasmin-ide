@@ -175,3 +175,98 @@ verdict is per artefact, not one for the run.
   artefacts-compared 2
   artefacts-differing 1
 
+A caller that needs the two to match says so, and the run then fails: the
+recording still happens, so the evidence for the failure is on disk.
+
+  $ run tree-a tree-b out --require-identical
+  release-double-build.sh: building 2 artefact(s) in tree-a (pass a) at COMMIT
+  release-double-build.sh: building 2 artefact(s) in tree-b (pass b) at COMMIT
+  release-double-build.sh: differ server (1 of 16 bytes; first at 15)
+  release-double-build.sh: identical src.tar.gz SHA256 (N bytes)
+  release-double-build.sh: double build: 1 of 2 artefacts differ
+  release-double-build.sh: record: out/double-build.txt
+  release-double-build.sh: error: the two builds of COMMIT are not identical, and --require-identical was given
+  exit: 1
+  $ unset FAKE_EMBED_ROOT
+
+A caller may name one artefact, and the run then measures only that one and
+says so: the count in the record is the check that it measured what it claims.
+
+  $ rm -rf out
+  $ JIDE_ARTEFACTS=server; export JIDE_ARTEFACTS
+  $ run tree-a tree-b out
+  release-double-build.sh: building 1 artefact(s) in tree-a (pass a) at COMMIT
+  release-double-build.sh: building 1 artefact(s) in tree-b (pass b) at COMMIT
+  release-double-build.sh: identical server SHA256 (26 bytes)
+  release-double-build.sh: double build: 1 of 1 artefacts identical
+  release-double-build.sh: record: out/double-build.txt
+  exit: 0
+  $ grep -e '^artefacts ' -e '^artefacts-compared' out/double-build.txt
+  artefacts 1
+  artefacts-compared 1
+  $ ls out/pass-a
+  server
+
+An empty list is refused before anything is built: a run that compares no file
+would print a verdict while measuring nothing, which is the one result this
+script must not report.
+
+  $ JIDE_ARTEFACTS=; export JIDE_ARTEFACTS
+  $ run tree-a tree-b out
+  release-double-build.sh: error: JIDE_ARTEFACTS names no artefact, so a comparison of none would pass while measuring nothing
+  exit: 1
+
+A name the script has no recipe for is a usage error, not a silent skip.
+
+  $ JIDE_ARTEFACTS=server,src.tar.gz; export JIDE_ARTEFACTS
+  $ run tree-a tree-b out
+  usage: release-double-build.sh <tree-a> <tree-b> <output-directory> [--require-identical]
+  exit: 2
+  $ unset JIDE_ARTEFACTS
+
+A build that reports success and writes nothing is an error: there is no file
+to digest, and the message names the tree.
+
+  $ FAKE_NOTHING=yes; export FAKE_NOTHING
+  $ run tree-a tree-b out
+  release-double-build.sh: building 2 artefact(s) in tree-a (pass a) at COMMIT
+  release-double-build.sh: error: the build in tree-a reported success but wrote no lsp-server/native/main.exe
+  exit: 1
+  $ unset FAKE_NOTHING
+
+A failed build is an error: there is nothing to compare, and the message says
+which tree failed.
+
+  $ FAKE_FAIL=yes; export FAKE_FAIL
+  $ run tree-a tree-b out
+  release-double-build.sh: building 2 artefact(s) in tree-a (pass a) at COMMIT
+  fake-dune: the build failed
+  release-double-build.sh: error: the build in tree-a failed
+  exit: 1
+  $ unset FAKE_FAIL
+
+Two trees at different commits are refused: their builds would measure the
+difference between two sources, not a rebuild.
+
+  $ printf 'later\n' >> tree-b/dune-project
+  $ git -C tree-b commit -q -am later
+  $ run tree-a tree-b out
+  release-double-build.sh: error: the trees are at different commits (COMMIT and COMMIT), so a comparison of their builds would measure the difference between two sources
+  exit: 1
+
+A tree with a modification is refused for the same reason: the difference
+could come from the tree.
+
+  $ printf 'modified\n' >> tree-a/dune-project
+  $ run tree-a tree-a out
+  release-double-build.sh: error: tree-a is not clean, so a difference could come from the tree and not from the build:  M dune-project
+  exit: 1
+  $ git -C tree-a checkout -- dune-project
+
+A tree without the vendored library is refused before it builds: its link
+would not use the library this repository vendors.
+
+  $ rmdir tree-a/vendor/jasmin
+  $ run tree-a tree-a out
+  release-double-build.sh: error: tree-a has no vendor/jasmin, so its build would not link the library the repository vendors; assemble it with vendor/fetch.sh first
+  exit: 1
