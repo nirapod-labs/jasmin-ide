@@ -703,6 +703,20 @@ let handle_initialized_request t request =
               (error_code `MethodNotFound)
               ("unknown request: " ^ meth);
           ]
+      | Ok (E (Lsp.Client_request.TextDocumentCompletion params)) ->
+          answer_completion t request params
+      | Ok (E (Lsp.Client_request.SignatureHelp params)) ->
+          answer_signature_help t request params
+      | Ok (E (Lsp.Client_request.TextDocumentPrepareRename params)) ->
+          answer_prepare_rename t request params
+      | Ok (E (Lsp.Client_request.TextDocumentRename params)) ->
+          answer_rename t request params
+      | Ok (E (Lsp.Client_request.WorkspaceSymbol params)) ->
+          answer_workspace_symbol t request params
+      | Ok (E (Lsp.Client_request.TextDocumentHighlight params)) ->
+          answer_document_highlight t request params
+      | Ok (E (Lsp.Client_request.SemanticTokensFull params)) ->
+          answer_semantic_tokens t request params
       | Ok (E _) ->
           [
             reply_error request.id
