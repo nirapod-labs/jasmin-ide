@@ -884,3 +884,155 @@ let test_two_blocks_of_one_name () =
 (* ------------------------------------------------------------------ *)
 (* Hover shows the strings a declaration carries, and validates them first *)
 
+let test_hover_shows_the_annotation_strings () =
+  let text =
+    "#[ct=\"public -> public\"]\n\
+     #[sct=\"secret\"]\n\
+     #[returnaddress=stack]\n\
+     fn f(reg u64 a) -> reg u64 {\n\
+    \  stack u64 s;\n\
+    \  s = a;\n\
+    \  return s;\n\
+     }\n"
+  in
+  let file = "/work/contracts.jazz" in
+  let locate = single file text in
+  let on_the_contract =
+    hover_text
+      (Jide_engine.Locate.hover locate ~file
+         ~byte:(at text ~within:"#[ct=" ~name:"ct"))
+  in
+  check "hover: a quoted contract string is shown"
+    (String.equal on_the_contract "```jasmin\n#[ct=\"public -> public\"]\n```");
+  check "hover: a second contract string is shown too"
+    (String.equal
+       (hover_text
+          (Jide_engine.Locate.hover locate ~file
+             ~byte:(at text ~within:"#[sct=" ~name:"sct")))
+       "```jasmin\n#[sct=\"secret\"]\n```");
+  check "hover: the keyword form is unchanged"
+    (String.equal
+       (hover_text
+          (Jide_engine.Locate.hover locate ~file
+             ~byte:(at text ~within:"#[returnaddress=" ~name:"returnaddress")))
+       "```jasmin\n#[returnaddress=\"stack\"]\n```");
+
+  (* At the declaration the strings are part of what it says, below the
+     signature the index cut. *)
+  check "hover: a function's declaration shows its contracts below its type"
+    (String.equal
+       (hover_text
+          (Jide_engine.Locate.hover locate ~file
+             ~byte:(at text ~within:"fn f(" ~name:"f")))
+       "```jasmin\n\
+        fn f(reg u64 a) -> reg u64\n\
+        #[ct=\"public -> public\"]\n\
+        #[sct=\"secret\"]\n\
+        #[returnaddress=\"stack\"]\n\
+        ```")
+
+(* A value is the user's text, and hover is markdown: a backtick would end
+   the fence, a control byte has no place in it, and a value longer than a
+   line of prose is not shown. The label is shown alone instead. *)
+let test_hover_refuses_an_unsafe_annotation_string () =
+  let with_backtick =
+    "#[ct=\"a`b\"]\nfn f(reg u32 a) -> reg u32 { return a; }\n"
+  in
+  let with_control =
+    "#[ct=\"a\001b\"]\nfn f(reg u32 a) -> reg u32 { return a; }\n"
+  in
+  let long = String.make 200 'x' in
+  let with_long =
+    "#[ct=\"" ^ long ^ "\"]\nfn f(reg u32 a) -> reg u32 { return a; }\n"
+  in
+  let hover_of text =
+    let file = "/work/unsafe.jazz" in
+    let locate = single file text in
+    hover_text
+      (Jide_engine.Locate.hover locate ~file
+         ~byte:(at text ~within:"#[ct=" ~name:"ct"))
+  in
+  check "hover: a backtick in the value is not shown"
+    (String.equal (hover_of with_backtick) "```jasmin\n#[ct]\n```");
+  check "hover: a control byte in the value is not shown"
+    (String.equal (hover_of with_control) "```jasmin\n#[ct]\n```");
+  check "hover: a value too long to read is not shown"
+    (String.equal (hover_of with_long) "```jasmin\n#[ct]\n```");
+  check "hover: the safe value beside them is still shown"
+    (String.equal
+       (hover_of "#[ct=\"ok\"]\nfn f(reg u32 a) -> reg u32 { return a; }\n")
+       "```jasmin\n#[ct=\"ok\"]\n```")
+
+(* ------------------------------------------------------------------ *)
+(* The outline's shapes: the item range, the selection range, the kind *)
+
+let test_the_outline_carries_both_ranges () =
+  let locate = single names_file names in
+  let symbols = Jide_engine.Locate.symbols locate ~file:names_file in
+  let negate =
+    List.find_opt
+      (fun (s : Types.symbol) -> String.equal s.name "negate")
+      symbols
+  in
+  check "outline: the item range is the whole definition"
+    (match negate with
+    | Some symbol ->
+        String.equal
+          (Jide_engine.Index.text_of_span names symbol.span)
+          "fn negate(reg u32 a) -> reg u32 {\n\
+          \  reg u32 result;\n\
+          \  result = a - a;\n\
+          \  return result;\n\
+           }"
+    | None -> false);
+  check "outline: the selection range is the name inside it"
+    (match negate with
+    | Some symbol ->
+        symbol.name_span = expected names ~within:"fn negate" ~name:"negate"
+        && Jide_engine.Index.text_of_span names symbol.name_span = "negate"
+        && symbol.span.start_byte <= symbol.name_span.start_byte
+        && symbol.span.end_byte >= symbol.name_span.end_byte
+    | None -> false);
+  check "outline: every kind is one of the protocol's numbers"
+    (List.for_all
+       (fun (symbol : Types.symbol) ->
+         List.mem symbol.kind
+           [
+             Types.Function;
+             Types.Parameter;
+             Types.Variable;
+             Types.Global;
+             Types.Namespace;
+             Types.Type_alias;
+             Types.Require;
+             Types.Exec;
+             Types.File;
+             Types.Unknown;
+           ])
+       symbols);
+  check "outline: an empty file has an empty outline"
+    (Jide_engine.Locate.symbols
+       (single "/work/empty.jazz" "")
+       ~file:"/work/empty.jazz"
+    = [])
+
+let () =
+  test_definition_of_a_function ();
+  test_definition_of_a_type_alias ();
+  test_definition_through_a_namespace ();
+  test_references_of_a_local ();
+  test_two_declarations_of_one_name ();
+  test_the_outline_nests_namespaces ();
+  test_hover_from_the_index ();
+  test_hover_on_a_primitive_and_an_annotation ();
+  test_a_name_used_before_its_declaration ();
+  test_definition_across_a_require ();
+  test_references_across_a_require ();
+  test_hover_prefers_the_typed_facts ();
+  test_the_outline_of_a_required_file ();
+  test_a_byte_order_mark_changes_no_answer ();
+  test_a_file_that_does_not_parse ();
+  if !failures = 0 then print_endline "all locate tests passed"
+  else (
+    Printf.printf "%d locate test(s) failed\n" !failures;
+    exit 1)
