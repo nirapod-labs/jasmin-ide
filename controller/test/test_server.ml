@@ -115,6 +115,51 @@ let stored_text server ~uri =
   | Some document -> Some (Jide_engine.Document.text document)
   | None -> None
 
+(* The capabilities the server advertises, exactly: full text sync, the four
+   navigation requests and the seven editing requests of [Features] with the
+   shape each needs. The legend is read from the converter rather than written
+   twice, because its order is the encoding and a test that spelled it out
+   again could agree with a server that had drifted from the encoder. *)
+let expected_capabilities () =
+  `Assoc
+    [
+      ("textDocumentSync", `Int 1);
+      ("definitionProvider", `Bool true);
+      ("referencesProvider", `Bool true);
+      ("hoverProvider", `Bool true);
+      ("documentSymbolProvider", `Bool true);
+      ( "completionProvider",
+        `Assoc
+          [
+            ("triggerCharacters", `List [ `String "#"; `String ":" ]);
+            ("resolveProvider", `Bool false);
+          ] );
+      ( "signatureHelpProvider",
+        `Assoc [ ("triggerCharacters", `List [ `String "("; `String "," ]) ] );
+      ("renameProvider", `Assoc [ ("prepareProvider", `Bool true) ]);
+      ("workspaceSymbolProvider", `Bool true);
+      ("documentHighlightProvider", `Bool true);
+      ( "semanticTokensProvider",
+        `Assoc
+          [
+            ( "legend",
+              `Assoc
+                [
+                  ( "tokenTypes",
+                    `List
+                      (List.map
+                         (fun name -> `String name)
+                         Jide_controller.Json_conv.semantic_token_types) );
+                  ( "tokenModifiers",
+                    `List
+                      (List.map
+                         (fun name -> `String name)
+                         Jide_controller.Json_conv.semantic_token_modifiers) );
+                ] );
+            ("full", `Bool true);
+          ] );
+    ]
+
 let test_initialize () =
   let server = create () in
   let replies =
@@ -125,17 +170,9 @@ let test_initialize () =
   | [ reply ] -> (
       match result_json reply with
       | Some (`Assoc fields) ->
-          check "initialize: exactly the implemented capabilities"
+          check "initialize: capabilities are exactly the advertised set"
             (List.assoc_opt "capabilities" fields
-            = Some
-                (`Assoc
-                  [
-                    ("textDocumentSync", `Int 1);
-                    ("definitionProvider", `Bool true);
-                    ("referencesProvider", `Bool true);
-                    ("hoverProvider", `Bool true);
-                    ("documentSymbolProvider", `Bool true);
-                  ]));
+            = Some (expected_capabilities ()));
           check "initialize: serverInfo names the server"
             (match List.assoc_opt "serverInfo" fields with
             | Some (`Assoc info) ->
@@ -1454,18 +1491,22 @@ let test_navigation_rejects_bad_params () =
       check (name ^ ": nothing was checked") (probe.checks = []))
     bad_params
 
-(* The four are added, not the protocol's whole list: a request this server
-   does not implement is still MethodNotFound. *)
+(* The eleven are added, not the protocol's whole list: a request this server
+   does not implement is still MethodNotFound. A method it does route — the
+   four navigation ones and the seven editing ones — is answered, and the
+   tests above and beside this one pin those; a code lens is in the protocol
+   and in the `lsp` package's request type, and this server answers nothing
+   for it. *)
 let test_other_protocol_requests_are_still_unknown () =
   let server = create () in
   initialize server;
   let replies =
     send server
       (request
-         ~params:(target_params ~uri:"file:///tmp/a.jazz" ~line:0 ~character:0)
-         2 "textDocument/completion")
+         ~params:(document_symbol_params ~uri:"file:///tmp/a.jazz")
+         2 "textDocument/codeLens")
   in
-  check_single_error "completion is not advertised or answered"
+  check_single_error "code lens is not advertised or answered"
     Jsonrpc.Response.Error.Code.MethodNotFound replies
 
 let () =
