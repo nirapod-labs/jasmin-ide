@@ -2,12 +2,12 @@
 ;
 ; This file is not one of the five query files Zed reads (`highlights.scm`,
 ; `brackets.scm`, `outline.scm`, `indents.scm`, `textobjects.scm`), and it must
-; not become one: the extension pins the official upstream grammar (D11),
-; which has neither node, and a query file naming a node the grammar does not
-; have does not just lose that pattern — Zed drops the whole file, and
-; highlighting stops working for every user. The patterns wait here until the
-; grammar that has the nodes is the one the pin names, which needs the project
-; to go public (R18, RESERVED).
+; not become one: the extension pins the official upstream grammar, which has
+; neither node, and a query file naming a node the grammar does not have does
+; not just lose that pattern — Zed drops the whole file, and highlighting
+; stops working for every user. The patterns wait here until the grammar that
+; has the nodes is the one the pin names, which needs the project to go
+; public.
 ;
 ; `editor/zed/test/queries.sh` runs this file against a grammar whose
 ; `src/node-types.json` has both nodes — `JASMIN_GRAMMAR_DIR` pointed at the
