@@ -1,1 +1,6 @@
+# Zed's "install dev extension" builds in place: cargo writes target/, the
+# compiled extension is copied to extension.wasm, and every grammar named in
+# extension.toml is cloned and compiled under grammars/.
 /target
+/extension.wasm
+/grammars/
