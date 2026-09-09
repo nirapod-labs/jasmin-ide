@@ -3,7 +3,11 @@
     Nothing here mentions JSON or LSP: the controller converts these to
     protocol types, so the engine stays testable without a protocol. *)
 
-type location = { uri : string; span : Jide_lang.Span.t }
+(* [file] is a path, the one the index holds and normalised: it is not an
+   identifier, so nothing here builds a uri. The seam that answers the
+   protocol converts it once, in [Locate.definition] and [Locate.references],
+   which are the only places a client's own spelling is known. *)
+type location = { file : string; span : Jide_lang.Span.t }
 type diagnostic = Jide_lang.Diagnostic.t
 
 type symbol_kind =

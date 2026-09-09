@@ -71,14 +71,22 @@ let expected text ~within ~name =
 
 let uri_of path = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path path)
 
+(* The byte-level answers carry the path the index holds, so a test compares
+   paths and never an identifier: the identifier is the seam's business and is
+   checked in the seam's own test below. *)
+let same_file (left : string) (right : string) =
+  String.equal
+    (Jide_engine.Index.normalise left)
+    (Jide_engine.Index.normalise right)
+
 let is_at (location : Types.location) ~file ~span =
-  String.equal location.uri (uri_of file) && location.span = span
+  same_file location.file file && location.span = span
 
 let spans (locations : Types.location list) =
   List.map (fun (location : Types.location) -> location.span) locations
 
 let files_of (locations : Types.location list) =
-  List.map (fun (location : Types.location) -> location.uri) locations
+  List.map (fun (location : Types.location) -> location.file) locations
 
 (* The outline written as [name[children], name], so one string says both the
    names and the nesting. *)
@@ -193,15 +201,15 @@ let checked_facts ~file text =
 let test_definition_of_a_function () =
   let locate = single names_file names in
   let call =
-    Jide_engine.Locate.definition locate ~file:names_file
+    Jide_engine.Locate.definition_at locate ~file:names_file
       ~byte:(at names ~within:"x = double(a);" ~name:"double")
   in
   let declared_at_its_name =
-    Jide_engine.Locate.definition locate ~file:names_file
+    Jide_engine.Locate.definition_at locate ~file:names_file
       ~byte:(at names ~within:"fn double(reg u32 a)" ~name:"double")
   in
   let on_the_parameter =
-    Jide_engine.Locate.definition locate ~file:names_file
+    Jide_engine.Locate.definition_at locate ~file:names_file
       ~byte:(at names ~within:"fn double(reg u32 a)" ~name:"a")
   in
   check "definition: a call points at the declaration's name"
@@ -223,15 +231,15 @@ let test_definition_of_a_function () =
           ~span:(expected names ~within:"fn double(reg u32 a)" ~name:"a")
     | None -> false);
   check "definition: nothing to go to on a keyword"
-    (Jide_engine.Locate.definition locate ~file:names_file ~byte:0 = None);
+    (Jide_engine.Locate.definition_at locate ~file:names_file ~byte:0 = None);
   check "definition: a file the resolution never reached has nothing"
-    (Jide_engine.Locate.definition locate ~file:"/work/other.jazz" ~byte:0
+    (Jide_engine.Locate.definition_at locate ~file:"/work/other.jazz" ~byte:0
     = None)
 
 let test_definition_of_a_type_alias () =
   let locate = single names_file names in
   let use =
-    Jide_engine.Locate.definition locate ~file:names_file
+    Jide_engine.Locate.definition_at locate ~file:names_file
       ~byte:(at names ~within:"reg word w;" ~name:"word")
   in
   check "alias: a use of the alias points at the alias"
@@ -250,26 +258,26 @@ let test_definition_through_a_namespace () =
   in
   check "namespace: the last segment of a qualified name is the declaration"
     (same
-       (Jide_engine.Locate.definition locate ~file:names_file
+       (Jide_engine.Locate.definition_at locate ~file:names_file
           ~byte:(at names ~within:"x = box::put(a);" ~name:"put")));
   check "namespace: the whole qualified name is the declaration"
     (same
-       (Jide_engine.Locate.definition locate ~file:names_file
+       (Jide_engine.Locate.definition_at locate ~file:names_file
           ~byte:(at names ~within:"x = box::put(a);" ~name:"box::put")));
   check "namespace: the first segment is the same declaration"
     (same
-       (Jide_engine.Locate.definition locate ~file:names_file
+       (Jide_engine.Locate.definition_at locate ~file:names_file
           ~byte:(at names ~within:"x = box::put(a);" ~name:"box")))
 
 let test_references_of_a_local () =
   let locate = single names_file names in
   let byte = at names ~within:"reg u32 result;" ~name:"result" in
   let all =
-    Jide_engine.Locate.references locate ~file:names_file ~byte
+    Jide_engine.Locate.references_at locate ~file:names_file ~byte
       ~include_declaration:true
   in
   let without_the_declaration =
-    Jide_engine.Locate.references locate ~file:names_file ~byte
+    Jide_engine.Locate.references_at locate ~file:names_file ~byte
       ~include_declaration:false
   in
   let declaration = expected names ~within:"reg u32 result;" ~name:"result" in
@@ -280,9 +288,9 @@ let test_references_of_a_local () =
   check "references: without the declaration there are two"
     (spans without_the_declaration = [ write; read ]);
   check "references: every one names the file it is in"
-    (files_of all = [ uri_of names_file; uri_of names_file; uri_of names_file ]);
+    (files_of all = [ names_file; names_file; names_file ]);
   check "references: a keyword has none"
-    (Jide_engine.Locate.references locate ~file:names_file ~byte:0
+    (Jide_engine.Locate.references_at locate ~file:names_file ~byte:0
        ~include_declaration:true
     = [])
 
@@ -291,7 +299,7 @@ let test_references_of_a_local () =
 let test_two_declarations_of_one_name () =
   let locate = single names_file names in
   let in_double =
-    Jide_engine.Locate.references locate ~file:names_file
+    Jide_engine.Locate.references_at locate ~file:names_file
       ~byte:(at names ~within:"reg u32 result;" ~name:"result")
       ~include_declaration:true
   in
@@ -301,7 +309,7 @@ let test_two_declarations_of_one_name () =
       ~name:"result"
   in
   let in_negate =
-    Jide_engine.Locate.references locate ~file:names_file
+    Jide_engine.Locate.references_at locate ~file:names_file
       ~byte:
         (at names ~within:"fn negate(reg u32 a) -> reg u32 {\n  reg u32 result;"
            ~name:"result")
@@ -322,7 +330,7 @@ let test_two_declarations_of_one_name () =
        (spans in_double));
   check "identity: a use of the second local points at the second declaration"
     (match
-       Jide_engine.Locate.definition locate ~file:names_file
+       Jide_engine.Locate.definition_at locate ~file:names_file
          ~byte:(at names ~within:"result = a - a;" ~name:"result")
      with
     | Some location -> is_at location ~file:names_file ~span:negate_declaration
@@ -330,7 +338,7 @@ let test_two_declarations_of_one_name () =
 
 let test_the_outline_nests_namespaces () =
   let locate = single names_file names in
-  let symbols = Jide_engine.Locate.symbols locate ~file:names_file in
+  let symbols = Jide_engine.Locate.outline locate ~file:names_file in
   check "outline: the items in source order, the namespace's inside it"
     (String.equal (outline_text symbols)
        "word, double, box[put], caller, negate");
@@ -361,20 +369,20 @@ let test_the_outline_nests_namespaces () =
         && caller.span.end_byte >= caller.name_span.end_byte
     | None -> false);
   check "outline: a file the resolution never reached has none"
-    (Jide_engine.Locate.symbols locate ~file:"/work/other.jazz" = [])
+    (Jide_engine.Locate.outline locate ~file:"/work/other.jazz" = [])
 
 let test_hover_from_the_index () =
   let locate = single names_file names in
   let at_call =
-    Jide_engine.Locate.hover locate ~file:names_file
+    Jide_engine.Locate.hover_at locate ~file:names_file
       ~byte:(at names ~within:"x = double(a);" ~name:"double")
   in
   let at_local =
-    Jide_engine.Locate.hover locate ~file:names_file
+    Jide_engine.Locate.hover_at locate ~file:names_file
       ~byte:(at names ~within:"result = a + a;" ~name:"result")
   in
   let at_alias =
-    Jide_engine.Locate.hover locate ~file:names_file
+    Jide_engine.Locate.hover_at locate ~file:names_file
       ~byte:(at names ~within:"reg word w;" ~name:"word")
   in
   check "hover: a function's signature, in a fenced block"
@@ -390,17 +398,17 @@ let test_hover_from_the_index () =
   check "hover: an alias as it was written"
     (String.equal (hover_text at_alias) "```jasmin\ntype word = u32[4]\n```");
   check "hover: a keyword says nothing"
-    (Jide_engine.Locate.hover locate ~file:names_file ~byte:0 = None);
+    (Jide_engine.Locate.hover_at locate ~file:names_file ~byte:0 = None);
   check "hover: a namespace names itself"
     (String.equal
        (hover_text
-          (Jide_engine.Locate.hover locate ~file:names_file
+          (Jide_engine.Locate.hover_at locate ~file:names_file
              ~byte:(at names ~within:"namespace box {" ~name:"box")))
        "```jasmin\nnamespace box\n```");
   check "hover: a function inside a namespace"
     (String.equal
        (hover_text
-          (Jide_engine.Locate.hover locate ~file:names_file
+          (Jide_engine.Locate.hover_at locate ~file:names_file
              ~byte:(at names ~within:"fn put" ~name:"put")))
        "```jasmin\nfn put(reg u64 v) -> reg u64\n```")
 
@@ -416,11 +424,11 @@ let test_hover_on_a_primitive_and_an_annotation () =
   let file = "/work/prim.jazz" in
   let locate = single file text in
   let primitive =
-    Jide_engine.Locate.hover locate ~file
+    Jide_engine.Locate.hover_at locate ~file
       ~byte:(at text ~within:"x = #add(a, a);" ~name:"add")
   in
   let annotation =
-    Jide_engine.Locate.hover locate ~file
+    Jide_engine.Locate.hover_at locate ~file
       ~byte:(at text ~within:"#[returnaddress=stack]" ~name:"returnaddress")
   in
   check "hover: a primitive names itself"
@@ -429,7 +437,7 @@ let test_hover_on_a_primitive_and_an_annotation () =
     (String.equal (hover_text annotation)
        "```jasmin\n#[returnaddress=\"stack\"]\n```");
   check "definition: a primitive is not a declaration"
-    (Jide_engine.Locate.definition locate ~file
+    (Jide_engine.Locate.definition_at locate ~file
        ~byte:(at text ~within:"x = #add(a, a);" ~name:"add")
     = None)
 
@@ -448,15 +456,16 @@ let test_a_name_used_before_its_declaration () =
   let locate = single file text in
   let byte = at text ~within:"x = below(a);" ~name:"below" in
   check "forward: a call above the declaration has no definition"
-    (Jide_engine.Locate.definition locate ~file ~byte = None);
+    (Jide_engine.Locate.definition_at locate ~file ~byte = None);
   check "forward: and no hover"
-    (Jide_engine.Locate.hover locate ~file ~byte = None);
+    (Jide_engine.Locate.hover_at locate ~file ~byte = None);
   check "forward: and no reference"
-    (Jide_engine.Locate.references locate ~file ~byte ~include_declaration:true
+    (Jide_engine.Locate.references_at locate ~file ~byte
+       ~include_declaration:true
     = []);
   check "forward: the declaration itself is still a definition"
     (match
-       Jide_engine.Locate.definition locate ~file
+       Jide_engine.Locate.definition_at locate ~file
          ~byte:(at text ~within:"fn below" ~name:"below")
      with
     | Some location ->
@@ -471,7 +480,7 @@ let test_a_name_used_before_its_declaration () =
      with
     | Some from_file ->
         String.equal (Jide_engine.Locate.entry from_file) file
-        && Jide_engine.Locate.symbols from_file ~file
+        && Jide_engine.Locate.outline from_file ~file
            |> outline_text = "f, below"
     | None -> false)
 
@@ -486,11 +495,11 @@ let linked ?facts () =
 let test_definition_across_a_require () =
   let locate = linked () in
   let call =
-    Jide_engine.Locate.definition locate ~file:entry_file
+    Jide_engine.Locate.definition_at locate ~file:entry_file
       ~byte:(at entry ~within:"x = lib_f(a);" ~name:"lib_f")
   in
   let declaration =
-    Jide_engine.Locate.definition locate ~file:library_file
+    Jide_engine.Locate.definition_at locate ~file:library_file
       ~byte:(at library ~within:"fn lib_f" ~name:"lib_f")
   in
   check "require: a call in the entry points into the library's file"
@@ -520,12 +529,12 @@ let test_definition_across_a_require () =
 let test_references_across_a_require () =
   let locate = linked () in
   let from_the_library =
-    Jide_engine.Locate.references locate ~file:library_file
+    Jide_engine.Locate.references_at locate ~file:library_file
       ~byte:(at library ~within:"fn lib_f" ~name:"lib_f")
       ~include_declaration:true
   in
   let without_the_declaration =
-    Jide_engine.Locate.references locate ~file:entry_file
+    Jide_engine.Locate.references_at locate ~file:entry_file
       ~byte:(at entry ~within:"x = lib_f(a);" ~name:"lib_f")
       ~include_declaration:false
   in
@@ -537,8 +546,7 @@ let test_references_across_a_require () =
         expected library ~within:"fn lib_f" ~name:"lib_f";
       ]);
   check "references: each one names the file it is in"
-    (files_of from_the_library
-    = [ uri_of entry_file; uri_of entry_file; uri_of library_file ]);
+    (files_of from_the_library = [ entry_file; entry_file; library_file ]);
   check "references: without the declaration only the entry's two"
     (spans without_the_declaration
     = [
@@ -552,10 +560,10 @@ let test_hover_prefers_the_typed_facts () =
   let without_facts = linked () in
   let call_byte = at entry ~within:"x = lib_f(a);" ~name:"lib_f" in
   let checked =
-    Jide_engine.Locate.hover with_facts ~file:entry_file ~byte:call_byte
+    Jide_engine.Locate.hover_at with_facts ~file:entry_file ~byte:call_byte
   in
   let indexed =
-    Jide_engine.Locate.hover without_facts ~file:entry_file ~byte:call_byte
+    Jide_engine.Locate.hover_at without_facts ~file:entry_file ~byte:call_byte
   in
   check "facts: the compiler's signature wins where it has one"
     (String.equal (hover_text checked) "```jasmin\nfn lib_f(u32) -> u32\n```");
@@ -569,7 +577,7 @@ let test_hover_prefers_the_typed_facts () =
   check "facts: a variable hovers from the compiler's kind and type"
     (String.equal
        (hover_text
-          (Jide_engine.Locate.hover with_facts ~file:library_file
+          (Jide_engine.Locate.hover_at with_facts ~file:library_file
              ~byte:(at library ~within:"tmp = a;" ~name:"tmp")))
        "```jasmin\nreg u32 tmp\n```");
 
@@ -587,18 +595,18 @@ let test_hover_prefers_the_typed_facts () =
   check "facts: with the facts gone the index answers again"
     (String.equal
        (hover_text
-          (Jide_engine.Locate.hover replaced ~file:entry_file ~byte:call_byte))
+          (Jide_engine.Locate.hover_at replaced ~file:entry_file ~byte:call_byte))
        "```jasmin\nfn lib_f(reg u32 a) -> reg u32\n```")
 
 let test_the_outline_of_a_required_file () =
   let locate = linked () in
   check "outline: the library's one function"
     (String.equal
-       (outline_text (Jide_engine.Locate.symbols locate ~file:library_file))
+       (outline_text (Jide_engine.Locate.outline locate ~file:library_file))
        "lib_f");
   check "outline: the entry's require, the file it names, then the function"
     (String.equal
-       (outline_text (Jide_engine.Locate.symbols locate ~file:entry_file))
+       (outline_text (Jide_engine.Locate.outline locate ~file:entry_file))
        "require[lib.jinc], main")
 
 (* ------------------------------------------------------------------ *)
@@ -611,7 +619,7 @@ let test_a_byte_order_mark_changes_no_answer () =
       entry_file marked_entry
   in
   let call =
-    Jide_engine.Locate.definition locate ~file:entry_file
+    Jide_engine.Locate.definition_at locate ~file:entry_file
       ~byte:(at marked_entry ~within:"x = lib_f(a);" ~name:"lib_f")
   in
   check "bom: a definition across the require lands after the mark's bytes"
@@ -626,7 +634,7 @@ let test_a_byte_order_mark_changes_no_answer () =
     );
   check "bom: a local in the marked entry points inside it"
     (match
-       Jide_engine.Locate.definition locate ~file:entry_file
+       Jide_engine.Locate.definition_at locate ~file:entry_file
          ~byte:(at marked_entry ~within:"x = lib_f(a);" ~name:"x")
      with
     | Some location ->
@@ -636,12 +644,12 @@ let test_a_byte_order_mark_changes_no_answer () =
   check "bom: hover names the local"
     (String.equal
        (hover_text
-          (Jide_engine.Locate.hover locate ~file:entry_file
+          (Jide_engine.Locate.hover_at locate ~file:entry_file
              ~byte:(at marked_entry ~within:"x = lib_f(a);" ~name:"x")))
        "```jasmin\nreg u32 x\n```");
   check "bom: references keep the marked ranges"
     (spans
-       (Jide_engine.Locate.references locate ~file:library_file
+       (Jide_engine.Locate.references_at locate ~file:library_file
           ~byte:(at marked_library ~within:"fn lib_f" ~name:"lib_f")
           ~include_declaration:true)
     = [
@@ -653,14 +661,14 @@ let test_a_byte_order_mark_changes_no_answer () =
     (match
        List.find_opt
          (fun (s : Types.symbol) -> String.equal s.name "main")
-         (Jide_engine.Locate.symbols locate ~file:entry_file)
+         (Jide_engine.Locate.outline locate ~file:entry_file)
      with
     | Some main ->
         main.name_span = expected marked_entry ~within:"fn main" ~name:"main"
     | None -> false);
   check "bom: a byte inside the mark holds nothing"
-    (Jide_engine.Locate.definition locate ~file:entry_file ~byte:1 = None
-    && Jide_engine.Locate.hover locate ~file:entry_file ~byte:2 = None)
+    (Jide_engine.Locate.definition_at locate ~file:entry_file ~byte:1 = None
+    && Jide_engine.Locate.hover_at locate ~file:entry_file ~byte:2 = None)
 
 (* ------------------------------------------------------------------ *)
 (* Project four: a file that does not parse *)
@@ -669,17 +677,17 @@ let test_a_file_that_does_not_parse () =
   let broken = "fn broken( {\n" in
   let file = "/work/broken.jazz" in
   let locate = single file broken in
-  check "broken: no outline" (Jide_engine.Locate.symbols locate ~file = []);
+  check "broken: no outline" (Jide_engine.Locate.outline locate ~file = []);
   check "broken: nothing to go to anywhere in it"
     (List.for_all
-       (fun byte -> Jide_engine.Locate.definition locate ~file ~byte = None)
+       (fun byte -> Jide_engine.Locate.definition_at locate ~file ~byte = None)
        [ 0; 1; 3; 5; 10 ]);
   check "broken: no hover"
     (List.for_all
-       (fun byte -> Jide_engine.Locate.hover locate ~file ~byte = None)
+       (fun byte -> Jide_engine.Locate.hover_at locate ~file ~byte = None)
        [ 0; 1; 3; 5; 10 ]);
   check "broken: no references"
-    (Jide_engine.Locate.references locate ~file ~byte:3
+    (Jide_engine.Locate.references_at locate ~file ~byte:3
        ~include_declaration:true
     = []);
   check "broken: of_file with nothing to read is None"
@@ -687,7 +695,14 @@ let test_a_file_that_does_not_parse () =
 
 (* ------------------------------------------------------------------ *)
 (* A qualified name of three segments, the way pretyping resolves it:
-   [A::B::x] is a namespace holding a namespace holding a name. *)
+   [A::B::x] is a namespace holding a namespace holding a name.
+
+   The use is written where the grammar allows one. A qualified name is a
+   [var], and a [var] may stand anywhere an expression may and as the target
+   of an assignment; a [return] takes its own list of variables rather than
+   an expression, so a call cannot be written there. The assignment below is
+   therefore the shortest legal spelling of a three-segment qualified use,
+   not a weaker one: the same [PECall] over the same [outer::inner::deep]. *)
 
 let nested =
   "namespace outer {\n\
@@ -696,7 +711,9 @@ let nested =
   \  }\n\
    }\n\n\
    fn user(reg u32 a) -> reg u32 {\n\
-  \  return outer::inner::deep(a);\n\
+  \  reg u32 x;\n\
+  \  x = outer::inner::deep(a);\n\
+  \  return x;\n\
    }\n"
 
 let nested_file = "/work/nested.jazz"
@@ -710,26 +727,25 @@ let test_a_three_segment_qualified_name () =
   in
   check "qualified: the whole A::B::x name is the declaration"
     (same
-       (Jide_engine.Locate.definition locate ~file:nested_file
+       (Jide_engine.Locate.definition_at locate ~file:nested_file
           ~byte:
-            (at nested ~within:"return outer::inner::deep(a);"
+            (at nested ~within:"x = outer::inner::deep(a);"
                ~name:"outer::inner::deep")));
   check "qualified: the last segment is the same declaration"
     (same
-       (Jide_engine.Locate.definition locate ~file:nested_file
+       (Jide_engine.Locate.definition_at locate ~file:nested_file
           ~byte:(at nested ~within:"outer::inner::deep(a)" ~name:"deep")));
   check "qualified: the outermost segment reaches it too"
     (same
-       (Jide_engine.Locate.definition locate ~file:nested_file
-          ~byte:
-            (at nested ~within:"return outer::inner::deep(a);" ~name:"outer")));
+       (Jide_engine.Locate.definition_at locate ~file:nested_file
+          ~byte:(at nested ~within:"x = outer::inner::deep(a);" ~name:"outer")));
   check "qualified: an intermediate segment reaches it"
     (same
-       (Jide_engine.Locate.definition locate ~file:nested_file
+       (Jide_engine.Locate.definition_at locate ~file:nested_file
           ~byte:(at nested ~within:"outer::inner::deep(a)" ~name:"inner")));
   check "qualified: the outline nests both namespaces"
     (String.equal
-       (outline_text (Jide_engine.Locate.symbols locate ~file:nested_file))
+       (outline_text (Jide_engine.Locate.outline locate ~file:nested_file))
        "outer[inner[deep]], user")
 
 (* ------------------------------------------------------------------ *)
@@ -742,14 +758,14 @@ let test_a_position_in_whitespace_and_in_a_comment () =
   check "whitespace: every byte of a blank file is empty"
     (List.for_all
        (fun byte ->
-         Jide_engine.Locate.definition locate ~file:blank_file ~byte = None
-         && Jide_engine.Locate.hover locate ~file:blank_file ~byte = None
-         && Jide_engine.Locate.references locate ~file:blank_file ~byte
+         Jide_engine.Locate.definition_at locate ~file:blank_file ~byte = None
+         && Jide_engine.Locate.hover_at locate ~file:blank_file ~byte = None
+         && Jide_engine.Locate.references_at locate ~file:blank_file ~byte
               ~include_declaration:true
             = [])
        (List.init (String.length blank) (fun index -> index)));
   check "whitespace: an empty file has no outline either"
-    (Jide_engine.Locate.symbols locate ~file:blank_file = []);
+    (Jide_engine.Locate.outline locate ~file:blank_file = []);
 
   let text =
     "// a comment names nothing: no words are here but these\n\
@@ -763,23 +779,23 @@ let test_a_position_in_whitespace_and_in_a_comment () =
   let in_line_comment = at text ~within:"// a comment" ~name:"comment" in
   let in_block_comment = at text ~within:"/* nor here" ~name:"nor" in
   check "comment: a word in a line comment names nothing"
-    (Jide_engine.Locate.definition locate ~file ~byte:in_line_comment = None
-    && Jide_engine.Locate.hover locate ~file ~byte:in_line_comment = None
-    && Jide_engine.Locate.references locate ~file ~byte:in_line_comment
+    (Jide_engine.Locate.definition_at locate ~file ~byte:in_line_comment = None
+    && Jide_engine.Locate.hover_at locate ~file ~byte:in_line_comment = None
+    && Jide_engine.Locate.references_at locate ~file ~byte:in_line_comment
          ~include_declaration:true
        = []);
   check "comment: a word in a block comment names nothing"
-    (Jide_engine.Locate.definition locate ~file ~byte:in_block_comment = None
-    && Jide_engine.Locate.hover locate ~file ~byte:in_block_comment = None);
+    (Jide_engine.Locate.definition_at locate ~file ~byte:in_block_comment = None
+    && Jide_engine.Locate.hover_at locate ~file ~byte:in_block_comment = None);
   check "comment: a name the comment quotes is not an occurrence"
-    (Jide_engine.Locate.definition locate ~file
-       ~byte:(at text ~within:"// a comment" ~name:"f")
+    (Jide_engine.Locate.definition_at locate ~file
+       ~byte:(at text ~within:"not even a name like a or f" ~name:"f")
     = None);
   (* The code beside the comments still answers, so the test above is about
      the comment and not about a file that answers nothing. *)
   check "comment: the code beside them still answers"
     (match
-       Jide_engine.Locate.definition locate ~file
+       Jide_engine.Locate.definition_at locate ~file
          ~byte:(at text ~within:"  return a;" ~name:"a")
      with
     | Some location ->
@@ -792,19 +808,19 @@ let test_an_unopened_document () =
   let locate = single names_file names in
   let absent = "/work/never-opened.jazz" in
   check "unopened: it has no outline"
-    (Jide_engine.Locate.symbols locate ~file:absent = []);
+    (Jide_engine.Locate.outline locate ~file:absent = []);
   check "unopened: it has no definition"
-    (Jide_engine.Locate.definition locate ~file:absent ~byte:0 = None);
+    (Jide_engine.Locate.definition_at locate ~file:absent ~byte:0 = None);
   check "unopened: it has no hover"
-    (Jide_engine.Locate.hover locate ~file:absent ~byte:0 = None);
+    (Jide_engine.Locate.hover_at locate ~file:absent ~byte:0 = None);
   check "unopened: it has no references"
-    (Jide_engine.Locate.references locate ~file:absent ~byte:0
+    (Jide_engine.Locate.references_at locate ~file:absent ~byte:0
        ~include_declaration:true
     = []);
   check "unopened: the resolution holds no index for it"
     (Jide_engine.Locate.file locate absent = None);
   check "unopened: the file's own questions still answer"
-    (Jide_engine.Locate.symbols locate ~file:names_file <> [])
+    (Jide_engine.Locate.outline locate ~file:names_file <> [])
 
 (* ------------------------------------------------------------------ *)
 (* Rename-adjacent: two declarations of one name in different blocks of one
@@ -834,12 +850,12 @@ let test_two_blocks_of_one_name () =
     expected shadowed ~within:"    reg u32 total;\n    total = a;" ~name:"total"
   in
   let outer =
-    Jide_engine.Locate.references locate ~file:shadowed_file
+    Jide_engine.Locate.references_at locate ~file:shadowed_file
       ~byte:(at shadowed ~within:"reg u32 total;\n  total = a;" ~name:"total")
       ~include_declaration:true
   in
   let inner =
-    Jide_engine.Locate.references locate ~file:shadowed_file
+    Jide_engine.Locate.references_at locate ~file:shadowed_file
       ~byte:
         (at shadowed ~within:"    reg u32 total;\n    total = a;" ~name:"total")
       ~include_declaration:true
@@ -851,13 +867,20 @@ let test_two_blocks_of_one_name () =
         expected shadowed ~within:"total = a;\n  if a" ~name:"total";
         expected shadowed ~within:"\n  return total;" ~name:"total";
       ]);
-  check "blocks: the inner name has its own declaration and its two uses"
+  check "blocks: the inner name has its own declaration and its three uses"
     (spans inner
     = [
         inner_declaration;
-        expected shadowed ~within:"if a {\n    reg u32 total;\n    total = a;"
+        (* The statement that initialises it in the inner block. *)
+        expected shadowed ~within:"\n    total = a;\n    total = total;"
           ~name:"total";
-        expected shadowed ~within:"total = a;\n    total = total;" ~name:"total";
+        (* The self-assignment [total = total;] writes the name once and reads
+           it once, so it is two occurrences at two ranges, not one: the window
+           below starts inside the line before it and finds the name the
+           statement writes, and the last one starts at the [=] and finds the
+           name it reads. *)
+        expected shadowed ~within:"= a;\n    total = total;" ~name:"total";
+        expected shadowed ~within:"= total;" ~name:"total";
       ]);
   check "blocks: the outer declaration quotes the outer name here"
     (inner_declaration <> outer_declaration);
@@ -865,7 +888,7 @@ let test_two_blocks_of_one_name () =
     (List.for_all (fun span -> not (List.mem span (spans inner))) (spans outer));
   check "blocks: a use in the inner block points at the inner declaration"
     (match
-       Jide_engine.Locate.definition locate ~file:shadowed_file
+       Jide_engine.Locate.definition_at locate ~file:shadowed_file
          ~byte:
            (at shadowed ~within:"total = a;\n    total = total;" ~name:"total")
      with
@@ -874,7 +897,7 @@ let test_two_blocks_of_one_name () =
     | None -> false);
   check "blocks: a use after the block points at the outer declaration"
     (match
-       Jide_engine.Locate.definition locate ~file:shadowed_file
+       Jide_engine.Locate.definition_at locate ~file:shadowed_file
          ~byte:(at shadowed ~within:"\n  return total;" ~name:"total")
      with
     | Some location ->
@@ -882,7 +905,99 @@ let test_two_blocks_of_one_name () =
     | None -> false)
 
 (* ------------------------------------------------------------------ *)
-(* Hover shows the strings a declaration carries, and validates them first *)
+(* Project five: the controller's seam, where a path becomes the protocol's
+   identifier
+
+   Everything above asks the byte-level questions, whose file is the path the
+   index holds. The controller asks the four seam questions instead, and what
+   it prints is an identifier: the string the client opened the document with
+   when the answer is in that document, and a [file:] identifier otherwise.
+   The seam is also where a span becomes a range, so an answer that lost the
+   path would lose its range with it: these two tests say the identifier is
+   the document's own and every range is a declaration's real one. *)
+
+let seam_engine ~uri text =
+  let engine = Jide_engine.Engine.create () in
+  Jide_engine.Engine.open_document engine ~uri ~version:1 ~text;
+  ignore (Jide_engine.Engine.check engine ~uri);
+  engine
+
+let position line character = Jide_lang.Position.make ~line ~character
+
+(* One seam location written as [uri line:character-line:character], so a
+   failed comparison prints the answers instead of only saying they differ. *)
+let location_text (answer : Jide_engine.Locate.location) =
+  Printf.sprintf "%s %d:%d-%d:%d" answer.uri answer.range.start_.line
+    answer.range.start_.character answer.range.end_.line
+    answer.range.end_.character
+
+let locations_text (answers : Jide_engine.Locate.location list) =
+  "[" ^ String.concat "; " (List.map location_text answers) ^ "]"
+
+let test_the_seam_answers_in_the_documents_own_identifier () =
+  let text =
+    "fn f(reg u32 a) -> reg u32 {\n  reg u32 x;\n  x = a;\n  return x;\n}\n"
+  in
+  let file = "/tmp/locate-seam.jazz" in
+  let uri = uri_of file in
+  let engine = seam_engine ~uri text in
+  let answers =
+    Jide_engine.Locate.definition engine ~uri ~position:(position 2 2)
+  in
+  (* The declaration writes [x] at line 1, characters 10 to 11, and the
+     position asked about is the use of it at line 2, character 2. *)
+  check
+    (Printf.sprintf
+       "seam: a definition names the document the client opened, got %s"
+       (locations_text answers))
+    (match answers with
+    | [ answer ] -> String.equal answer.uri uri
+    | _ -> false);
+  check
+    (Printf.sprintf "seam: and its range is the declaration's, got %s"
+       (locations_text answers))
+    (List.map location_text answers = [ uri ^ " 1:10-1:11" ]);
+  check "seam: a position in whitespace is still the empty answer"
+    (Jide_engine.Locate.definition engine ~uri ~position:(position 0 0) = [])
+
+let test_the_seam_keeps_two_declarations_apart () =
+  let file = "/tmp/locate-blocks.jazz" in
+  let uri = uri_of file in
+  let engine = seam_engine ~uri shadowed in
+  let inner =
+    Jide_engine.Locate.references engine ~uri ~position:(position 5 4)
+      ~include_declaration:true
+  in
+  let outer =
+    Jide_engine.Locate.references engine ~uri ~position:(position 8 9)
+      ~include_declaration:true
+  in
+  (* [shadowed] declares [total] at line 1, characters 10 to 15, and again at
+     line 4, characters 12 to 17. The two answers below are asked about a use
+     of each: the write in the inner block, and the read after it. *)
+  let inner_text =
+    [
+      uri ^ " 4:12-4:17"; uri ^ " 5:4-5:9"; uri ^ " 6:4-6:9"; uri ^ " 6:12-6:17";
+    ]
+  in
+  let outer_text =
+    [ uri ^ " 1:10-1:15"; uri ^ " 2:2-2:7"; uri ^ " 8:9-8:14" ]
+  in
+  check
+    (Printf.sprintf "seam: the inner name is its own four, got %s"
+       (locations_text inner))
+    (List.map location_text inner = inner_text);
+  check
+    (Printf.sprintf "seam: the outer name is its own three, got %s"
+       (locations_text outer))
+    (List.map location_text outer = outer_text);
+  check "seam: no range is in both answers"
+    (List.for_all (fun text -> not (List.mem text outer_text)) inner_text);
+  check "seam: every reference names the document the client opened"
+    (List.for_all
+       (fun (answer : Jide_engine.Locate.location) ->
+         String.equal answer.uri uri)
+       (inner @ outer))
 
 let test_hover_shows_the_annotation_strings () =
   let text =
@@ -899,7 +1014,7 @@ let test_hover_shows_the_annotation_strings () =
   let locate = single file text in
   let on_the_contract =
     hover_text
-      (Jide_engine.Locate.hover locate ~file
+      (Jide_engine.Locate.hover_at locate ~file
          ~byte:(at text ~within:"#[ct=" ~name:"ct"))
   in
   check "hover: a quoted contract string is shown"
@@ -907,23 +1022,25 @@ let test_hover_shows_the_annotation_strings () =
   check "hover: a second contract string is shown too"
     (String.equal
        (hover_text
-          (Jide_engine.Locate.hover locate ~file
+          (Jide_engine.Locate.hover_at locate ~file
              ~byte:(at text ~within:"#[sct=" ~name:"sct")))
        "```jasmin\n#[sct=\"secret\"]\n```");
   check "hover: the keyword form is unchanged"
     (String.equal
        (hover_text
-          (Jide_engine.Locate.hover locate ~file
+          (Jide_engine.Locate.hover_at locate ~file
              ~byte:(at text ~within:"#[returnaddress=" ~name:"returnaddress")))
        "```jasmin\n#[returnaddress=\"stack\"]\n```");
 
   (* At the declaration the strings are part of what it says, below the
-     signature the index cut. *)
+     signature the index cut. The window starts at the name and the
+     parenthesis after it, so the [f] it finds is the declared name's and not
+     the [f] of the [fn] keyword. *)
   check "hover: a function's declaration shows its contracts below its type"
     (String.equal
        (hover_text
-          (Jide_engine.Locate.hover locate ~file
-             ~byte:(at text ~within:"fn f(" ~name:"f")))
+          (Jide_engine.Locate.hover_at locate ~file
+             ~byte:(at text ~within:"f(reg u64 a)" ~name:"f")))
        "```jasmin\n\
         fn f(reg u64 a) -> reg u64\n\
         #[ct=\"public -> public\"]\n\
@@ -949,7 +1066,7 @@ let test_hover_refuses_an_unsafe_annotation_string () =
     let file = "/work/unsafe.jazz" in
     let locate = single file text in
     hover_text
-      (Jide_engine.Locate.hover locate ~file
+      (Jide_engine.Locate.hover_at locate ~file
          ~byte:(at text ~within:"#[ct=" ~name:"ct"))
   in
   check "hover: a backtick in the value is not shown"
@@ -966,23 +1083,80 @@ let test_hover_refuses_an_unsafe_annotation_string () =
 (* ------------------------------------------------------------------ *)
 (* The outline's shapes: the item range, the selection range, the kind *)
 
+(* The item range is the whole item, and an item begins where the item before
+   it ended: [Locate]'s [symbol.range] is "the whole item, which is what an
+   outline collapses" (locate.mli), and [Index.item_span] is "the range of the
+   item it makes" (index.mli), never "the definition text". The bytes in front
+   of a definition are therefore the item's own leading trivia, and a doc
+   comment written above a declaration falls inside its range, which is what a
+   collapse should hide with it. *)
 let test_the_outline_carries_both_ranges () =
   let locate = single names_file names in
-  let symbols = Jide_engine.Locate.symbols locate ~file:names_file in
+  let symbols = Jide_engine.Locate.outline locate ~file:names_file in
   let negate =
     List.find_opt
       (fun (s : Types.symbol) -> String.equal s.name "negate")
       symbols
   in
-  check "outline: the item range is the whole definition"
+  let definition =
+    "fn negate(reg u32 a) -> reg u32 {\n\
+    \  reg u32 result;\n\
+    \  result = a - a;\n\
+    \  return result;\n\
+     }"
+  in
+  (* The blank line that separates [caller] from [negate], which the parser's
+     location for the second item takes in. *)
+  let leading = "\n\n" in
+  let whole_item =
+    expected names
+      ~within:("return x;\n}\n\n" ^ definition)
+      ~name:(leading ^ definition)
+  in
+  check "outline: the item range is the definition and the trivia above it"
     (match negate with
     | Some symbol ->
+        symbol.span = whole_item
+        && String.equal
+             (Jide_engine.Index.text_of_span names symbol.span)
+             (leading ^ definition)
+    | None -> false);
+  check "outline: the item range ends where the definition ends"
+    (match negate with
+    | Some symbol ->
+        symbol.span.end_byte
+        = symbol.span.start_byte + String.length leading
+          + String.length definition
+    | None -> false);
+  (* The same rule measured once on a declaration that carries a doc comment,
+     so the test above is about a rule and not about one blank line. *)
+  let documented =
+    "fn a(reg u32 p) -> reg u32 {\n\
+    \  return p;\n\
+     }\n\n\
+     // the doc of b\n\
+     // second line\n\
+     fn b(reg u32 q) -> reg u32 {\n\
+    \  return q;\n\
+     }\n"
+  in
+  let documented_file = "/work/documented.jazz" in
+  check "outline: a doc comment above a declaration is inside its range"
+    (match
+       List.find_opt
+         (fun (s : Types.symbol) -> String.equal s.name "b")
+         (Jide_engine.Locate.outline
+            (single documented_file documented)
+            ~file:documented_file)
+     with
+    | Some symbol ->
         String.equal
-          (Jide_engine.Index.text_of_span names symbol.span)
-          "fn negate(reg u32 a) -> reg u32 {\n\
-          \  reg u32 result;\n\
-          \  result = a - a;\n\
-          \  return result;\n\
+          (Jide_engine.Index.text_of_span documented symbol.span)
+          "\n\n\
+           // the doc of b\n\
+           // second line\n\
+           fn b(reg u32 q) -> reg u32 {\n\
+          \  return q;\n\
            }"
     | None -> false);
   check "outline: the selection range is the name inside it"
@@ -1011,28 +1185,63 @@ let test_the_outline_carries_both_ranges () =
            ])
        symbols);
   check "outline: an empty file has an empty outline"
-    (Jide_engine.Locate.symbols
+    (Jide_engine.Locate.outline
        (single "/work/empty.jazz" "")
        ~file:"/work/empty.jazz"
     = [])
 
+(* ------------------------------------------------------------------ *)
+(* The run: every test this file defines, in the order they are written.
+   The list is the count the line below prints, so a test that is written
+   and not listed here is the one thing this arrangement cannot see; it is
+   added to and read from in one place for that reason. *)
+
+let tests =
+  [
+    ("the definition of a function", test_definition_of_a_function);
+    ("the definition of a type alias", test_definition_of_a_type_alias);
+    ("the definition through a namespace", test_definition_through_a_namespace);
+    ("the references of a local", test_references_of_a_local);
+    ("two declarations of one name", test_two_declarations_of_one_name);
+    ("the outline nests namespaces", test_the_outline_nests_namespaces);
+    ("hover from the index", test_hover_from_the_index);
+    ( "hover on a primitive and an annotation",
+      test_hover_on_a_primitive_and_an_annotation );
+    ( "a name used before its declaration",
+      test_a_name_used_before_its_declaration );
+    ("the definition across a require", test_definition_across_a_require);
+    ("the references across a require", test_references_across_a_require);
+    ("hover prefers the typed facts", test_hover_prefers_the_typed_facts);
+    ("the outline of a required file", test_the_outline_of_a_required_file);
+    ( "a byte-order mark changes no answer",
+      test_a_byte_order_mark_changes_no_answer );
+    ("a file that does not parse", test_a_file_that_does_not_parse);
+    ("a three-segment qualified name", test_a_three_segment_qualified_name);
+    ( "a position in whitespace and in a comment",
+      test_a_position_in_whitespace_and_in_a_comment );
+    ("an unopened document", test_an_unopened_document);
+    ("two blocks of one name", test_two_blocks_of_one_name);
+    ( "the seam answers in the document's own identifier",
+      test_the_seam_answers_in_the_documents_own_identifier );
+    ( "the seam keeps two declarations apart",
+      test_the_seam_keeps_two_declarations_apart );
+    ( "hover shows the annotation strings",
+      test_hover_shows_the_annotation_strings );
+    ( "hover refuses an unsafe annotation string",
+      test_hover_refuses_an_unsafe_annotation_string );
+    ("the outline carries both ranges", test_the_outline_carries_both_ranges);
+  ]
+
 let () =
-  test_definition_of_a_function ();
-  test_definition_of_a_type_alias ();
-  test_definition_through_a_namespace ();
-  test_references_of_a_local ();
-  test_two_declarations_of_one_name ();
-  test_the_outline_nests_namespaces ();
-  test_hover_from_the_index ();
-  test_hover_on_a_primitive_and_an_annotation ();
-  test_a_name_used_before_its_declaration ();
-  test_definition_across_a_require ();
-  test_references_across_a_require ();
-  test_hover_prefers_the_typed_facts ();
-  test_the_outline_of_a_required_file ();
-  test_a_byte_order_mark_changes_no_answer ();
-  test_a_file_that_does_not_parse ();
-  if !failures = 0 then print_endline "all locate tests passed"
+  List.iter
+    (fun (name, run) ->
+      let before = !failures in
+      run ();
+      if !failures > before then
+        Printf.printf "%s: %d assertion(s) failed\n%!" name (!failures - before))
+    tests;
+  let run = List.length tests in
+  if !failures = 0 then Printf.printf "all %d locate tests passed\n" run
   else (
-    Printf.printf "%d locate test(s) failed\n" !failures;
+    Printf.printf "%d assertion(s) failed in %d locate tests\n" !failures run;
     exit 1)

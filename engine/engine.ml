@@ -33,7 +33,8 @@ type context_stage =
    tree, the resolver over that index and the files it requires, and the typed
    facts the check left. These are the three a completion or a signature help
    reads, so they are kept beside the diagnostics rather than rebuilt when a
-   request arrives. *)
+   request arrives. The typed facts live here and nowhere else: the check puts
+   them in this one value, and the navigation answers read them from it. *)
 type snapshot = {
   index : Index.t;
   resolve : Resolve.t;
@@ -47,6 +48,9 @@ type analysis = {
   text : string;
   bom : int;
   snapshot : snapshot;
+      (* The compiler's signature, kind and annotations are its [facts], so the
+         navigation answers read [snapshot.facts] and there is one copy of them
+         to keep in step with the text. *)
   context : Context.t;
   diagnostics : Jide_lang.Diagnostic.t list;
 }
@@ -54,6 +58,15 @@ type analysis = {
 type t = {
   documents : (string, Document.t) Hashtbl.t;
   analyses : (string, analysis) Hashtbl.t;
+  resolutions : (string, Resolve.t) Hashtbl.t;
+      (* The resolution of an entry file, found by that file's normalised
+         path. A resolution is what the navigation answers read, and building
+         one parses the entry and every file it requires, so it is kept until
+         something it was built from changes: a document opening, changing or
+         closing, the settings, the root or the context entry. A [Resolve.t]
+         is kept rather than a [Locate.t] because [Locate] reads [Engine] and
+         not the other way round; wrapping one costs a table of the typed
+         facts, and no parse. *)
   mutable root : string option;
   mutable base : settings;
   mutable project : Project.loaded option;
@@ -81,6 +94,7 @@ let create ?(check = adapter_check) ?(context = Context.of_file) () =
   {
     documents = Hashtbl.create 16;
     analyses = Hashtbl.create 16;
+    resolutions = Hashtbl.create 16;
     root = None;
     base = default_settings;
     project = None;
@@ -94,7 +108,11 @@ let create ?(check = adapter_check) ?(context = Context.of_file) () =
 
 (* The settings and the context both change what an analysis says, so an
    analysis made before them is not reused. The key a document is found by is
-   its version and digest, which know nothing about either. *)
+   its version and digest, which know nothing about either.
+
+   A resolution is built from the same two, and from the text of every file
+   it reads, so it is dropped with them. *)
+let forget_resolutions t = Hashtbl.reset t.resolutions
 let forget_analyses t = Hashtbl.reset t.analyses
 
 (* The project file fills what it sets and leaves the base in place. A value
@@ -146,6 +164,7 @@ let settings t =
 let set_settings t settings =
   if t.base <> settings then (
     t.base <- settings;
+    forget_resolutions t;
     forget_analyses t)
 
 let project t = t.project
@@ -154,6 +173,7 @@ let context_entry t = t.context_entry
 let set_context_entry t entry =
   if t.context_entry <> entry then (
     t.context_entry <- entry;
+    forget_resolutions t;
     forget_analyses t)
 
 (* The project file a diagnostic belongs to, which is the file's own path when
@@ -172,6 +192,7 @@ let set_root t root =
   t.root <- root;
   t.entries <- None;
   Hashtbl.reset t.projects;
+  forget_resolutions t;
   forget_analyses t;
   match root with
   | None -> t.project <- None
@@ -260,17 +281,26 @@ let key_of uri =
   | Some path -> Jide_lang.Uri.to_string (Jide_lang.Uri.of_path path)
   | None -> Jide_lang.Uri.to_string parsed
 
+(* A resolution reads the text of every file a document requires, and its
+   entry is read from that document's buffer, so a document opening, changing
+   or closing can change what a resolution would say. The whole cache goes:
+   an entry a change does not touch still required files that may have moved,
+   and a resolution is cheap next to being wrong. *)
 let open_document t ~uri ~version ~text =
+  Hashtbl.reset t.resolutions;
   Hashtbl.replace t.documents (key_of uri) (Document.create ~uri ~version ~text)
 
 let change_document t ~uri ~version ~text =
   match Hashtbl.find_opt t.documents (key_of uri) with
   | Some document ->
+      Hashtbl.reset t.resolutions;
       Hashtbl.replace t.documents (key_of uri)
         (Document.with_text document ~version text)
   | None -> ()
 
-let close_document t ~uri = Hashtbl.remove t.documents (key_of uri)
+let close_document t ~uri =
+  Hashtbl.reset t.resolutions;
+  Hashtbl.remove t.documents (key_of uri)
 
 let document t ~uri =
   match Hashtbl.find_opt t.documents (key_of uri) with
@@ -458,6 +488,35 @@ let read_file t path =
       | Ok text -> Some text
       | Error _ -> None)
 
+(* The resolution of a document: the entry file and every file it requires,
+   each parsed and walked, with what every name in them stands for. It is what
+   the four navigation answers read, and building it parses the whole project
+   the document touches, so it is kept until something it was built from
+   changes: [open_document], [change_document], [close_document],
+   [set_settings], [set_context_entry] and [set_root] all drop the cache.
+
+   The entry is the document's own path, because a byte a caller hands in is a
+   byte of that text. A document that is not a file has no path, and nothing
+   to read a [require] relative to, so it has no resolution and the navigation
+   answers about it are the empty answer. *)
+let resolution t ~uri =
+  match Hashtbl.find_opt t.documents (key_of uri) with
+  | None -> None
+  | Some document -> (
+      match Document.path document with
+      | None -> None
+      | Some path -> (
+          let file = Index.normalise path in
+          match Hashtbl.find_opt t.resolutions file with
+          | Some resolved -> Some resolved
+          | None ->
+              let resolved =
+                Resolve.of_text ~idirs:(settings_for t document).idirs
+                  ~read:(read_file t) ~file (Document.text document)
+              in
+              Hashtbl.replace t.resolutions file resolved;
+              Some resolved))
+
 (* The context a document is checked in, or the file alone when the stage that
    works it out fails: an analysis still has to have one. *)
 let alone_context (document : Document.t) =
@@ -507,7 +566,11 @@ let blank_snapshot_for ~(file : string) =
    reads them back through {!snapshot} and never causes them to be built
    again. The resolver reads the files a [require] names through the engine's
    reader, so an open buffer comes before the disk, as it does for a check,
-   and it resolves under the include paths the document's own project gives. *)
+   and it resolves under the include paths the document's own project gives.
+
+   A resolver that raises leaves the empty index of {!blank_snapshot_for}, and
+   the facts go in all the same: they came from the check, which is a different
+   stage, and the value holds one copy of them either way. *)
 let snapshot_of t ~idirs ~(file : string) ~(text : string)
     ~(facts : Jide_jasmin.Facts.t) =
   let build () =
@@ -521,7 +584,7 @@ let snapshot_of t ~idirs ~(file : string) ~(text : string)
   in
   match build () with
   | snapshot -> snapshot
-  | exception _ -> blank_snapshot_for ~file
+  | exception _ -> { (blank_snapshot_for ~file) with facts }
 
 (* The whole analysis of one document. Nothing here raises: the check, the
    index and the resolver, and the context stage all run under a catch-all, so
