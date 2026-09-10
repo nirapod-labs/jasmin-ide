@@ -4,6 +4,23 @@
 ; runs it against a throw-away tree it writes itself, with a stand-in for the
 ; dune command: no dune runs here, nothing is built, and every case stops at
 ; the runner's own bookkeeping.
+;
+; The corpus smoke test is here for the same reason: it is a script, and its
+; contract is what a binary that did not answer must never pass. Its own test
+; runs it against stand-ins for the server, so no binary and no corpus are
+; needed.
+;
+; The release scripts are tested the same way and for the same reason: each
+; one is a script whose contract is its output and its status, and none of
+; them needs a build, a network or a container to be exercised. check-linked.t
+; writes its own stand-ins for `otool` and `ldd`, and the two checksum tests
+; work in throw-away directories, so these tests run on any host and in every
+; `make test`; the release build itself is not part of `ci` (docs/release.md).
 
 (cram
- (deps ../../scripts/runtest.sh))
+ (deps
+  ../../scripts/runtest.sh
+  ../../scripts/corpus-smoke.sh
+  ../../scripts/check-linked.sh
+  ../../scripts/release-checksums.sh
+  ../../scripts/release-assets.sh))
