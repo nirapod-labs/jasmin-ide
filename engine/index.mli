@@ -42,7 +42,13 @@ type occurrence = {
   name : string;
   role : role;
   value : string option;
-      (** The string an annotation carries, when it carries one. *)
+      (** The string an annotation carries, when it carries one. Both
+          spellings give it: a keyword attribute ([#[returnaddress=stack]],
+          spelled [PAstring] by the grammar) and a quoted one
+          ([#[ct="public -> public"]], spelled [PAexpr (PEstring _)]). The
+          value is the lexer's, escapes resolved, which is what the
+          compiler's own [Annotations.Astring] holds. Every other attribute
+          form, a word size or a structure, has no string value. *)
 }
 
 type declaration = {
@@ -54,6 +60,13 @@ type declaration = {
   detail : string option;
       (** A signature or a type, rendered from the source bytes, for hover.
           It is a substring of the file, never invented text. *)
+  annotations : (string * string option) list;
+      (** The annotations written on the declaration, in source order: the
+          label and the string it carries, as {!occurrence.value} gives them.
+          A function's, a global's, an alias's and a parameter's own group;
+          for a local, the group on the statement that declares it. Hover
+          shows them, and a caller that shows a value validates it first,
+          because the text is the user's. *)
 }
 
 type item = {

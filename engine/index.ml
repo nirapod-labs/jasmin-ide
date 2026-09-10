@@ -38,6 +38,13 @@ type declaration = {
   name_span : Jide_lang.Span.t;
   item_span : Jide_lang.Span.t;
   detail : string option;
+  annotations : (string * string option) list;
+      (* The annotations written on the thing that declares this name, in
+         source order and each with the string it carries: a function's,
+         a global's, an alias's and a parameter's own, and for a local the
+         ones on the statement that declares it. Hover shows them; they are
+         read off the same walk that indexed the labels, never guessed from
+         a range. *)
 }
 
 type item = {
@@ -186,12 +193,12 @@ let occurrence_of_ident state ~(role : role) ~value
 let use_ident state role ident =
   add_occurrence state (occurrence_of_ident state ~role ~value:None ident)
 
-let add_declaration state ~(kind : kind) ?detail
+let add_declaration state ~(kind : kind) ?detail ?(annotations = [])
     (ident : string Location.located) ~item_span =
   let name_span = span_of_ident ident in
   let name = Location.unloc ident in
   let declaration =
-    { kind; name; file = state.file; name_span; item_span; detail }
+    { kind; name; file = state.file; name_span; item_span; detail; annotations }
   in
   state.declarations := declaration :: !(state.declarations);
   add_occurrence state
@@ -275,15 +282,43 @@ and sizetype state (size : Syntax.psizetype) =
   | Syntax.TypeWsize _ -> ()
   | TypeSizeAlias ident -> use_ident state Type ident
 
+(* The string an annotation carries, whichever way the grammar spelled it.
+   A keyword attribute is [PAstring] and gives its word; a quoted string is a
+   [pexpr_noarr] and arrives as [PAexpr (PEstring _)], which is how
+   [#[ct="..."]], [#[sct="..."]], [#[stackzero="..."]] and every other
+   string-valued attribute are written. The value taken is the lexer's, with
+   its escapes resolved, because that is the string the compiler's own
+   [Annotations.Astring] carries: hover must not disagree with a check of the
+   same file. Every other attribute form, a word size or a structure, has no
+   string value and gives [None]. *)
+and annotation_value (attribute : Syntax.psimple_attribute) =
+  match attribute with
+  | Syntax.PAstring value -> Some value
+  | PAexpr expression -> (
+      match Location.unloc expression with
+      | Syntax.PEstring value -> Some value
+      | _ -> None)
+  | PAws _ | PAstruct _ -> None
+
+(* The labels and values of one annotation group, in source order. It is
+   pure: the walk below records the same labels as occurrences, and a
+   declaration keeps this list so that hover can show what was written on it
+   without asking the tree again. *)
+and annotation_values (labels : Syntax.pannotations) =
+  List.map
+    (fun ((label : string Location.located), attribute) ->
+      ( Location.unloc label,
+        match attribute with
+        | Some attribute -> annotation_value (Location.unloc attribute)
+        | None -> None ))
+    labels
+
 and annotations state (labels : Syntax.pannotations) =
   List.iter
     (fun ((label : string Location.located), attribute) ->
       let value =
         match attribute with
-        | Some attribute -> (
-            match Location.unloc attribute with
-            | Syntax.PAstring value -> Some value
-            | _ -> None)
+        | Some attribute -> annotation_value (Location.unloc attribute)
         | None -> None
       in
       add_occurrence state (occurrence_of_ident state ~role:Annot ~value label);
@@ -340,17 +375,23 @@ and instruction state
   | PIdecl (stotype, names) ->
       ptype state (snd stotype);
       let detail = stotype_text state stotype in
+      let annotations = annotation_values annotations_ in
       List.iter
         (fun name ->
-          ignore (add_declaration state ~kind:Variable ~detail name ~item_span))
+          ignore
+            (add_declaration state ~kind:Variable ~detail ~annotations name
+               ~item_span))
         names
   | PIdeclinit (stotype, inits) ->
       ptype state (snd stotype);
       let detail = stotype_text state stotype in
+      let annotations = annotation_values annotations_ in
       List.iter
         (fun (init : (string Location.located * Syntax.pexpr) Location.located) ->
           let name, value = Location.unloc init in
-          ignore (add_declaration state ~kind:Variable ~detail name ~item_span);
+          ignore
+            (add_declaration state ~kind:Variable ~detail ~annotations name
+               ~item_span);
           expression state value)
         inits
 
@@ -385,8 +426,10 @@ let rec item state (located : Syntax.pitem Location.located) : item =
       | Syntax.GEexpr value -> expression state value
       | GEarray elements -> List.iter (expression state) elements);
       let detail = collapse ("global " ^ type_text state global.pgd_type) in
+      let annotations = annotation_values global.pgd_annot in
       let declaration =
-        add_declaration state ~kind:Global ~detail global.pgd_name ~item_span
+        add_declaration state ~kind:Global ~detail ~annotations global.pgd_name
+          ~item_span
       in
       {
         item_kind = Global;
@@ -412,8 +455,10 @@ let rec item state (located : Syntax.pitem Location.located) : item =
           (Printf.sprintf "type %s = %s" (Location.unloc name)
              (type_text state ty))
       in
+      let annotations = annotation_values annotations_ in
       let declaration =
-        add_declaration state ~kind:Type_alias ~detail name ~item_span
+        add_declaration state ~kind:Type_alias ~detail ~annotations name
+          ~item_span
       in
       {
         item_kind = Type_alias;
@@ -475,12 +520,13 @@ let rec item state (located : Syntax.pitem Location.located) : item =
                Syntax.pannotations * Syntax.paramdecls) ->
           annotations state annotations_;
           ptype state (snd stotype);
+          let annotations = annotation_values annotations_ in
           List.iter
             (fun name ->
               ignore
                 (add_declaration state ~kind:Parameter
                    ~detail:(stotype_text state stotype)
-                   name ~item_span))
+                   ~annotations name ~item_span))
             names)
         function_.pdf_args;
       Option.iter
@@ -492,9 +538,10 @@ let rec item state (located : Syntax.pitem Location.located) : item =
       (match Location.unloc function_.pdf_body.pdb_ret with
       | None -> ()
       | Some returns -> List.iter (use_ident state Var) returns);
+      let annotations = annotation_values function_.pdf_annot in
       let declaration =
-        add_declaration state ~kind:Function ~detail function_.pdf_name
-          ~item_span
+        add_declaration state ~kind:Function ~detail ~annotations
+          function_.pdf_name ~item_span
       in
       {
         item_kind = Function;

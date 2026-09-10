@@ -147,6 +147,25 @@ val resolve : t -> string -> (string, string) result
     apply. Every path is refused when no root is recorded, and when the
     recorded root is not absolute. *)
 
+val read_file : t -> string -> string option
+(** [read_file t path] is the text of [path] as a reader of the workspace
+    finds it: the editor's buffer when the file is open, the disk otherwise,
+    and [None] when neither has it. An answer about a name that comes through
+    a [require] is read from the same text the check was given, so a buffer
+    the client has not saved is what the answer describes. *)
+
+val resolution : t -> uri:string -> Resolve.t option
+(** [resolution t ~uri] is the resolution of the open document [uri]: its own
+    file and every file it requires, each parsed and walked, with what every
+    name in them stands for. It is what the four navigation answers read, and
+    it is kept until something it was built from changes — a document
+    opening, changing or closing, the settings, the root or the context entry
+    — so asking twice does not parse the project twice.
+
+    [None] means no such document is open, or it is open under a scheme that
+    names no file, in which case there is nothing to read a [require]
+    relative to and the navigation answers about it are the empty answer. *)
+
 val max_bytes : int
 (** The largest text that is analysed: 8 MiB. A larger one is not parsed and
     gets one diagnostic that says so. *)
@@ -182,7 +201,9 @@ type analysis = {
   snapshot : snapshot;
       (** the index, the resolver and the typed facts built from the text
           analysed, kept so that a later request reads them instead of
-          building them again *)
+          building them again. The facts of the check are its [facts] and
+          nothing else holds a second copy of them, so hover and the other
+          navigation answers read the one the text was checked with *)
   context : Context.t;
       (** The entry this file is checked in the context of, worked out from
           the project and the [require] lines of the files on disk or in an
