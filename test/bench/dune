@@ -1,0 +1,8 @@
+; The bench driver's contract: a number is printed only inside a timing
+; window, and a build beside it is refused before anything is measured. The
+; test runs the driver itself with the environment a caller would set, and
+; every case stops at a refusal before the driver looks for a corpus, so the
+; test measures nothing and needs no host of its own.
+
+(cram
+ (deps ../../bench/run.sh))

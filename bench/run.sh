@@ -43,3 +43,61 @@ corpus=${JASMIN_BENCH_CORPUS:-}
 runs=${JASMIN_BENCH_RUNS:-20}
 count=${JASMIN_BENCH_COUNT:-4}
 
+# 1. Refuse to measure beside a build. A held slot is a build; so is a dune
+#    process that is building, which catches a build started outside the
+#    slots. Nothing of this script is a dune process, so no exclusion is
+#    needed.
+if [ -n "${JASMIN_BENCH_LOCKS:-}" ]; then
+	for lock in "$JASMIN_BENCH_LOCKS"/build.lock.*; do
+		[ -d "$lock" ] && refuse "a build is running ($lock is held)"
+	done
+fi
+running=$(ps -A -o pid=,command= 2>/dev/null |
+	awk '$2 == "dune" && /build/ { print "  " $0 }')
+[ -z "$running" ] || refuse "a build is running:
+$running"
+
+# 2. Refuse to measure outside a timing window, when a caller names one.
+if [ -n "${JASMIN_BENCH_WINDOW:-}" ] && [ ! -e "$JASMIN_BENCH_WINDOW" ]; then
+	refuse "no timing window: $JASMIN_BENCH_WINDOW does not exist"
+fi
+
+# 3. A stale binary measures code that is no longer here.
+if [ ! -x "$exe" ]; then
+	refuse "no benchmark binary at $exe; run make bench-build first"
+fi
+stale=$(find "$root" \
+	\( -name _build -o -name .git -o -name .worktrees \) -prune -o \
+	-name '*.ml' -newer "$exe" -print 2>/dev/null | head -n 1)
+[ -z "$stale" ] || refuse "$stale is newer than $exe; run make bench-build"
+
+# 4. Refuse without a corpus: the repository holds none.
+[ -n "$corpus" ] || refuse "no corpus: set JASMIN_BENCH_CORPUS to a Jasmin compiler tests directory"
+[ -d "$corpus" ] || refuse "not a directory: $corpus"
+
+table=${TMPDIR:-/tmp}/jasmin-bench.$$
+: >"$table" || refuse "cannot write a temporary file at $table"
+trap 'rm -f "$table"' EXIT HUP INT TERM
+
+tab=$(printf '\t')
+"$exe" largest --count "$count" "$corpus" |
+while IFS=$tab read -r _ path; do
+	printf '%s\tauto\t-\t%s\n' "${path#"$corpus"/}" "$path" >>"$table"
+done
+
+if [ -n "${JASMIN_BENCH_UNITS:-}" ]; then
+	[ -f "$JASMIN_BENCH_UNITS" ] || refuse "no units table at $JASMIN_BENCH_UNITS"
+	cat "$JASMIN_BENCH_UNITS" >>"$table"
+fi
+
+printf 'bench: %s\n' "$(date -u +%FT%TZ)"
+printf 'bench: %d units, %s runs each\n' "$(wc -l <"$table" | tr -d ' ')" "$runs"
+printf 'bench: load %s\n' "$(uptime | sed 's/.*load averages*: //')"
+while IFS=$tab read -r label arch idirs path; do
+	printf '  %s\t%s\t%s\t%s\n' "$label" "$arch" "$idirs" "$path"
+done <"$table"
+
+"$exe" whole --units "$table" --runs "$runs" --samples || exit $?
+"$exe" keystroke --units "$table" --runs "$runs" --samples || exit $?
+
+printf 'bench: %s\n' "$(date -u +%FT%TZ)"

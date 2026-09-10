@@ -1,10 +1,13 @@
-(* Timing for the two budgets a whole check decides: the whole check of a
-   unit, and the interval from a keystroke to the diagnostics it produces.
+(* Timing for the budgets of design section 15 that the server itself
+   decides: the whole check of a unit, the interval from a keystroke to the
+   diagnostics it produces, and the editor requests (completion, signature
+   help, hover and definition from a snapshot, and references and rename over
+   a project).
 
-   Both run the server's own code in this process, so a number is the work
-   the server does and not a model of it. A build must not run beside a
-   measurement: `make bench` refuses to start while one is running, and
-   bench/run.sh says how it decides. *)
+   Every measurement runs the server's own code in this process, so a number
+   is the work the server does and not a model of it. A build must not run
+   beside a measurement: `make bench` refuses to start while one is running,
+   and bench/run.sh says how it decides. *)
 
 let now = Unix.gettimeofday
 let default_runs = 20
@@ -40,6 +43,8 @@ let usage =
       "commands:";
       "  whole      time a whole check (parse and type) of each unit";
       "  keystroke  time a didChange from the protocol loop to the diagnostics";
+      "  request    time completion, signature help, hover, definition,";
+      "             references and rename on a warm snapshot of each unit";
       "  largest    print the largest Jasmin files under a directory";
       "";
       "options:";
@@ -60,6 +65,13 @@ let usage =
       "A file named on the command line without --arch takes the architecture";
       "its path names, so a corpus that keeps one directory per architecture";
       "needs no options.";
+      "";
+      "A request row is compared with its budget, in milliseconds: completion,";
+      "signature help, hover and definition answer to 20, and references and";
+      "rename to 100 over the project, which is every Jasmin file under the";
+      "entry's directory. A request the server does not answer is reported as";
+      "unavailable, one row for each, so the table is complete before the";
+      "features are.";
       "";
       "The exit status is 0 when every unit ran, and 2 when the command line";
       "or an input is wrong.";
@@ -245,6 +257,17 @@ let notification method_ params =
 
 let initialize_params : Yojson.Safe.t = `Assoc [ ("capabilities", `Assoc []) ]
 
+(* A server that is told the workspace root reads a project file there and
+   takes the entries of the context rule from that directory, which is what a
+   client sends and what a request over a project needs. *)
+let initialize_params_at directory : Yojson.Safe.t =
+  `Assoc
+    [
+      ("capabilities", `Assoc []);
+      ( "rootUri",
+        `String (Jide_lang.Uri.to_string (Jide_lang.Uri.of_path directory)) );
+    ]
+
 let open_params ~uri ~text : Yojson.Safe.t =
   `Assoc
     [
@@ -332,7 +355,9 @@ let measure_keystroke ~runs unit_ =
   let uri = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path unit_.file) in
   let log = ref [] in
   let server =
-    Jide_controller.Server.create ~log:(fun message -> log := message :: !log)
+    Jide_controller.Server.create
+      ~log:(fun message -> log := message :: !log)
+      ()
   in
   ignore
     (Jide_controller.Server.handle_packet server
@@ -386,10 +411,382 @@ let print_keystroke_table results =
         result.log)
     results
 
-(* -- the largest corpus files -------------------------------------------- *)
+(* -- the editor requests -------------------------------------------------- *)
+
+(* Two budgets of design section 15 are decided by one request on a snapshot
+   the server already holds: completion, signature help, hover and definition
+   within 20 ms, and references and rename over a project of a library tree's
+   size within 100 ms.
+
+   Each request is sent through the server's own request path, the one an
+   editor's client takes, and the interval is that path alone: the snapshot is
+   open and analysed before the first run, so a number is the work the request
+   does and not the check that came before it.
+
+   A request the server does not answer yet is reported as unavailable, one
+   row for each of the six requests. The harness is then complete before the
+   features are, and the day a handler lands the same row measures it with no
+   change here: the row is the server's answer, not a stand-in for it. *)
+
+type feature =
+  | Completion
+  | Signature_help
+  | Hover
+  | Definition
+  | References
+  | Rename
+
+let features =
+  [ Completion; Signature_help; Hover; Definition; References; Rename ]
+
+let feature_name = function
+  | Completion -> "completion"
+  | Signature_help -> "signature-help"
+  | Hover -> "hover"
+  | Definition -> "definition"
+  | References -> "references"
+  | Rename -> "rename"
+
+let method_of_feature = function
+  | Completion -> "textDocument/completion"
+  | Signature_help -> "textDocument/signatureHelp"
+  | Hover -> "textDocument/hover"
+  | Definition -> "textDocument/definition"
+  | References -> "textDocument/references"
+  | Rename -> "textDocument/rename"
+
+(* The budget each request answers to, in milliseconds. *)
+let snapshot_budget = 20.0
+let project_budget = 100.0
+
+let budget_of_feature = function
+  | Completion | Signature_help | Hover | Definition -> snapshot_budget
+  | References | Rename -> project_budget
+
+(* References and rename work over the project rather than one file, so they
+   are measured with every Jasmin file under the entry's directory open: that
+   is the project, and its size is printed beside the rows. *)
+let over_project = function
+  | References | Rename -> true
+  | Completion | Signature_help | Hover | Definition -> false
+
+let position_json (position : Jide_lang.Position.t) =
+  `Assoc
+    [ ("line", `Int position.line); ("character", `Int position.character) ]
+
+(* The name every rename asks for. A symbol of the project, so the request
+   reaches the rename rules rather than a refusal for a keyword. *)
+let rename_name = "renamed_by_the_benchmark"
+
+(* The parameters of the six requests: the document and the position, then
+   the one field a references or a rename request adds. *)
+let request_params feature ~uri ~position =
+  let base =
+    [
+      ("textDocument", `Assoc [ ("uri", `String uri) ]);
+      ("position", position_json position);
+    ]
+  in
+  match feature with
+  | References ->
+      `Assoc
+        (base @ [ ("context", `Assoc [ ("includeDeclaration", `Bool true) ]) ])
+  | Rename -> `Assoc (base @ [ ("newName", `String rename_name) ])
+  | Completion | Signature_help | Hover | Definition -> `Assoc base
+
+(* The byte a request is made at. The name of the first function the entry
+   declares is a symbol every Jasmin file has; signature help asks at the
+   first call instead, because a signature belongs to a call, and falls back
+   to the function's name when the file calls nothing. A file that declares
+   and calls nothing is asked at its first byte. *)
+let request_byte (index : Jide_engine.Index.t) feature =
+  let declaration_byte =
+    match
+      List.find_opt
+        (fun (declaration : Jide_engine.Index.declaration) ->
+          declaration.kind = Jide_engine.Index.Function)
+        index.declarations
+    with
+    | Some declaration -> Some declaration.name_span.start_byte
+    | None -> (
+        match index.declarations with
+        | declaration :: _ -> Some declaration.name_span.start_byte
+        | [] -> None)
+  in
+  let call_byte =
+    match
+      List.find_opt
+        (fun (occurrence : Jide_engine.Index.occurrence) ->
+          occurrence.role = Jide_engine.Index.Call)
+        index.occurrences
+    with
+    | Some occurrence -> Some occurrence.span.start_byte
+    | None -> None
+  in
+  match (feature, call_byte, declaration_byte) with
+  | Signature_help, Some byte, _ -> byte
+  | _, _, Some byte -> byte
+  | _, Some byte, None -> byte
+  | _, None, None -> 0
+
+(* The analysis the server asks for, over its own engine: the same adapter the
+   executable wires, so the snapshot a request reads is the one the server
+   stores. *)
+let engine_analysis engine : Jide_controller.Server.analysis =
+  {
+    check = (fun ~uri -> ignore (Jide_engine.Engine.check engine ~uri));
+    diagnostics =
+      (fun ~uri ->
+        match Jide_engine.Engine.check engine ~uri with
+        | Some (analysis : Jide_engine.Engine.analysis) ->
+            Some (analysis.version, analysis.diagnostics)
+        | None -> None);
+    forget = (fun ~uri:_ -> ());
+  }
+
+let absolute path =
+  match Unix.realpath path with
+  | real -> real
+  | exception Unix.Unix_error _ ->
+      if Filename.is_relative path then Filename.concat (Sys.getcwd ()) path
+      else path
 
 let is_jasmin_file name =
   Filename.check_suffix name ".jazz" || Filename.check_suffix name ".jinc"
+
+let skip_directory name =
+  String.equal name "_build"
+  || String.equal name "node_modules"
+  || (String.length name > 0 && Char.equal name.[0] '.')
+
+(* Open every Jasmin file under [directory] in the server's store, except
+   [skip], which is the entry the snapshot already holds: the project a
+   references or a rename request reads. The count and the bytes come back so
+   the table can print the size of the tree a number belongs to. *)
+let open_project ~skip server directory =
+  let files = ref 0 in
+  let bytes = ref 0 in
+  let rec walk path =
+    match Sys.readdir path with
+    | exception Sys_error _ -> ()
+    | entries ->
+        Array.iter
+          (fun entry ->
+            let child = Filename.concat path entry in
+            match Unix.stat child with
+            | { Unix.st_kind = Unix.S_DIR; _ } ->
+                if not (skip_directory entry) then walk child
+            | { Unix.st_kind = Unix.S_REG; _ }
+              when is_jasmin_file entry && not (String.equal child skip) -> (
+                match In_channel.with_open_bin child In_channel.input_all with
+                | text ->
+                    let uri =
+                      Jide_lang.Uri.to_string (Jide_lang.Uri.of_path child)
+                    in
+                    ignore
+                      (Jide_controller.Server.handle_packet server
+                         (notification "textDocument/didOpen"
+                            (open_params ~uri ~text)));
+                    incr files;
+                    bytes := !bytes + String.length text
+                | exception Sys_error _ -> ())
+            | _ -> ()
+            | exception Unix.Unix_error _ -> ())
+          entries
+  in
+  walk directory;
+  (!files, !bytes)
+
+type request_status = Answered | Unavailable | Refused of string
+
+type feature_result = {
+  feature : feature;
+  status : request_status;
+  samples : float list;  (** milliseconds, one per run *)
+}
+
+type request_result = {
+  request_unit : unit_;
+  rows : feature_result list;
+  project_files : int;  (** 0 when no project request was measured *)
+  project_bytes : int;
+}
+
+let answer_of_response (response : Jsonrpc.Response.t) =
+  match response.result with
+  | Ok _ -> Answered
+  | Error error -> (
+      match error.Jsonrpc.Response.Error.code with
+      | Jsonrpc.Response.Error.Code.MethodNotFound -> Unavailable
+      | _ -> Refused error.message)
+
+let measure_requests ~runs unit_ =
+  let text = read_file unit_.file in
+  let uri = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path unit_.file) in
+  let directory = absolute (Filename.dirname unit_.file) in
+  let engine = Jide_engine.Engine.create () in
+  let server =
+    Jide_controller.Server.create
+      ~log:(fun _ -> ())
+      ~engine ~analysis:(engine_analysis engine) ()
+  in
+  ignore
+    (Jide_controller.Server.handle_packet server
+       (request 1 "initialize" (initialize_params_at directory)));
+  (match Jide_controller.Server.state server with
+  | Jide_controller.Server.Running -> ()
+  | _ -> die (unit_.label ^ ": the server did not reach the running state"));
+  Jide_engine.Engine.set_settings engine
+    {
+      Jide_engine.Engine.arch = unit_.arch;
+      call_conv = unit_.call_conv;
+      idirs = unit_.idirs;
+    };
+  let index, _ = Jide_engine.Index.of_text ~file:unit_.file text in
+  ignore
+    (Jide_controller.Server.handle_packet server
+       (notification "textDocument/didOpen" (open_params ~uri ~text)));
+  ignore (Jide_controller.Server.ensure_checked server ~uri);
+  let document =
+    match Jide_engine.Engine.document engine ~uri with
+    | Some document -> document
+    | None -> die (unit_.label ^ ": the loop left the document out of the store")
+  in
+  if not (String.equal (Jide_engine.Document.text document) text) then
+    die (unit_.label ^ ": the loop stored other text than the one opened");
+  (match Jide_engine.Engine.analysis engine ~uri with
+  | Some _ -> ()
+  | None -> die (unit_.label ^ ": the snapshot holds no analysis of the entry"));
+  let next_id = ref 1 in
+  let ask feature =
+    incr next_id;
+    let id = !next_id in
+    let position =
+      Jide_engine.Document.position_of_byte document
+        (request_byte index feature)
+    in
+    let packets =
+      Jide_controller.Server.handle_packet server
+        (request id
+           (method_of_feature feature)
+           (request_params feature ~uri ~position))
+    in
+    match
+      List.find_map
+        (function
+          | Jsonrpc.Packet.Response response
+            when Jsonrpc.Id.equal response.Jsonrpc.Response.id (`Int id) ->
+              Some response
+          | _ -> None)
+        packets
+    with
+    | Some response -> response
+    | None ->
+        die
+          (Printf.sprintf "%s: no answer to %s" unit_.label
+             (method_of_feature feature))
+  in
+  let project = ref None in
+  let open_the_project () =
+    match !project with
+    | Some sizes -> sizes
+    | None ->
+        (* The entry is already open, so it is not opened twice; it is still
+           part of the project the size counts. *)
+        let files, bytes =
+          open_project ~skip:(absolute unit_.file) server directory
+        in
+        let sizes = (files + 1, bytes + String.length text) in
+        project := Some sizes;
+        sizes
+  in
+  let measure feature =
+    if over_project feature then ignore (open_the_project ());
+    match answer_of_response (ask feature) with
+    | Unavailable -> { feature; status = Unavailable; samples = [] }
+    | Refused message -> { feature; status = Refused message; samples = [] }
+    | Answered ->
+        let samples =
+          List.init runs (fun _ -> fst (time (fun () -> ignore (ask feature))))
+        in
+        { feature; status = Answered; samples }
+  in
+  let rows = List.map measure features in
+  let project_files, project_bytes =
+    match !project with Some sizes -> sizes | None -> (0, 0)
+  in
+  { request_unit = unit_; rows; project_files; project_bytes }
+
+let request_state row =
+  match row.status with
+  | Unavailable -> "unavailable"
+  | Refused message -> "refused: " ^ message
+  | Answered ->
+      if percentile 0.95 row.samples <= budget_of_feature row.feature then "met"
+      else "missed"
+
+let print_request_samples results =
+  List.iter
+    (fun result ->
+      List.iter
+        (fun row ->
+          List.iteri
+            (fun index milliseconds ->
+              Printf.printf "request %s %s %d %.4f\n" result.request_unit.label
+                (feature_name row.feature) (index + 1) milliseconds)
+            row.samples)
+        result.rows)
+    results
+
+let print_request_table results =
+  Printf.printf "%-44s %-14s %-7s %3s %7s %10s %8s %8s %s\n" "unit" "request"
+    "arch" "n" "budget" "median" "p95" "max" "status";
+  List.iter
+    (fun result ->
+      List.iter
+        (fun row ->
+          let number f =
+            match row.samples with
+            | [] -> "-"
+            | samples -> Printf.sprintf "%.3f" (f samples)
+          in
+          Printf.printf "%-44s %-14s %-7s %3d %7.1f %10s %8s %8s %s\n"
+            result.request_unit.label (feature_name row.feature)
+            result.request_unit.arch_name (List.length row.samples)
+            (budget_of_feature row.feature)
+            (number median)
+            (number (percentile 0.95))
+            (number maximum) (request_state row))
+        result.rows;
+      if result.project_files > 0 then
+        Printf.printf "  project %s: %d files, %d bytes\n"
+          result.request_unit.label result.project_files result.project_bytes)
+    results
+
+(* The rows in one line: a reader of a gate log sees whether the measurement
+   is complete before reading any number. *)
+let print_request_tally results =
+  let rows = List.concat_map (fun result -> result.rows) results in
+  let count what =
+    List.fold_left
+      (fun total row -> if what row then total + 1 else total)
+      0 rows
+  in
+  let measured = count (fun row -> row.status = Answered) in
+  let met = count (fun row -> String.equal (request_state row) "met") in
+  let missed = count (fun row -> String.equal (request_state row) "missed") in
+  let unavailable = count (fun row -> row.status = Unavailable) in
+  let refused =
+    count (function { status = Refused _; _ } -> true | _ -> false)
+  in
+  Printf.printf
+    "request: %d rows, %d measured (%d met, %d missed), %d unavailable"
+    (List.length rows) measured met missed unavailable;
+  if refused > 0 then Printf.printf ", %d refused" refused;
+  print_newline ();
+  if refused > 0 then die "the server refused a request; the table says which"
+
+(* -- the largest corpus files -------------------------------------------- *)
 
 let largest ~count directory =
   if not (Sys.is_directory directory) then die ("not a directory: " ^ directory);
@@ -422,7 +819,7 @@ let largest ~count directory =
 
 (* -- the command line ---------------------------------------------------- *)
 
-type command = Whole | Keystroke | Largest
+type command = Whole | Keystroke | Request | Largest
 
 type options = {
   command : command option;
