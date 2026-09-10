@@ -12,6 +12,7 @@ type settings = {
 }
 
 type checker =
+  context:string list ->
   arch:Jide_jasmin.Adapter.arch ->
   call_conv:Jide_jasmin.Adapter.call_conv ->
   file:string ->
@@ -41,6 +42,12 @@ type snapshot = {
   facts : Jide_jasmin.Facts.t;
 }
 
+type required = {
+  uri : string;
+  text : string;
+  diagnostics : Jide_lang.Diagnostic.t list;
+}
+
 type analysis = {
   uri : string;
   version : int;
@@ -53,6 +60,7 @@ type analysis = {
          to keep in step with the text. *)
   context : Context.t;
   diagnostics : Jide_lang.Diagnostic.t list;
+  required : required list;
 }
 
 type t = {
@@ -87,8 +95,8 @@ let default_settings =
     idirs = [];
   }
 
-let adapter_check ~arch ~call_conv ~file ~text ~idirs =
-  Jide_jasmin.Adapter.check arch call_conv ~file ~text ~idirs
+let adapter_check ~context ~arch ~call_conv ~file ~text ~idirs =
+  Jide_jasmin.Adapter.check ~context arch call_conv ~file ~text ~idirs
 
 let create ?(check = adapter_check) ?(context = Context.of_file) () =
   {
@@ -452,6 +460,44 @@ let diagnostics_of_check ?(bom = 0) ~file ~text
   in
   List.stable_sort compare_diagnostics diagnostics
 
+(* The uri a required file is published against. The check prints the path the
+   [require] resolved to, which is absolute when the document's own path is;
+   one printed relative to a relative document is resolved against that
+   document, which is the directory the require read it in. An open document's
+   own spelling wins over the path's, so a client that holds the file sees the
+   diagnostics on the text it shows. *)
+let required_uri t ~(document : Document.t) (file : string) =
+  let path =
+    if Filename.is_relative file then
+      match Document.path document with
+      | Some base when not (Filename.is_relative base) ->
+          Filename.concat (Filename.dirname base) file
+      | _ -> file
+    else file
+  in
+  let uri =
+    Jide_lang.Uri.to_string (Jide_lang.Uri.of_path (Index.normalise path))
+  in
+  match Hashtbl.find_opt t.documents (key_of uri) with
+  | Some open_document -> Document.uri open_document
+  | None -> uri
+
+(* The files the check reached through a [require] that hold an error, each
+   under the uri it is published by. The diagnostics are sorted as the
+   document's are, so a caller publishes one file's set in source order. *)
+let required_of_check t ~(document : Document.t)
+    (result : Jide_jasmin.Adapter.check_result) =
+  List.map
+    (fun (entry : Jide_jasmin.Adapter.required) ->
+      {
+        uri = required_uri t ~document entry.Jide_jasmin.Adapter.file;
+        text = entry.Jide_jasmin.Adapter.text;
+        diagnostics =
+          List.stable_sort compare_diagnostics
+            entry.Jide_jasmin.Adapter.diagnostics;
+      })
+    result.Jide_jasmin.Adapter.required
+
 (* The entry set the context rule uses: the client's own choice when it made
    one, and the entry list of the project above the document otherwise. The
    rule itself is [Context.of_file]'s; this only says where its entries come
@@ -610,29 +656,40 @@ let analyse t ~uri (document : Document.t) key =
         [
           internal_diagnostic ("the analysis raised: " ^ Printexc.to_string exn);
         ];
+      required = [];
     }
   in
   match
-    let diagnostics, facts =
+    (* The context comes first: the check that follows is run in it, which is
+       the rule of design 8.4. The files before the document are the chain
+       without its last element, which is the document itself. *)
+    let context = context_of t document in
+    let in_context =
+      match List.rev (Context.chain context) with
+      | _document :: files -> List.rev files
+      | [] -> []
+    in
+    let diagnostics, facts, required =
       if String.length text > max_bytes then
-        ([ size_diagnostic ], Jide_jasmin.Facts.empty)
+        ([ size_diagnostic ], Jide_jasmin.Facts.empty, [])
       else
         match
-          t.check ~arch:settings.arch ~call_conv:settings.call_conv ~file
-            ~text:body ~idirs:settings.idirs
+          t.check ~context:in_context ~arch:settings.arch
+            ~call_conv:settings.call_conv ~file ~text:body ~idirs:settings.idirs
         with
         | result ->
             ( diagnostics_of_check ~bom ~file ~text:body result,
-              result.Jide_jasmin.Adapter.facts )
+              result.Jide_jasmin.Adapter.facts,
+              required_of_check t ~document result )
         | exception exn ->
             ( [
                 internal_diagnostic
                   ("the analysis raised: " ^ Printexc.to_string exn);
               ],
-              Jide_jasmin.Facts.empty )
+              Jide_jasmin.Facts.empty,
+              [] )
     in
     let snapshot = snapshot_of t ~idirs:settings.idirs ~file ~text ~facts in
-    let context = context_of t document in
     {
       uri = Document.uri document;
       version = Document.version document;
@@ -642,6 +699,7 @@ let analyse t ~uri (document : Document.t) key =
       snapshot;
       context;
       diagnostics;
+      required;
     }
   with
   | analysis -> analysis

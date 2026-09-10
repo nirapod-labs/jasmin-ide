@@ -54,14 +54,17 @@ val project_diagnostics : t -> Jide_lang.Diagnostic.t list
     [Project.diagnostics] gives them. Empty when the file is fine or absent. *)
 
 type checker =
+  context:string list ->
   arch:Jide_jasmin.Adapter.arch ->
   call_conv:Jide_jasmin.Adapter.call_conv ->
   file:string ->
   text:string ->
   idirs:(string * string) list ->
   Jide_jasmin.Adapter.check_result
-(** The check the engine runs on a text. Only a test replaces it: the server
-    takes the adapter's. *)
+(** The check the engine runs on a text, in the context the stage below works
+    out: the files the compiler enters before the document, outermost first,
+    with the empty list for a file checked on its own. Only a test replaces
+    it: the server takes the adapter's. *)
 
 type context_stage =
   entries:string list ->
@@ -192,6 +195,27 @@ type snapshot = {
     {!Complete.signature_help} take, so a caller reads this and answers
     without touching the compiler, the parser or a file. *)
 
+type required = {
+  uri : string;
+      (** The uri the file is named by: the uri of the open document that
+          holds it when it is open, so a client that has it open publishes
+          against the text it shows, and a [file] uri made of its path
+          otherwise. A path the check reported relative to the document's own
+          is resolved against that document first, so the two spellings of one
+          file are one uri. *)
+  text : string;
+      (** The bytes [diagnostics] index: the ones the check read, which are the
+          file's on disk. The line index a caller publishes with is built from
+          this text, never from a buffer that may have changed since. *)
+  diagnostics : Jide_lang.Diagnostic.t list;
+      (** What the check reported in the file itself, at the place it reported
+          it: errors before warnings, then in source order. *)
+}
+(** A file reached through a [require] that holds an error, and that error.
+    The caller publishes each diagnostic against {!required.uri} with the
+    range {!required.text} gives it, which is where the compiler prints it,
+    rather than against the document the check was asked about. *)
+
 type analysis = {
   uri : string;  (** the name the document was opened with *)
   version : int;  (** the client's version of the text analysed *)
@@ -212,7 +236,12 @@ type analysis = {
   diagnostics : Jide_lang.Diagnostic.t list;
       (** Spans index the document's own text, so a reader never has to know
           about the byte-order mark. Errors come before warnings, then in
-          source order. *)
+          source order. A diagnostic of a file the document requires is not
+          here: that file and its diagnostics are in {!analysis.required}. *)
+  required : required list;
+      (** The files the document requires that hold an error, each with the
+          uri it is published against. Empty when every file it reads is
+          fine. *)
 }
 
 val check : t -> uri:string -> analysis option
@@ -281,4 +310,6 @@ val diagnostics_of_check :
     warnings that belong to [file] become diagnostics, errors come before
     warnings and each group is in source order. [text] is the analysed text
     and [bom] the bytes removed from the front of the document, which the
-    compiler never saw; a default of 0 shifts nothing. *)
+    compiler never saw; a default of 0 shifts nothing. A diagnostic of a file
+    reached through a [require] is not one of these: {!analysis.required}
+    names its file and carries it. *)
