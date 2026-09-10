@@ -64,7 +64,7 @@ let function_fact text ~within ~name ~fs_in ~fs_out =
     i_vars = [];
   }
 
-let facts_of items = { Jide_jasmin.Facts.items; uses = [] }
+let facts_of items = { Jide_jasmin.Facts.items; uses = []; calls = [] }
 
 let complete_at ?trigger (resolved, index) ~byte =
   Jide_engine.Complete.completion ?trigger ~index ~resolve:resolved ~byte ()

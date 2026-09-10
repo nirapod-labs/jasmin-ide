@@ -413,6 +413,61 @@ let test_an_annotation_carries_its_value () =
          String.equal occurrence.name "mmx" && occurrence.value = None)
        index.Jide_engine.Index.occurrences)
 
+(* A quoted string is a [pexpr_noarr] in the grammar, so it arrives as
+   [PAexpr (PEstring _)] and not as a keyword's [PAstring]. Both spellings are
+   a string value, and hover needs the quoted ones: [#[ct]] and [#[sct]] carry
+   the contract of a function. *)
+let test_a_quoted_annotation_carries_its_string () =
+  let text =
+    "#[ct=\"public -> public\"]\n\
+     #[sct=\"secret\"]\n\
+     #[returnaddress=stack]\n\
+     #[stacksize=64]\n\
+     #[mmx]\n\
+     fn f(reg u32 a) -> reg u32 { return a; }\n"
+  in
+  let index, diagnostics = of_text ~file:"/work/quoted.jazz" text in
+  let value_of label =
+    List.find_map
+      (fun (occurrence : Jide_engine.Index.occurrence) ->
+        if
+          occurrence.role = Jide_engine.Index.Annot
+          && String.equal occurrence.name label
+        then Some occurrence.value
+        else None)
+      index.Jide_engine.Index.occurrences
+  in
+  check "quoted annotation: the file parses" (diagnostics = []);
+  check "quoted annotation: ct carries the string it was given"
+    (value_of "ct" = Some (Some "public -> public"));
+  check "quoted annotation: sct carries its string too"
+    (value_of "sct" = Some (Some "secret"));
+  check "quoted annotation: a keyword value still carries its word"
+    (value_of "returnaddress" = Some (Some "stack"));
+  check "quoted annotation: an integer value has no string"
+    (value_of "stacksize" = Some None);
+  check "quoted annotation: a label with no value has none"
+    (value_of "mmx" = Some None);
+  check "quoted annotation: the label's range is the label"
+    (List.exists
+       (fun (occurrence : Jide_engine.Index.occurrence) ->
+         String.equal occurrence.name "ct"
+         && String.equal (text_of text occurrence.span) "ct")
+       index.Jide_engine.Index.occurrences);
+
+  (* The value is the lexer's, with escapes resolved, because that is what
+     the compiler's own annotation string holds: hover and a check of the
+     same file must not disagree. *)
+  let escaped, _ =
+    of_text ~file:"/work/escaped.jazz"
+      "#[ct=\"a\\tb\"]\nfn f(reg u32 a) -> reg u32 { return a; }\n"
+  in
+  check "quoted annotation: an escape is resolved, as the compiler resolves it"
+    (List.exists
+       (fun (occurrence : Jide_engine.Index.occurrence) ->
+         String.equal occurrence.name "ct" && occurrence.value = Some "a\tb")
+       escaped.Jide_engine.Index.occurrences)
+
 (* One spelling per path, and the same one as Context's. *)
 let test_normalise_agrees_with_the_context () =
   let paths =
@@ -448,6 +503,7 @@ let () =
   test_a_byte_order_mark_shifts_nothing ();
   test_a_file_that_does_not_parse ();
   test_an_annotation_carries_its_value ();
+  test_a_quoted_annotation_carries_its_string ();
   test_normalise_agrees_with_the_context ();
   if !failures = 0 then print_endline "all index tests passed"
   else (

@@ -220,6 +220,7 @@ let declaration_at env span =
         name_span = span;
         item_span = span;
         detail = None;
+        annotations = [];
       }
 
 let declare session env (kind : Index.kind) ident ~item_span =
