@@ -102,6 +102,52 @@ A `jasmin-project.json` at the workspace root takes precedence over `arch` and
 `include`. The table must be a JSON object; anything else is reported as a
 setting error.
 
+## Building the extension for a dev install
+
+Zed's `zed: install dev extension` builds the extension itself, and it uses the
+first `cargo` on its `PATH`. Where that is Homebrew's Rust, the build fails
+with `wasm32-wasip2` missing: the Homebrew toolchain was installed without the
+target, so cargo has no `core` for it.
+
+Check which cargo comes first and what the rustup toolchain has:
+
+```sh
+which cargo
+~/.cargo/bin/rustup target list --installed
+```
+
+`wasm32-wasip2` must be in the second list. If it is not, add it once:
+
+```sh
+~/.cargo/bin/rustup target add wasm32-wasip2
+```
+
+If `which cargo` names a Homebrew path such as `/opt/homebrew/bin/cargo`, put
+rustup's bin directory in front of `PATH` and start Zed from that shell:
+
+```sh
+PATH=$HOME/.cargo/bin:$PATH
+```
+
+A Zed started from the Dock or the Finder inherits none of this.
+
+The same prefix builds the extension by hand:
+
+```sh
+cd editor/zed
+PATH=$HOME/.cargo/bin:$PATH \
+  ~/.cargo/bin/cargo build --locked --target wasm32-wasip2
+```
+
+Cargo writes that output to `target/` in this directory, or to
+`CARGO_TARGET_DIR` when it is set, which lets several checkouts share one
+build output.
+
+The dev install writes three things into this directory, all ignored by git:
+`target/` from cargo (or the directory `CARGO_TARGET_DIR` names),
+`extension.wasm` from the compiled crate, and `grammars/`, where Zed clones and
+builds each grammar named in `extension.toml`.
+
 ## Platforms
 
 The server is released for `linux-x86_64`, `linux-aarch64` and
