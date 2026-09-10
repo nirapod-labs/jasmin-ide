@@ -819,7 +819,7 @@ let largest ~count directory =
 
 (* -- the command line ---------------------------------------------------- *)
 
-type command = Whole | Keystroke | Largest
+type command = Whole | Keystroke | Request | Largest
 
 type options = {
   command : command option;
