@@ -79,3 +79,63 @@ measures the refusal and not the digest arithmetic.
   $ cmp -s unverified/SHA256SUMS assets/SHA256SUMS; echo "list left as it was: $?"
   list left as it was: 0
 
+A directory named relative to the caller is entered once, and the fallback
+tool is reached from there. When the first tool could not answer, the second
+half of the check used to run inside the directory the first half had already
+entered; the second `cd` then failed, and a correct list was reported as one
+that does not verify. Both tools are stand-ins here, so the fallback is the
+one that runs on every host, and it records the directory it was entered in.
+
+  $ mkdir -p relbin
+  $ cat > relbin/sha256sum <<'EOF'
+  > #!/bin/sh
+  > # The first tool the script tries: it digests, but it says every list is
+  > # wrong, so the fallback below is the one that has to verify.
+  > case $1 in
+  > -c) exit 1 ;;
+  > *) printf '%064d  %s\n' 0 "$1" ;;
+  > esac
+  > EOF
+  $ cat > relbin/shasum <<'EOF'
+  > #!/bin/sh
+  > # The fallback: it records the name of the directory it was entered in and
+  > # says the list is good. Only its status is read by the script.
+  > case $1 in
+  > -a) shift 2 ;;
+  > esac
+  > case $1 in
+  > -c) basename "$PWD" > "$PWD/fallback-ran" ;;
+  > *) printf '%064d  %s\n' 0 "$1" ;;
+  > esac
+  > EOF
+  $ chmod +x relbin/sha256sum relbin/shasum
+  $ mkdir rel
+  $ printf 'delta\n' > rel/delta.txt
+  $ PATH=$PWD/relbin:$PATH bash ../../scripts/release-checksums.sh rel
+  release-checksums.sh: wrote rel/SHA256SUMS: 1 files
+    delta.txt
+  $ cat rel/fallback-ran
+  rel
+
+A directory with no release file is a refusal: an empty list verifies nothing
+while looking like a list, and a subdirectory would fall out of a flat list
+without a word.
+
+  $ mkdir empty
+  $ bash ../../scripts/release-checksums.sh empty
+  release-checksums.sh: error: empty holds no release file, so a checksum list would be empty
+  [1]
+  $ mkdir -p nested/sub && printf 'one\n' > nested/one
+  $ bash ../../scripts/release-checksums.sh nested
+  release-checksums.sh: error: nested holds a subdirectory (sub), which a flat checksum list cannot name
+  [1]
+
+The refusals that are not a measurement are 2: no argument, and a directory
+that is not there.
+
+  $ bash ../../scripts/release-checksums.sh
+  usage: release-checksums.sh <directory>
+  [2]
+  $ bash ../../scripts/release-checksums.sh no-such-directory
+  release-checksums.sh: error: no such directory: no-such-directory
+  [2]
