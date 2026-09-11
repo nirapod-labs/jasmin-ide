@@ -452,7 +452,7 @@ let test_the_adapter_admits_what_the_engine_admits () =
 
 let test_exception_becomes_an_internal_diagnostic () =
   let raised = ref 0 in
-  let check_raises ~arch:_ ~call_conv:_ ~file:_ ~text:_ ~idirs:_ =
+  let check_raises ~context:_ ~arch:_ ~call_conv:_ ~file:_ ~text:_ ~idirs:_ =
     incr raised;
     raise (Failure "the checker broke")
   in
@@ -487,7 +487,7 @@ let test_exception_becomes_an_internal_diagnostic () =
   check "internal: the checker ran twice" (!raised = 2)
 
 let test_a_failing_check_does_not_break_the_store () =
-  let check_raises ~arch:_ ~call_conv:_ ~file:_ ~text:_ ~idirs:_ =
+  let check_raises ~context:_ ~arch:_ ~call_conv:_ ~file:_ ~text:_ ~idirs:_ =
     raise Stack_overflow
   in
   let engine = Jide_engine.Engine.create ~check:check_raises () in
@@ -526,12 +526,13 @@ let test_settings () =
 
 let test_the_settings_reach_the_checker () =
   let seen = ref [] in
-  let check_captures ~arch:_ ~call_conv:_ ~file:_ ~text:_ ~idirs =
+  let check_captures ~context:_ ~arch:_ ~call_conv:_ ~file:_ ~text:_ ~idirs =
     seen := idirs;
     {
       Jide_jasmin.Adapter.diagnostics = [];
       warnings = [];
       facts = Jide_jasmin.Facts.empty;
+      required = [];
     }
   in
   let engine = Jide_engine.Engine.create ~check:check_captures () in
@@ -547,7 +548,7 @@ let test_the_settings_reach_the_checker () =
    the include paths it was given into its diagnostic, so a stale analysis is
    visible in the message. *)
 let test_a_settings_change_forgets_the_analysis () =
-  let check_reports ~arch:_ ~call_conv:_ ~file:_ ~text:_ ~idirs =
+  let check_reports ~context:_ ~arch:_ ~call_conv:_ ~file:_ ~text:_ ~idirs =
     let message =
       match idirs with
       | [] -> "no include path"
@@ -565,6 +566,7 @@ let test_a_settings_change_forgets_the_analysis () =
         ];
       warnings = [];
       facts = Jide_jasmin.Facts.empty;
+      required = [];
     }
   in
   let engine = Jide_engine.Engine.create ~check:check_reports () in
@@ -597,11 +599,12 @@ let test_an_exception_in_the_context_stage_is_internal () =
   let context_raises ~entries:_ ~idirs:_ ~read:_ _ =
     raise (Failure "the context stage broke")
   in
-  let check_is_fine ~arch:_ ~call_conv:_ ~file:_ ~text:_ ~idirs:_ =
+  let check_is_fine ~context:_ ~arch:_ ~call_conv:_ ~file:_ ~text:_ ~idirs:_ =
     {
       Jide_jasmin.Adapter.diagnostics = [];
       warnings = [];
       facts = Jide_jasmin.Facts.empty;
+      required = [];
     }
   in
   let engine =
@@ -653,12 +656,14 @@ let test_an_exception_in_the_context_stage_is_internal () =
    number and not an inference. Its result is empty, so the assertions below
    are about the index and the resolver, which are built from the text and do
    not read the checker's output. *)
-let counting_check counter ~arch:_ ~call_conv:_ ~file:_ ~text:_ ~idirs:_ =
+let counting_check counter ~context:_ ~arch:_ ~call_conv:_ ~file:_ ~text:_
+    ~idirs:_ =
   incr counter;
   {
     Jide_jasmin.Adapter.diagnostics = [];
     warnings = [];
     facts = Jide_jasmin.Facts.empty;
+    required = [];
   }
 
 let names_of_declarations (index : Jide_engine.Index.t) =
@@ -1165,6 +1170,86 @@ let test_resolve_special_paths () =
   check_path "the empty path is the root" "/tmp/jide-engine-root"
     (Engine.resolve engine "")
 
+(* A file the document requires that holds an error comes out of the analysis
+   with its own uri and the text its spans index, so a caller publishes the
+   error where the compiler printed it instead of on the document's lines.
+   The checker is the test's, so the required list is a value written here and
+   not a corpus. *)
+let required_text = "u16 x = MLKEM_NOPE;\n"
+
+let required_diagnostic =
+  Jide_lang.Diagnostic.make ~code:"typing" ~severity:Jide_lang.Diagnostic.Error
+    (Jide_lang.Span.make ~start_byte:8 ~end_byte:18)
+    "unknown variable: `MLKEM_NOPE'"
+
+let check_reports_required_in file ~context:_ ~arch:_ ~call_conv:_ ~file:_
+    ~text:_ ~idirs:_ =
+  {
+    Jide_jasmin.Adapter.diagnostics = [];
+    warnings = [];
+    facts = Jide_jasmin.Facts.empty;
+    required =
+      [
+        {
+          Jide_jasmin.Adapter.file;
+          text = required_text;
+          diagnostics = [ required_diagnostic ];
+        };
+      ];
+  }
+
+let test_a_required_file_keeps_its_own_uri () =
+  let engine =
+    Jide_engine.Engine.create
+      ~check:(check_reports_required_in "/tmp/prelude.jinc")
+      ()
+  in
+  let uri = uri_of "required" in
+  open_text engine ~uri ~version:1 valid;
+  (match Jide_engine.Engine.check engine ~uri with
+  | None -> check "required: an analysis" false
+  | Some analysis -> (
+      check "required: the document has no diagnostic of its own"
+        (analysis.Jide_engine.Engine.diagnostics = []);
+      match analysis.Jide_engine.Engine.required with
+      | [ file ] ->
+          check "required: the file is named by its own uri"
+            (file.Jide_engine.Engine.uri = "file:///tmp/prelude.jinc");
+          check "required: it carries the text its spans index"
+            (String.equal file.Jide_engine.Engine.text required_text);
+          check "required: the diagnostic is carried"
+            (messages file.Jide_engine.Engine.diagnostics
+            = [ required_diagnostic.Jide_lang.Diagnostic.message ]);
+          check "required: its range indexes the file's own text"
+            (Jide_lang.Line_index.position_of_byte
+               (Jide_lang.Line_index.create file.Jide_engine.Engine.text)
+               required_diagnostic.Jide_lang.Diagnostic.span
+                 .Jide_lang.Span.start_byte
+            = { Jide_lang.Position.line = 0; character = 8 })
+      | other ->
+          check
+            (Printf.sprintf "required: one file, got %d" (List.length other))
+            false));
+  (* The client has the file open, spelled its own way, which is the document
+     it can apply an answer to: the engine names the file by that spelling and
+     not by the one its path would give. *)
+  let spelled = "file:///tmp/prelude file.jinc" in
+  let engine =
+    Jide_engine.Engine.create
+      ~check:(check_reports_required_in "/tmp/prelude file.jinc")
+      ()
+  in
+  open_text engine ~uri:spelled ~version:1 required_text;
+  open_text engine ~uri ~version:1 valid;
+  match Jide_engine.Engine.check engine ~uri with
+  | Some analysis -> (
+      match analysis.Jide_engine.Engine.required with
+      | [ file ] ->
+          check "required: an open file keeps the client's spelling"
+            (file.Jide_engine.Engine.uri = spelled)
+      | _ -> check "required: the open file is named" false)
+  | None -> check "required: the open file is named" false
+
 let () =
   test "change without open is ignored" test_change_without_open_is_ignored;
   test "change after close is ignored" test_change_after_close_is_ignored;
@@ -1205,6 +1290,8 @@ let () =
   test "a snapshot after a check" test_snapshot_after_a_check;
   test "the snapshot is the last analysis" test_snapshot_is_the_last_analysis;
   test "the snapshot of a broken file" test_snapshot_of_a_broken_file;
+  test "a required file keeps its own uri"
+    test_a_required_file_keeps_its_own_uri;
   test "open and read back" test_open_and_read_back;
   test "change and read the new text" test_change_and_read_the_new_text;
   test "close and read from disk" test_close_then_read_from_disk;
