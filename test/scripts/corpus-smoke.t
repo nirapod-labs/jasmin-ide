@@ -71,3 +71,96 @@ with the file's name.
   tests/success/a.jazz^Ierrors=2
   tests/success/a.jazz^Iok
 
+A binary that dies on a file is a failure, whatever it printed before it.
+
+  $ cat > crash <<'EOF'
+  > #!/bin/bash
+  > [ "${1:-}" = --version ] && { echo 'jasmin-lsp 0.0.0'; exit; }
+  > shift
+  > while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
+  > [ "${1:-}" = -- ] && shift
+  > for f in "$@"; do
+  >   case $f in
+  >   *c.jazz*) exit 3 ;;
+  >   esac
+  >   echo "$f: ok"
+  > done
+  > EOF
+  $ chmod +x crash
+  $ ../../scripts/corpus-smoke.sh ./crash corpus -j 1 > /dev/null
+  corpus-smoke.sh: error: tests/fail/c.jazz exited 3, which no check does
+  [1]
+
+An internal diagnostic is a failure even when the summary line looks right: it
+is what the checker prints when it could not do the check at all.
+
+  $ cat > internal <<'EOF'
+  > #!/bin/bash
+  > [ "${1:-}" = --version ] && { echo 'jasmin-lsp 0.0.0'; exit; }
+  > shift
+  > while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
+  > [ "${1:-}" = -- ] && shift
+  > for f in "$@"; do
+  >   echo "$f:1:1: internal: cannot read the file"
+  >   echo "$f: 1 error"
+  > done
+  > exit 1
+  > EOF
+  $ chmod +x internal
+  $ ../../scripts/corpus-smoke.sh ./internal corpus -j 1 > /dev/null
+  corpus-smoke.sh: error: tests/fail/c.jazz reported an internal diagnostic:
+    tests/fail/c.jazz:1:1: internal: cannot read the file
+  corpus-smoke.sh: error: tests/success/a.jazz reported an internal diagnostic:
+    tests/success/a.jazz:1:1: internal: cannot read the file
+  corpus-smoke.sh: error: tests/success/b.jinc reported an internal diagnostic:
+    tests/success/b.jinc:1:1: internal: cannot read the file
+  [1]
+
+A binary that runs but answers nothing is a failure too: silence must not read
+as a clean corpus.
+
+  $ cat > silent <<'EOF'
+  > #!/bin/bash
+  > [ "${1:-}" = --version ] && { echo 'jasmin-lsp 0.0.0'; exit; }
+  > exit
+  > EOF
+  $ chmod +x silent
+  $ ../../scripts/corpus-smoke.sh ./silent corpus -j 1 > /dev/null
+  corpus-smoke.sh: error: tests/fail/c.jazz printed no verdict; the last line was:
+  corpus-smoke.sh: error: tests/success/a.jazz printed no verdict; the last line was:
+  corpus-smoke.sh: error: tests/success/b.jinc printed no verdict; the last line was:
+  [1]
+
+A binary that does not run here fails before the corpus starts, so a binary of
+the wrong architecture cannot report a corpus it never read.
+
+  $ cat > wrong-platform <<'EOF'
+  > #!/bin/bash
+  > echo 'cannot execute: wrong architecture' >&2
+  > exit 126
+  > EOF
+  $ chmod +x wrong-platform
+  $ ../../scripts/corpus-smoke.sh ./wrong-platform corpus
+  corpus-smoke.sh: binary ./wrong-platform
+  corpus-smoke.sh: error: $TESTCASE_ROOT/wrong-platform --version failed, so the binary does not run here:
+  cannot execute: wrong architecture
+  [1]
+
+The usage errors are refused with status 2: a missing argument, a job count
+below one, a binary that is not there, a corpus with no source in it.
+
+  $ ../../scripts/corpus-smoke.sh ./checker
+  usage: corpus-smoke.sh <binary> <corpus-root> [-j N] [--arch NAME] [--write FILE] [--expect FILE]
+  [2]
+  $ ../../scripts/corpus-smoke.sh ./checker corpus -j 0
+  corpus-smoke.sh: error: -j is below one: 0
+  [2]
+  $ ../../scripts/corpus-smoke.sh ./absent corpus
+  corpus-smoke.sh: error: no such file: ./absent
+  [2]
+  $ mkdir -p empty
+  $ ../../scripts/corpus-smoke.sh ./checker empty
+  corpus-smoke.sh: binary ./checker
+  corpus-smoke.sh: version jasmin-lsp 0.0.0 (stand-in for the checker)
+  corpus-smoke.sh: error: no .jazz or .jinc file under $TESTCASE_ROOT/empty, so there is nothing to check
+  [2]
