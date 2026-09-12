@@ -4,7 +4,12 @@
     spellings of one document are one entry: a scheme written in another
     case, a percent-encoded path and the decoded one, and an empty authority
     and [localhost] all name the same document. The document keeps the URI it
-    was opened with; only the key is normalised. *)
+    was opened with; only the key is normalised.
+
+    A document is analysed under the project file nearest above it, found by
+    walking up from its own directory (design note, section 3). Two documents
+    in one workspace may therefore be under two different projects, and one
+    under neither is analysed with the defaults and told nothing about it. *)
 
 type t
 
@@ -21,15 +26,19 @@ val default_settings : settings
 (** x86-64, the Linux calling convention, no include path. *)
 
 val settings : t -> settings
+(** The settings of the workspace root's own project, over the base. It is
+    what a caller asks when it is not looking at one document; a check uses
+    the project above the document it is checking. *)
 
 val set_settings : t -> settings -> unit
-(** [set_settings t settings] is the settings every later check runs under.
-    A settings change forgets the stored analyses, as [set_root] does: the
-    architecture and the include paths are part of what an analysis says, and
-    neither is part of the version-and-digest key it is found by. *)
+(** [set_settings t settings] is the base every later check starts from: the
+    client's own choice, which a project file overrides. A settings change
+    forgets the stored analyses, as [set_root] does: the architecture and the
+    include paths are part of what an analysis says, and neither is part of
+    the version-and-digest key it is found by. *)
 
 val project : t -> Project.loaded option
-(** The project file read last, when one was read. *)
+(** The project file above the workspace root, when one was found. *)
 
 val context_entry : t -> string option
 (** The entry the client chose for the context rule, which replaces the
@@ -41,18 +50,21 @@ val set_context_entry : t -> string option -> unit
     [None]. *)
 
 val project_diagnostics : t -> Jide_lang.Diagnostic.t list
-(** The problems the project file has, with the spans [Project.diagnostics]
-    gives them. Empty when the file is fine or absent. *)
+(** The problems the workspace root's project file has, with the spans
+    [Project.diagnostics] gives them. Empty when the file is fine or absent. *)
 
 type checker =
+  context:string list ->
   arch:Jide_jasmin.Adapter.arch ->
   call_conv:Jide_jasmin.Adapter.call_conv ->
   file:string ->
   text:string ->
   idirs:(string * string) list ->
   Jide_jasmin.Adapter.check_result
-(** The check the engine runs on a text. Only a test replaces it: the server
-    takes the adapter's. *)
+(** The check the engine runs on a text, in the context the stage below works
+    out: the files the compiler enters before the document, outermost first,
+    with the empty list for a file checked on its own. Only a test replaces
+    it: the server takes the adapter's. *)
 
 type context_stage =
   entries:string list ->
@@ -69,13 +81,18 @@ val create : ?check:checker -> ?context:context_stage -> unit -> t
     [Jide_jasmin.Adapter.check] and [context] to [Context.of_file]. *)
 
 val set_root : t -> string option -> unit
-(** [set_root t root] records the workspace root and reads
-    [Project.file_name] inside it. The architecture, the calling convention
-    and the include paths then come from that file where it sets them and
-    from the defaults where it does not, and a value the adapter does not
-    know is reported as a problem rather than reaching the library. [None]
-    means the client named no root: the defaults apply, no file is read, and
-    [resolve] refuses every path until a root is recorded. *)
+(** [set_root t root] records the workspace root and reads the project file at
+    it or above it, so that [project] and [project_diagnostics] report it.
+    [None] means the client named no root: no project file is read here, and
+    every document falls back on [settings] and the defaults; [resolve]
+    refuses every path until a root is recorded.
+
+    Every check finds its own document's project by walking up from the
+    document, whether or not a root was named: a file under a
+    [jasmin.project] is analysed under it. The architecture, the calling
+    convention and the include paths come from that file where it sets them
+    and from the defaults where it does not, and a value the adapter does not
+    know is reported as a problem rather than reaching the library. *)
 
 val root : t -> string option
 (** The root [set_root] recorded, unchanged. *)
@@ -133,6 +150,25 @@ val resolve : t -> string -> (string, string) result
     apply. Every path is refused when no root is recorded, and when the
     recorded root is not absolute. *)
 
+val read_file : t -> string -> string option
+(** [read_file t path] is the text of [path] as a reader of the workspace
+    finds it: the editor's buffer when the file is open, the disk otherwise,
+    and [None] when neither has it. An answer about a name that comes through
+    a [require] is read from the same text the check was given, so a buffer
+    the client has not saved is what the answer describes. *)
+
+val resolution : t -> uri:string -> Resolve.t option
+(** [resolution t ~uri] is the resolution of the open document [uri]: its own
+    file and every file it requires, each parsed and walked, with what every
+    name in them stands for. It is what the four navigation answers read, and
+    it is kept until something it was built from changes — a document
+    opening, changing or closing, the settings, the root or the context entry
+    — so asking twice does not parse the project twice.
+
+    [None] means no such document is open, or it is open under a scheme that
+    names no file, in which case there is nothing to read a [require]
+    relative to and the navigation answers about it are the empty answer. *)
+
 val max_bytes : int
 (** The largest text that is analysed: 8 MiB. A larger one is not parsed and
     gets one diagnostic that says so. *)
@@ -159,6 +195,27 @@ type snapshot = {
     {!Complete.signature_help} take, so a caller reads this and answers
     without touching the compiler, the parser or a file. *)
 
+type required = {
+  uri : string;
+      (** The uri the file is named by: the uri of the open document that
+          holds it when it is open, so a client that has it open publishes
+          against the text it shows, and a [file] uri made of its path
+          otherwise. A path the check reported relative to the document's own
+          is resolved against that document first, so the two spellings of one
+          file are one uri. *)
+  text : string;
+      (** The bytes [diagnostics] index: the ones the check read, which are the
+          file's on disk. The line index a caller publishes with is built from
+          this text, never from a buffer that may have changed since. *)
+  diagnostics : Jide_lang.Diagnostic.t list;
+      (** What the check reported in the file itself, at the place it reported
+          it: errors before warnings, then in source order. *)
+}
+(** A file reached through a [require] that holds an error, and that error.
+    The caller publishes each diagnostic against {!required.uri} with the
+    range {!required.text} gives it, which is where the compiler prints it,
+    rather than against the document the check was asked about. *)
+
 type analysis = {
   uri : string;  (** the name the document was opened with *)
   version : int;  (** the client's version of the text analysed *)
@@ -168,7 +225,9 @@ type analysis = {
   snapshot : snapshot;
       (** the index, the resolver and the typed facts built from the text
           analysed, kept so that a later request reads them instead of
-          building them again *)
+          building them again. The facts of the check are its [facts] and
+          nothing else holds a second copy of them, so hover and the other
+          navigation answers read the one the text was checked with *)
   context : Context.t;
       (** The entry this file is checked in the context of, worked out from
           the project and the [require] lines of the files on disk or in an
@@ -177,7 +236,12 @@ type analysis = {
   diagnostics : Jide_lang.Diagnostic.t list;
       (** Spans index the document's own text, so a reader never has to know
           about the byte-order mark. Errors come before warnings, then in
-          source order. *)
+          source order. A diagnostic of a file the document requires is not
+          here: that file and its diagnostics are in {!analysis.required}. *)
+  required : required list;
+      (** The files the document requires that hold an error, each with the
+          uri it is published against. Empty when every file it reads is
+          fine. *)
 }
 
 val check : t -> uri:string -> analysis option
@@ -246,4 +310,6 @@ val diagnostics_of_check :
     warnings that belong to [file] become diagnostics, errors come before
     warnings and each group is in source order. [text] is the analysed text
     and [bom] the bytes removed from the front of the document, which the
-    compiler never saw; a default of 0 shifts nothing. *)
+    compiler never saw; a default of 0 shifts nothing. A diagnostic of a file
+    reached through a [require] is not one of these: {!analysis.required}
+    names its file and carries it. *)

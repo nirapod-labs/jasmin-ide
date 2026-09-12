@@ -1,3 +1,10 @@
+(* The engine: open documents, and the analysis of each one.
+
+   The project file is found by walking up from the directory of the file
+   being analysed (design note, section 3), so two documents in one workspace
+   may be under two different projects, and a document under neither is
+   analysed with the defaults. *)
+
 type settings = {
   arch : Jide_jasmin.Adapter.arch;
   call_conv : Jide_jasmin.Adapter.call_conv;
@@ -5,6 +12,7 @@ type settings = {
 }
 
 type checker =
+  context:string list ->
   arch:Jide_jasmin.Adapter.arch ->
   call_conv:Jide_jasmin.Adapter.call_conv ->
   file:string ->
@@ -26,11 +34,18 @@ type context_stage =
    tree, the resolver over that index and the files it requires, and the typed
    facts the check left. These are the three a completion or a signature help
    reads, so they are kept beside the diagnostics rather than rebuilt when a
-   request arrives. *)
+   request arrives. The typed facts live here and nowhere else: the check puts
+   them in this one value, and the navigation answers read them from it. *)
 type snapshot = {
   index : Index.t;
   resolve : Resolve.t;
   facts : Jide_jasmin.Facts.t;
+}
+
+type required = {
+  uri : string;
+  text : string;
+  diagnostics : Jide_lang.Diagnostic.t list;
 }
 
 type analysis = {
@@ -40,16 +55,30 @@ type analysis = {
   text : string;
   bom : int;
   snapshot : snapshot;
+      (* The compiler's signature, kind and annotations are its [facts], so the
+         navigation answers read [snapshot.facts] and there is one copy of them
+         to keep in step with the text. *)
   context : Context.t;
   diagnostics : Jide_lang.Diagnostic.t list;
+  required : required list;
 }
 
 type t = {
   documents : (string, Document.t) Hashtbl.t;
   analyses : (string, analysis) Hashtbl.t;
+  resolutions : (string, Resolve.t) Hashtbl.t;
+      (* The resolution of an entry file, found by that file's normalised
+         path. A resolution is what the navigation answers read, and building
+         one parses the entry and every file it requires, so it is kept until
+         something it was built from changes: a document opening, changing or
+         closing, the settings, the root or the context entry. A [Resolve.t]
+         is kept rather than a [Locate.t] because [Locate] reads [Engine] and
+         not the other way round; wrapping one costs a table of the typed
+         facts, and no parse. *)
   mutable root : string option;
-  mutable settings : settings;
+  mutable base : settings;
   mutable project : Project.loaded option;
+  projects : (string, Project.loaded) Hashtbl.t;
   mutable context_entry : string option;
   mutable entries : string list option;
   check : checker;
@@ -66,16 +95,18 @@ let default_settings =
     idirs = [];
   }
 
-let adapter_check ~arch ~call_conv ~file ~text ~idirs =
-  Jide_jasmin.Adapter.check arch call_conv ~file ~text ~idirs
+let adapter_check ~context ~arch ~call_conv ~file ~text ~idirs =
+  Jide_jasmin.Adapter.check ~context arch call_conv ~file ~text ~idirs
 
 let create ?(check = adapter_check) ?(context = Context.of_file) () =
   {
     documents = Hashtbl.create 16;
     analyses = Hashtbl.create 16;
+    resolutions = Hashtbl.create 16;
     root = None;
-    settings = default_settings;
+    base = default_settings;
     project = None;
+    projects = Hashtbl.create 16;
     context_entry = None;
     entries = None;
     check;
@@ -85,13 +116,63 @@ let create ?(check = adapter_check) ?(context = Context.of_file) () =
 
 (* The settings and the context both change what an analysis says, so an
    analysis made before them is not reused. The key a document is found by is
-   its version and digest, which know nothing about either. *)
+   its version and digest, which know nothing about either.
+
+   A resolution is built from the same two, and from the text of every file
+   it reads, so it is dropped with them. *)
+let forget_resolutions t = Hashtbl.reset t.resolutions
 let forget_analyses t = Hashtbl.reset t.analyses
-let settings t = t.settings
+
+(* The project file fills what it sets and leaves the base in place. A value
+   the adapter does not know never becomes a setting: [Project] stores the
+   validated ones only and reports the rest. A file that names no include path
+   keeps the base's list, so a setting that names one is not lost when a
+   project file happens to name none. *)
+let settings_of_project ~base (loaded : Project.loaded) =
+  let project = loaded.Project.project in
+  {
+    arch = Option.value ~default:base.arch project.Project.arch;
+    call_conv = Option.value ~default:base.call_conv project.Project.call_conv;
+    idirs = (if project.Project.idirs = [] then base.idirs else project.idirs);
+  }
+
+(* The project a directory is under: the first [jasmin.project] at it or above
+   it, read once per directory, because a check that walked the filesystem for
+   every document would ask the same questions again for every document of one
+   directory. *)
+let project_above t directory =
+  match Hashtbl.find_opt t.projects directory with
+  | Some loaded -> loaded
+  | None ->
+      let loaded = Project.load_above directory in
+      Hashtbl.replace t.projects directory loaded;
+      loaded
+
+(* The project a document is analysed under: the nearest file above the
+   directory the document is in. A document with nothing above it is the
+   ordinary case, and no diagnostic is made for it. *)
+let project_of t (document : Document.t) =
+  match Document.path document with
+  | None -> Option.value ~default:Project.absent t.project
+  | Some path -> project_above t (Filename.dirname path)
+
+(* The settings one document is checked under: the base first, then the
+   nearest project file above the document, which is the order the design's
+   section 7 gives for the two sources this module knows about. *)
+let settings_for t (document : Document.t) =
+  settings_of_project ~base:t.base (project_of t document)
+
+(* The settings a document with the root's own project above it would get, so
+   a caller that is not looking at one document may ask what the workspace is
+   set up as. *)
+let settings t =
+  settings_of_project ~base:t.base
+    (Option.value ~default:Project.absent t.project)
 
 let set_settings t settings =
-  if t.settings <> settings then (
-    t.settings <- settings;
+  if t.base <> settings then (
+    t.base <- settings;
+    forget_resolutions t;
     forget_analyses t)
 
 let project t = t.project
@@ -100,43 +181,34 @@ let context_entry t = t.context_entry
 let set_context_entry t entry =
   if t.context_entry <> entry then (
     t.context_entry <- entry;
+    forget_resolutions t;
     forget_analyses t)
+
+(* The project file a diagnostic belongs to, which is the file's own path when
+   one was read and the bare name otherwise. *)
+let uri_of_project (loaded : Project.loaded) =
+  match loaded.Project.path with
+  | Some path -> Jide_lang.Uri.to_string (Jide_lang.Uri.of_path path)
+  | None -> Project.file_name
 
 let project_diagnostics t =
   match t.project with
   | None -> []
-  | Some loaded ->
-      let uri =
-        match loaded.Project.path with
-        | Some path -> Jide_lang.Uri.to_string (Jide_lang.Uri.of_path path)
-        | None -> Project.file_name
-      in
-      Project.diagnostics ~uri loaded
-
-(* The project file fills what it sets and leaves the defaults in place. A
-   value the adapter does not know never becomes a setting: [Project] stores
-   the validated ones only and reports the rest. *)
-let settings_of_project (loaded : Project.loaded) =
-  let project = loaded.Project.project in
-  {
-    arch = Option.value ~default:default_settings.arch project.Project.arch;
-    call_conv =
-      Option.value ~default:default_settings.call_conv project.Project.call_conv;
-    idirs = project.Project.idirs;
-  }
+  | Some loaded -> Project.diagnostics ~uri:(uri_of_project loaded) loaded
 
 let set_root t root =
   t.root <- root;
   t.entries <- None;
+  Hashtbl.reset t.projects;
+  forget_resolutions t;
   forget_analyses t;
   match root with
-  | None ->
-      t.project <- None;
-      t.settings <- default_settings
+  | None -> t.project <- None
   | Some directory ->
-      let loaded = Project.load (Filename.concat directory Project.file_name) in
-      t.project <- Some loaded;
-      t.settings <- settings_of_project loaded
+      (* The root's own project, which is what [project] and
+         [project_diagnostics] report. It is found by the same walk, so a root
+         that holds no file but sits under one that does is under it. *)
+      t.project <- Some (project_above t directory)
 
 let root t = t.root
 
@@ -217,17 +289,26 @@ let key_of uri =
   | Some path -> Jide_lang.Uri.to_string (Jide_lang.Uri.of_path path)
   | None -> Jide_lang.Uri.to_string parsed
 
+(* A resolution reads the text of every file a document requires, and its
+   entry is read from that document's buffer, so a document opening, changing
+   or closing can change what a resolution would say. The whole cache goes:
+   an entry a change does not touch still required files that may have moved,
+   and a resolution is cheap next to being wrong. *)
 let open_document t ~uri ~version ~text =
+  Hashtbl.reset t.resolutions;
   Hashtbl.replace t.documents (key_of uri) (Document.create ~uri ~version ~text)
 
 let change_document t ~uri ~version ~text =
   match Hashtbl.find_opt t.documents (key_of uri) with
   | Some document ->
+      Hashtbl.reset t.resolutions;
       Hashtbl.replace t.documents (key_of uri)
         (Document.with_text document ~version text)
   | None -> ()
 
-let close_document t ~uri = Hashtbl.remove t.documents (key_of uri)
+let close_document t ~uri =
+  Hashtbl.reset t.resolutions;
+  Hashtbl.remove t.documents (key_of uri)
 
 let document t ~uri =
   match Hashtbl.find_opt t.documents (key_of uri) with
@@ -379,16 +460,55 @@ let diagnostics_of_check ?(bom = 0) ~file ~text
   in
   List.stable_sort compare_diagnostics diagnostics
 
+(* The uri a required file is published against. The check prints the path the
+   [require] resolved to, which is absolute when the document's own path is;
+   one printed relative to a relative document is resolved against that
+   document, which is the directory the require read it in. An open document's
+   own spelling wins over the path's, so a client that holds the file sees the
+   diagnostics on the text it shows. *)
+let required_uri t ~(document : Document.t) (file : string) =
+  let path =
+    if Filename.is_relative file then
+      match Document.path document with
+      | Some base when not (Filename.is_relative base) ->
+          Filename.concat (Filename.dirname base) file
+      | _ -> file
+    else file
+  in
+  let uri =
+    Jide_lang.Uri.to_string (Jide_lang.Uri.of_path (Index.normalise path))
+  in
+  match Hashtbl.find_opt t.documents (key_of uri) with
+  | Some open_document -> Document.uri open_document
+  | None -> uri
+
+(* The files the check reached through a [require] that hold an error, each
+   under the uri it is published by. The diagnostics are sorted as the
+   document's are, so a caller publishes one file's set in source order. *)
+let required_of_check t ~(document : Document.t)
+    (result : Jide_jasmin.Adapter.check_result) =
+  List.map
+    (fun (entry : Jide_jasmin.Adapter.required) ->
+      {
+        uri = required_uri t ~document entry.Jide_jasmin.Adapter.file;
+        text = entry.Jide_jasmin.Adapter.text;
+        diagnostics =
+          List.stable_sort compare_diagnostics
+            entry.Jide_jasmin.Adapter.diagnostics;
+      })
+    result.Jide_jasmin.Adapter.required
+
 (* The entry set the context rule uses: the client's own choice when it made
-   one, the project's list otherwise. *)
-let entries t =
+   one, and the entry list of the project above the document otherwise. The
+   rule itself is [Context.of_file]'s; this only says where its entries come
+   from. *)
+let entries t (document : Document.t) =
   match t.context_entry with
   | Some entry -> [ entry ]
   | None -> (
-      match t.project with
-      | Some loaded when loaded.Project.project.Project.entries <> [] ->
-          loaded.Project.project.Project.entries
-      | _ -> (
+      let project = (project_of t document).Project.project in
+      match project.Project.entries with
+      | [] -> (
           match t.root with
           | None -> []
           | Some directory -> (
@@ -397,7 +517,8 @@ let entries t =
               | None ->
                   let entries = Context.entries_of_directory directory in
                   t.entries <- Some entries;
-                  entries)))
+                  entries))
+      | entries -> entries)
 
 (* The text of a file: the editor's buffer when the file is open, the disk
    otherwise, which is what the compiler's own reader would find. The disk
@@ -413,6 +534,35 @@ let read_file t path =
       | Ok text -> Some text
       | Error _ -> None)
 
+(* The resolution of a document: the entry file and every file it requires,
+   each parsed and walked, with what every name in them stands for. It is what
+   the four navigation answers read, and building it parses the whole project
+   the document touches, so it is kept until something it was built from
+   changes: [open_document], [change_document], [close_document],
+   [set_settings], [set_context_entry] and [set_root] all drop the cache.
+
+   The entry is the document's own path, because a byte a caller hands in is a
+   byte of that text. A document that is not a file has no path, and nothing
+   to read a [require] relative to, so it has no resolution and the navigation
+   answers about it are the empty answer. *)
+let resolution t ~uri =
+  match Hashtbl.find_opt t.documents (key_of uri) with
+  | None -> None
+  | Some document -> (
+      match Document.path document with
+      | None -> None
+      | Some path -> (
+          let file = Index.normalise path in
+          match Hashtbl.find_opt t.resolutions file with
+          | Some resolved -> Some resolved
+          | None ->
+              let resolved =
+                Resolve.of_text ~idirs:(settings_for t document).idirs
+                  ~read:(read_file t) ~file (Document.text document)
+              in
+              Hashtbl.replace t.resolutions file resolved;
+              Some resolved))
+
 (* The context a document is checked in, or the file alone when the stage that
    works it out fails: an analysis still has to have one. *)
 let alone_context (document : Document.t) =
@@ -424,8 +574,8 @@ let context_of t (document : Document.t) =
   match Document.path document with
   | None -> alone_context document
   | Some path ->
-      t.context_stage ~entries:(entries t) ~idirs:t.settings.idirs
-        ~read:(read_file t) path
+      t.context_stage ~entries:(entries t document)
+        ~idirs:(settings_for t document).idirs ~read:(read_file t) path
 
 (* The snapshot of a text that yielded nothing to index. It stands for
    "analysed, and nothing came of it", which is what a document over
@@ -461,13 +611,16 @@ let blank_snapshot_for ~(file : string) =
    This is the only place the index and the resolver are built. A request
    reads them back through {!snapshot} and never causes them to be built
    again. The resolver reads the files a [require] names through the engine's
-   reader, so an open buffer comes before the disk, as it does for a check. *)
-let snapshot_of t ~(file : string) ~(text : string)
+   reader, so an open buffer comes before the disk, as it does for a check,
+   and it resolves under the include paths the document's own project gives.
+
+   A resolver that raises leaves the empty index of {!blank_snapshot_for}, and
+   the facts go in all the same: they came from the check, which is a different
+   stage, and the value holds one copy of them either way. *)
+let snapshot_of t ~idirs ~(file : string) ~(text : string)
     ~(facts : Jide_jasmin.Facts.t) =
   let build () =
-    let resolve =
-      Resolve.of_text ~idirs:t.settings.idirs ~read:(read_file t) ~file text
-    in
+    let resolve = Resolve.of_text ~idirs ~read:(read_file t) ~file text in
     let index =
       match Resolve.file resolve file with
       | Some index -> index
@@ -477,7 +630,7 @@ let snapshot_of t ~(file : string) ~(text : string)
   in
   match build () with
   | snapshot -> snapshot
-  | exception _ -> blank_snapshot_for ~file
+  | exception _ -> { (blank_snapshot_for ~file) with facts }
 
 (* The whole analysis of one document. Nothing here raises: the check, the
    index and the resolver, and the context stage all run under a catch-all, so
@@ -489,6 +642,7 @@ let analyse t ~uri (document : Document.t) key =
   let file =
     match Document.path document with Some path -> path | None -> uri
   in
+  let settings = settings_for t document in
   let failed exn =
     {
       uri = Document.uri document;
@@ -502,29 +656,40 @@ let analyse t ~uri (document : Document.t) key =
         [
           internal_diagnostic ("the analysis raised: " ^ Printexc.to_string exn);
         ];
+      required = [];
     }
   in
   match
-    let diagnostics, facts =
+    (* The context comes first: the check that follows is run in it, which is
+       the rule of design 8.4. The files before the document are the chain
+       without its last element, which is the document itself. *)
+    let context = context_of t document in
+    let in_context =
+      match List.rev (Context.chain context) with
+      | _document :: files -> List.rev files
+      | [] -> []
+    in
+    let diagnostics, facts, required =
       if String.length text > max_bytes then
-        ([ size_diagnostic ], Jide_jasmin.Facts.empty)
+        ([ size_diagnostic ], Jide_jasmin.Facts.empty, [])
       else
         match
-          t.check ~arch:t.settings.arch ~call_conv:t.settings.call_conv ~file
-            ~text:body ~idirs:t.settings.idirs
+          t.check ~context:in_context ~arch:settings.arch
+            ~call_conv:settings.call_conv ~file ~text:body ~idirs:settings.idirs
         with
         | result ->
             ( diagnostics_of_check ~bom ~file ~text:body result,
-              result.Jide_jasmin.Adapter.facts )
+              result.Jide_jasmin.Adapter.facts,
+              required_of_check t ~document result )
         | exception exn ->
             ( [
                 internal_diagnostic
                   ("the analysis raised: " ^ Printexc.to_string exn);
               ],
-              Jide_jasmin.Facts.empty )
+              Jide_jasmin.Facts.empty,
+              [] )
     in
-    let snapshot = snapshot_of t ~file ~text ~facts in
-    let context = context_of t document in
+    let snapshot = snapshot_of t ~idirs:settings.idirs ~file ~text ~facts in
     {
       uri = Document.uri document;
       version = Document.version document;
@@ -534,6 +699,7 @@ let analyse t ~uri (document : Document.t) key =
       snapshot;
       context;
       diagnostics;
+      required;
     }
   with
   | analysis -> analysis

@@ -256,14 +256,20 @@ let engine_with files test =
       in
       test engine directory path open_and_check)
 
+(* The project file the engine walks up to. The name comes from the interface,
+   so a test cannot go on passing against a file the parser stopped reading. *)
+let project_with_entry =
+  (Jide_engine.Project.file_name, "[jasmin]\nentry = entry.jazz\n")
+
 let test_the_engine_reads_the_project_entries () =
-  engine_with
-    (three_files
-    @ [
-        ( "jasmin-project.json",
-          "{\"version\": 1, \"entries\": [\"entry.jazz\"]}" );
-      ])
-    (fun _engine _directory path open_and_check ->
+  engine_with (three_files @ [ project_with_entry ])
+    (fun engine _directory path open_and_check ->
+      check "engine: the project file is found"
+        (match Jide_engine.Engine.project engine with
+        | Some loaded ->
+            loaded.Jide_engine.Project.path
+            = Some (path Jide_engine.Project.file_name)
+        | None -> false);
       let lib = open_and_check "lib.jinc" lib_text in
       check "engine: the project's entry"
         (match lib with
@@ -276,7 +282,7 @@ let test_the_engine_reads_the_project_entries () =
         | Some context -> not (Jide_engine.Context.is_alone context)
         | None -> false);
       check "engine: an unanalysed document has no context"
-        (Jide_engine.Engine.context _engine ~uri:(uri_of (path "absent.jinc"))
+        (Jide_engine.Engine.context engine ~uri:(uri_of (path "absent.jinc"))
         = None))
 
 let test_the_client_override_wins () =
@@ -285,8 +291,7 @@ let test_the_client_override_wins () =
     @ [
         ( "other.jazz",
           "require \"lib.jinc\"\nfn other() -> reg u32 { return 1; }\n" );
-        ( "jasmin-project.json",
-          "{\"version\": 1, \"entries\": [\"entry.jazz\"]}" );
+        project_with_entry;
       ])
     (fun engine _directory path open_and_check ->
       Jide_engine.Engine.set_context_entry engine (Some (path "other.jazz"));
