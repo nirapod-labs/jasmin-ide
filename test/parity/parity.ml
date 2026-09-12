@@ -277,3 +277,61 @@ let location_line line =
               | None -> None)
           | _ -> None)
 
+let compiler_kind message =
+  let candidates =
+    List.concat_map
+      (fun kind -> [ "internal " ^ kind ^ " error"; kind ^ " error" ])
+      [ "parse"; "typing"; "annotation"; "pretyping"; "compilation" ]
+    @ [ "typing"; "unexpected annotation" ]
+  in
+  match
+    List.find_opt (fun prefix -> starts_with ~prefix message) candidates
+  with
+  | Some kind -> kind
+  | None -> ""
+
+(* The first error of a compiler log, with every occurrence of the corpus
+   root removed from its message so both sides name a file alike. *)
+let compiler_first ~root log =
+  let found = ref None and other = ref None and group = ref None in
+  let close () =
+    match !group with
+    | None -> ()
+    | Some (l, c, message) ->
+        group := None;
+        if
+          !found = None
+          && (not (starts_with ~prefix:"warning" message))
+          && not (is_blank message)
+        then
+          let message =
+            replace_all (collapse message) ~sub:(root ^ "/") ~by:""
+          in
+          let kind = compiler_kind message in
+          found :=
+            Some { line = l; column = c; kind; message = strip_kind message }
+  in
+  List.iter
+    (fun line ->
+      match location_line line with
+      | Some (l, c, text) ->
+          close ();
+          let rec trim t =
+            if t <> "" && (t.[0] = ' ' || t.[0] = '\t') then trim (drop 1 t)
+            else t
+          in
+          group := Some (l, c, trim text)
+      | None -> (
+          match !group with
+          | Some (l, c, message) ->
+              if is_blank line then close ()
+              else group := Some (l, c, message ^ " " ^ line)
+          | None ->
+              if !other = None && not (is_blank line) then other := Some line))
+    (String.split_on_char '\n' log);
+  close ();
+  match (!found, !other) with
+  | Some first, _ -> first
+  | None, Some text -> { nothing with message = collapse text }
+  | None, None -> nothing
+
