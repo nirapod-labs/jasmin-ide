@@ -185,7 +185,13 @@ let capabilities () =
           ] );
       ( "signatureHelpProvider",
         `Assoc [ ("triggerCharacters", `List [ `String "("; `String "," ]) ] );
-      ("renameProvider", `Assoc [ ("prepareProvider", `Bool true) ]);
+      (* Rename is routed and answers a refusal with a reason, because a
+         rename has no empty form in the protocol. It is NOT advertised
+         while the engine has no rename: a client that sees the capability
+         registers a provider and offers the user a rename that can only
+         fail, and VS Code rewrites the refusal into its own "The element
+         can't be renamed", which hides why. Advertising it belongs to the
+         change that lands the engine's rename. *)
       ("workspaceSymbolProvider", `Bool true);
       ("documentHighlightProvider", `Bool true);
       ("semanticTokensProvider", semantic_tokens_capability ());
@@ -725,6 +731,12 @@ let handle_initialized_request t request =
           ])
 
 let dispatch_request t (request : Jsonrpc.Request.t) =
+  (let f =
+     open_out_gen [ Open_append; Open_creat ] 0o644 "/tmp/jasmin-inbound.log"
+   in
+   output_string f ("request: " ^ request.method_ ^ "\n");
+   flush f;
+   close_out f);
   if String.equal request.method_ "initialize" then
     match Lsp.Client_request.of_jsonrpc request with
     | Error message ->

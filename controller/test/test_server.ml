@@ -136,7 +136,9 @@ let expected_capabilities () =
           ] );
       ( "signatureHelpProvider",
         `Assoc [ ("triggerCharacters", `List [ `String "("; `String "," ]) ] );
-      ("renameProvider", `Assoc [ ("prepareProvider", `Bool true) ]);
+      (* No renameProvider: the engine has no rename, so advertising it
+         would offer the user a rename that can only fail. It returns with
+         the engine's rename. *)
       ("workspaceSymbolProvider", `Bool true);
       ("documentHighlightProvider", `Bool true);
       ( "semanticTokensProvider",
