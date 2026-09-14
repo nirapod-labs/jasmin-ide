@@ -167,3 +167,82 @@ describe("control keywords", () => {
   });
 });
 
+describe("annotations", () => {
+  test("a bracketed annotation marks its interior", () => {
+    const source = ["#[mmx]", "type lane = u32;"].join("\n");
+    assertScope(source, "#[", attributeScope);
+    assertScope(source, "#[", "punctuation.definition.annotation.begin.jasmin.crypto");
+    assertScope(source, "mmx", attributeScope);
+    assertScope(source, "]", attributeScope);
+    assertScope(source, "]", "punctuation.definition.annotation.end.jasmin.crypto");
+    assertScope(source, "type", declarationScope);
+    refuteScope(source, "type", attributeScope);
+    assertNoOpenScopes(source);
+  });
+
+  test("a multi-line sct string stays inside the annotation", () => {
+    const source = [
+      '#[sct="',
+      "  {",
+      "    state -> state",
+      "  }",
+      '  "]',
+      "fn identity(reg u64 state) -> reg u64 {",
+      "  return state;",
+      "}"
+    ].join("\n");
+
+    assertScope(source, "#[", attributeScope);
+    assertScope(source, "#[", "punctuation.definition.annotation.begin.jasmin.crypto");
+
+    for (const lineIndex of [1, 2, 3, 4]) {
+      const tokens = tokensOnLine(source, lineIndex);
+      assert.ok(tokens.length > 0, `Expected tokens on line ${lineIndex + 1}.`);
+      for (const token of tokens) {
+        assert.ok(
+          token.scopes.includes(attributeScope),
+          `Expected ${JSON.stringify(token.text)} on line ${lineIndex + 1} to be inside the annotation.`
+        );
+      }
+    }
+
+    assertScope(source, "    state -> state", attributeScope);
+    assertScope(source, "]", attributeScope);
+    assertScope(source, "]", "punctuation.definition.annotation.end.jasmin.crypto");
+    assertScope(source, "fn", controlScope);
+    refuteScope(source, "fn", attributeScope);
+    assertScope(source, "identity", "entity.name.function.jasmin.crypto");
+    assertNoOpenScopes(source);
+  });
+});
+
+describe("intrinsics", () => {
+  test("an intrinsic carries the intrinsic scope", () => {
+    assertScope("word = #set0();", "#set0", intrinsicScope);
+  });
+
+  test("alignment intrinsics carry the alignment scope", () => {
+    const source = ["word = [#aligned :u32 source];", "#unaligned"].join("\n");
+    assertScope(source, "#aligned", "storage.modifier.alignment.jasmin.crypto");
+    assertScope(source, "#unaligned", "storage.modifier.alignment.jasmin.crypto");
+  });
+
+  test("a suffix stays part of the intrinsic name", () => {
+    const source = "#ADCX_32 #BLENDV_16u8 #ADD_64";
+    assertScope(source, "#ADCX_32", intrinsicScope);
+    assertScope(source, "#BLENDV_16u8", intrinsicScope);
+    assertScope(source, "#ADD_64", intrinsicScope);
+    assert.equal(tokensWithText(source, "#ADCX_32").length, 1);
+  });
+});
+
+describe("numbers", () => {
+  test("numbers with underscores are single numeric tokens", () => {
+    const source = "values = [0x0000_0000, 0b0101, 0o07, 1_024, 42, 0xFF_FF];";
+    for (const literal of ["0x0000_0000", "0b0101", "0o07", "1_024", "42", "0xFF_FF"]) {
+      assert.equal(tokensWithText(source, literal).length, 1, `Expected one token for ${literal}.`);
+      assertScope(source, literal, numericScope);
+    }
+  });
+});
+
