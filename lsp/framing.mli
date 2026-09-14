@@ -27,7 +27,14 @@ type read_result = (packet, string) result option
     it and carries on, but a poisoned stream ends on the next read. *)
 
 val read : t -> read_result
-(** Read one packet, waiting for as long as the peer takes to finish it. *)
+(** Read one packet, waiting for as long as the peer takes to finish it.
+
+    A [params] member whose value is JSON null is read as an absent member, so
+    a request or notification that writes ["params": null] means what the
+    protocol says it means: no parameters. JSON-RPC 2.0 allows the value and
+    LSP clients do send it, for [shutdown] and [exit] among others. Only null
+    is rewritten; a [params] of any other type is still refused, because a
+    frame whose member has the wrong type is malformed and is dropped. *)
 
 val wait : t -> timeout:float -> bool
 (** [wait t ~timeout] is [true] when a read has something to do: bytes are
