@@ -41,13 +41,105 @@ let run channels server =
   in
   loop ()
 
+(** The engine's completion kinds in the protocol layer's own vocabulary. The
+    two enumerations are separate on purpose: the engine names what a
+    candidate *is* in Jasmin, and the protocol names the icon a client shows,
+    so the mapping lives here rather than in either of them. *)
+let completion_kind_of (kind : Jide_engine.Complete.kind) :
+    Jide_engine.Types.completion_kind =
+  match kind with
+  | Jide_engine.Complete.Keyword -> Jide_engine.Types.Keyword
+  | Jide_engine.Complete.Function -> Jide_engine.Types.Function
+  | Jide_engine.Complete.Parameter | Jide_engine.Complete.Variable ->
+      Jide_engine.Types.Variable_
+  | Jide_engine.Complete.Global -> Jide_engine.Types.Field
+  | Jide_engine.Complete.Type_alias -> Jide_engine.Types.Type_parameter
+  | Jide_engine.Complete.Annotation_key -> Jide_engine.Types.Text
+
+(** One candidate, in the shape the protocol layer encodes. [detail] carries
+    the declaration's own source text, which is what the engine cut from the
+    file; nothing here invents text. *)
+let completion_item_of (item : Jide_engine.Complete.item) :
+    Jide_engine.Types.completion_item =
+  {
+    Jide_engine.Types.label = item.Jide_engine.Complete.label;
+    kind = completion_kind_of item.Jide_engine.Complete.kind;
+    detail = item.Jide_engine.Complete.detail;
+    documentation = None;
+    insert_text = None;
+    sort_text = None;
+  }
+
+(** The protocol's answer for one completion: the candidates and nothing
+    else, because the protocol replaces the word itself. *)
+let completion_of (completion : Jide_engine.Complete.completion) :
+    Jide_engine.Types.completion_item list =
+  List.map completion_item_of completion.Jide_engine.Complete.items
+
+(** One signature, in the shape the protocol layer encodes. *)
+let signature_of (signature : Jide_engine.Complete.signature) :
+    Jide_engine.Types.signature =
+  {
+    Jide_engine.Types.label = signature.Jide_engine.Complete.label;
+    documentation = None;
+    parameters =
+      List.map
+        (fun label -> { Jide_engine.Types.label; documentation = None })
+        signature.Jide_engine.Complete.parameters;
+  }
+
+(** The protocol's answer for one call: the one signature the engine has, and
+    the argument the offset is in. *)
+let signature_help_of (help : Jide_engine.Complete.signature) :
+    Jide_engine.Types.signature_help =
+  {
+    Jide_engine.Types.signatures = [ signature_of help ];
+    active_signature = 0;
+    active_parameter = help.Jide_engine.Complete.active;
+  }
+
 (** The protocol loop, which is the mode when the command line names no
     other. *)
 let serve () =
   let engine = Jide_engine.Engine.create () in
+  (* Completion and signature help answer from the snapshot the last check
+     left: {!Jide_engine.Engine.snapshot} reads what that check built and does
+     no work of its own, so neither request costs a parse, a type or a file
+     read, and both answer while the file is being edited. The other five
+     requests are still answered with the empty answer the protocol has for
+     each, and a rename, which has no empty answer, with a refusal. *)
+  let completion ~uri ~byte =
+    match Jide_engine.Engine.snapshot engine ~uri with
+    | Some snapshot ->
+        Some
+          (completion_of
+             (Jide_engine.Complete.completion ~index:snapshot.index
+                ~resolve:snapshot.resolve ~byte ()))
+    | None -> None
+  in
+  let signature_help ~uri ~byte =
+    match Jide_engine.Engine.snapshot engine ~uri with
+    | Some snapshot ->
+        Option.map signature_help_of
+          (Jide_engine.Complete.signature_help ~index:snapshot.index
+             ~resolve:snapshot.resolve ~facts:snapshot.facts ~byte ())
+    | None -> None
+  in
+  let features =
+    Jide_controller.Features.make ~completion ~signature_help
+      ~prepare_rename:(fun ~uri:_ ~byte:_ -> None)
+      ~rename:(fun ~uri:_ ~byte:_ ~new_name:_ -> None)
+      ~workspace_symbols:(fun ~query:_ -> None)
+      ~highlights:(fun ~uri:_ ~byte:_ -> None)
+      ~semantic_tokens:(fun ~uri:_ -> None)
+      ()
+  in
+  if not (Jide_controller.Features.available features) then
+    log "no engine for the editing requests: each answer is the empty one";
   let server =
-    Jide_controller.Server.create ?engine:(Some engine)
-      ?analysis:(Analysis.create engine) ~log ()
+    Jide_controller.Server.create ?engine:(Some engine) ~features
+      ?analysis:(Some (Analysis.create engine))
+      ~log ()
   in
   let channels = Jide_lsp.Framing.create ~input:stdin ~output:stdout in
   try run channels server with

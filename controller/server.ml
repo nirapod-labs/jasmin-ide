@@ -48,6 +48,7 @@ let engine_locate (engine : Jide_engine.Engine.t) : locate =
 
 type t = {
   engine : Jide_engine.Engine.t;
+  features : Features.t;
   log : string -> unit;
   analysis : analysis option;
   locate : locate;
@@ -64,8 +65,8 @@ let min_delay = 50
 let max_delay = 1000
 let clamp_delay delay = max min_delay (min max_delay delay)
 
-let create ~log ?engine ?analysis ?locate ?(delay = default_delay)
-    ?(now = fun () -> Unix.gettimeofday ()) () =
+let create ~log ?engine ?(features = Features.unavailable) ?analysis ?locate
+    ?(delay = default_delay) ?(now = fun () -> Unix.gettimeofday ()) () =
   let engine =
     match engine with
     | Some engine -> engine
@@ -73,6 +74,7 @@ let create ~log ?engine ?analysis ?locate ?(delay = default_delay)
   in
   {
     engine;
+    features;
     log;
     analysis;
     locate =
@@ -127,6 +129,7 @@ let error_code = function
   | `InternalError -> Jsonrpc.Response.Error.Code.InternalError
   | `ServerNotInitialized -> Jsonrpc.Response.Error.Code.ServerNotInitialized
   | `RequestCancelled -> Jsonrpc.Response.Error.Code.RequestCancelled
+  | `RequestFailed -> Jsonrpc.Response.Error.Code.RequestFailed
 
 let server_info () =
   `Assoc
@@ -134,11 +137,38 @@ let server_info () =
       ("name", `String Version.server_name); ("version", `String Version.version);
     ]
 
-(* The capabilities name every request the server answers and nothing else.
-   Each provider is a plain [true]: the protocol lets a server give an object
-   with options, and this one has no option to give — a definition is a
-   location, a hover is markdown, and neither has a registered kind or a
-   trigger character to declare. *)
+(* What this server answers, and nothing else: the four navigation requests
+   and the seven editing requests of [Features]. Each navigation provider is a
+   plain [true]: the protocol lets a server give an object with options, and
+   this one has no option to give — a definition is a location, a hover is
+   markdown, and neither has a registered kind or a trigger character to
+   declare. The seven editing requests are advertised with the shape each one
+   needs: completion triggers on [#] and [:] because a primitive and a
+   qualified name are written that way, signature help on [(] and [,] because
+   those open and separate a call's arguments, rename has a prepare step, and
+   semantic tokens need the legend the encoder numbers the tokens by. The
+   capabilities are written here rather than through the protocol package's
+   own types, so the JSON the client reads is this list and nothing else. *)
+let semantic_tokens_capability () =
+  `Assoc
+    [
+      ( "legend",
+        `Assoc
+          [
+            ( "tokenTypes",
+              `List
+                (List.map
+                   (fun name -> `String name)
+                   Json_conv.semantic_token_types) );
+            ( "tokenModifiers",
+              `List
+                (List.map
+                   (fun name -> `String name)
+                   Json_conv.semantic_token_modifiers) );
+          ] );
+      ("full", `Bool true);
+    ]
+
 let capabilities () =
   `Assoc
     [
@@ -147,6 +177,24 @@ let capabilities () =
       ("referencesProvider", `Bool true);
       ("hoverProvider", `Bool true);
       ("documentSymbolProvider", `Bool true);
+      ( "completionProvider",
+        `Assoc
+          [
+            ("triggerCharacters", `List [ `String "#"; `String ":" ]);
+            ("resolveProvider", `Bool false);
+          ] );
+      ( "signatureHelpProvider",
+        `Assoc [ ("triggerCharacters", `List [ `String "("; `String "," ]) ] );
+      (* Rename is routed and answers a refusal with a reason, because a
+         rename has no empty form in the protocol. It is NOT advertised
+         while the engine has no rename: a client that sees the capability
+         registers a provider and offers the user a rename that can only
+         fail, and VS Code rewrites the refusal into its own "The element
+         can't be renamed", which hides why. Advertising it belongs to the
+         change that lands the engine's rename. *)
+      ("workspaceSymbolProvider", `Bool true);
+      ("documentHighlightProvider", `Bool true);
+      ("semanticTokensProvider", semantic_tokens_capability ());
     ]
 
 let initialize_result () =
@@ -439,11 +487,193 @@ let handle_navigation t (request : Jsonrpc.Request.t) =
           Some (answer_navigation t request answer ~uri))
   | _ -> None
 
+(* The seven editing requests. Each one parses its parameters through the
+   protocol package, so a parameter object of the wrong shape is refused
+   before anything else happens; converts the client's position to a byte of
+   the open document; forces a check when the document's text is newer than
+   its last analysis, because an answer about text the client no longer has
+   is wrong whatever it says; and encodes the engine's answer.
+
+   An engine with nothing to say is answered with the empty answer the
+   protocol has for the request: [null] where the result may be null, an
+   empty list where it may be a list. That is not an error, and neither is a
+   document that was never opened: both mean the same thing to a client,
+   that there is nothing here. Rename has no empty answer, so a rename the
+   engine will not make is refused with RequestFailed and the engine's own
+   reason, never with an empty edit that would read as a rename that
+   succeeded and changed nothing. *)
+
+type editing_answer = Answer of Yojson.Safe.t | Refused of string
+
+let reply_editing (request : Jsonrpc.Request.t) = function
+  | Answer json -> reply_ok request.id json
+  | Refused message ->
+      reply_error request.id (error_code `RequestFailed) message
+
+let editing_method = function
+  | "textDocument/completion" | "textDocument/signatureHelp"
+  | "textDocument/prepareRename" | "textDocument/rename" | "workspace/symbol"
+  | "textDocument/documentHighlight" | "textDocument/semanticTokens/full" ->
+      true
+  | _ -> false
+
+let uri_of_text_document (text_document : Lsp.Types.TextDocumentIdentifier.t) =
+  normalize_uri (Lsp.Uri.to_string text_document.uri)
+
+(* One editing request about an open document: the packets that publish the
+   check it forced, then the one reply. A document the server does not hold
+   is not checked: there is nothing to check, and the answer is the empty
+   one. *)
+let editing_answer t (request : Jsonrpc.Request.t) ~feature ~uri ~empty answer =
+  match Jide_engine.Engine.document t.engine ~uri with
+  | None ->
+      t.log (feature ^ ": no open document " ^ uri ^ ", so the answer is empty");
+      [ reply_editing request empty ]
+  | Some document ->
+      (* The check has to run before the answer is computed, not merely be
+         concatenated in front of it: OCaml evaluates list elements right to
+         left, so [checks @ [ reply_editing request (answer document) ]]
+         would build the answer first and publish diagnostics for a text the
+         answer never saw. *)
+      let checks = ensure_checked t ~uri in
+      let reply = reply_editing request (answer document) in
+      checks @ [ reply ]
+
+(* The same, for the requests that name a position. The document's line
+   index clamps a position past the end of the file to the end of the file,
+   so only a position that cannot exist at all is refused. *)
+let editing_answer_at_position t (request : Jsonrpc.Request.t) ~feature ~uri
+    ~(position : Lsp.Types.Position.t) ~empty answer =
+  if position.line < 0 || position.character < 0 then
+    [
+      reply_error request.id
+        (error_code `InvalidParams)
+        "position.line and position.character must not be negative";
+    ]
+  else
+    editing_answer t request ~feature ~uri ~empty (fun document ->
+        let byte =
+          Jide_engine.Document.byte_of_position document
+            (Jide_lang.Position.make ~line:position.line
+               ~character:position.character)
+        in
+        answer document byte)
+
+let answer_completion t (request : Jsonrpc.Request.t)
+    (params : Lsp.Types.CompletionParams.t) =
+  let uri = uri_of_text_document params.textDocument in
+  editing_answer_at_position t request ~feature:"completion" ~uri
+    ~position:params.position ~empty:(Answer `Null) (fun _document byte ->
+      match Features.completion t.features ~uri ~byte with
+      | None ->
+          t.log
+            (Printf.sprintf "completion: no answer at %s byte %d (snapshot %s)"
+               uri byte
+               (match Jide_engine.Engine.snapshot t.engine ~uri with
+               | Some _ -> "present"
+               | None -> "absent"));
+          Answer `Null
+      | Some items -> Answer (Json_conv.completion_json items))
+
+let answer_signature_help t (request : Jsonrpc.Request.t)
+    (params : Lsp.Types.SignatureHelpParams.t) =
+  let uri = uri_of_text_document params.textDocument in
+  editing_answer_at_position t request ~feature:"signature help" ~uri
+    ~position:params.position ~empty:(Answer `Null) (fun _document byte ->
+      match Features.signature_help t.features ~uri ~byte with
+      | Some help when help.Jide_engine.Types.signatures <> [] ->
+          Answer (Json_conv.signature_help_json help)
+      | Some _ | None -> Answer `Null)
+
+let answer_prepare_rename t (request : Jsonrpc.Request.t)
+    (params : Lsp.Types.PrepareRenameParams.t) =
+  let uri = uri_of_text_document params.textDocument in
+  editing_answer_at_position t request ~feature:"prepare rename" ~uri
+    ~position:params.position ~empty:(Answer `Null) (fun document byte ->
+      match Features.prepare_rename t.features ~uri ~byte with
+      | Some span ->
+          Answer
+            (Json_conv.range_json (Jide_engine.Document.lines document) span)
+      | None -> Answer `Null)
+
+let is_blank = function ' ' | '\t' | '\n' | '\r' -> true | _ -> false
+
+let answer_rename t (request : Jsonrpc.Request.t)
+    (params : Lsp.Types.RenameParams.t) =
+  let uri = uri_of_text_document params.textDocument in
+  let new_name = params.newName in
+  if String.trim new_name = "" || String.exists is_blank new_name then
+    [
+      reply_error request.id
+        (error_code `InvalidParams)
+        "rename: newName must be one name, with nothing blank in it";
+    ]
+  else
+    editing_answer_at_position t request ~feature:"rename" ~uri
+      ~position:params.position
+      ~empty:(Refused ("rename: the document is not open: " ^ uri))
+      (fun _document byte ->
+        match Features.rename t.features ~uri ~byte ~new_name with
+        | None -> Refused "rename is unavailable: the engine has no rename"
+        | Some (Error message) -> Refused message
+        | Some (Ok []) -> Refused "rename: the engine named no edit to make"
+        | Some (Ok edits) -> Answer (Json_conv.workspace_edit_json edits))
+
+(* A workspace symbol answer is about every open document, so each one whose
+   text is newer than its analysis is checked first. *)
+let answer_workspace_symbol t (request : Jsonrpc.Request.t)
+    (params : Lsp.Types.WorkspaceSymbolParams.t) =
+  let checks =
+    List.concat_map
+      (fun document ->
+        ensure_checked t ~uri:(Jide_engine.Document.uri document))
+      (Jide_engine.Engine.documents t.engine)
+  in
+  let answer =
+    match Features.workspace_symbols t.features ~query:params.query with
+    | None -> `List []
+    | Some symbols -> Json_conv.symbols_json symbols
+  in
+  checks @ [ reply_ok request.id answer ]
+
+let answer_document_highlight t (request : Jsonrpc.Request.t)
+    (params : Lsp.Types.DocumentHighlightParams.t) =
+  let uri = uri_of_text_document params.textDocument in
+  editing_answer_at_position t request ~feature:"document highlight" ~uri
+    ~position:params.position
+    ~empty:(Answer (`List []))
+    (fun document byte ->
+      match Features.highlights t.features ~uri ~byte with
+      | None -> Answer (`List [])
+      | Some highlights ->
+          Answer
+            (Json_conv.highlights_json
+               (Jide_engine.Document.lines document)
+               highlights))
+
+let answer_semantic_tokens t (request : Jsonrpc.Request.t)
+    (params : Lsp.Types.SemanticTokensParams.t) =
+  let uri = uri_of_text_document params.textDocument in
+  editing_answer t request ~feature:"semantic tokens" ~uri ~empty:(Answer `Null)
+    (fun document ->
+      match Features.semantic_tokens t.features ~uri with
+      | None -> Answer `Null
+      | Some tokens ->
+          Answer
+            (Json_conv.semantic_tokens_json
+               (Jide_engine.Document.lines document)
+               tokens))
+
 let handle_initialized_request t request =
   match handle_navigation t request with
   | Some packets -> packets
   | None -> (
       match Lsp.Client_request.of_jsonrpc request with
+      | Error message when editing_method request.method_ ->
+          (* An editing request that this server serves, with parameters the
+             protocol package would not read: the method exists, so the
+             request is right and its parameters are not. *)
+          [ reply_error request.id (error_code `InvalidParams) message ]
       | Error message ->
           [ reply_error request.id (error_code `InvalidRequest) message ]
       | Ok (E (Lsp.Client_request.Initialize _)) ->
@@ -479,6 +709,20 @@ let handle_initialized_request t request =
               (error_code `MethodNotFound)
               ("unknown request: " ^ meth);
           ]
+      | Ok (E (Lsp.Client_request.TextDocumentCompletion params)) ->
+          answer_completion t request params
+      | Ok (E (Lsp.Client_request.SignatureHelp params)) ->
+          answer_signature_help t request params
+      | Ok (E (Lsp.Client_request.TextDocumentPrepareRename params)) ->
+          answer_prepare_rename t request params
+      | Ok (E (Lsp.Client_request.TextDocumentRename params)) ->
+          answer_rename t request params
+      | Ok (E (Lsp.Client_request.WorkspaceSymbol params)) ->
+          answer_workspace_symbol t request params
+      | Ok (E (Lsp.Client_request.TextDocumentHighlight params)) ->
+          answer_document_highlight t request params
+      | Ok (E (Lsp.Client_request.SemanticTokensFull params)) ->
+          answer_semantic_tokens t request params
       | Ok (E _) ->
           [
             reply_error request.id
@@ -487,6 +731,12 @@ let handle_initialized_request t request =
           ])
 
 let dispatch_request t (request : Jsonrpc.Request.t) =
+  (let f =
+     open_out_gen [ Open_append; Open_creat ] 0o644 "/tmp/jasmin-inbound.log"
+   in
+   output_string f ("request: " ^ request.method_ ^ "\n");
+   flush f;
+   close_out f);
   if String.equal request.method_ "initialize" then
     match Lsp.Client_request.of_jsonrpc request with
     | Error message ->

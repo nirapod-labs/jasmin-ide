@@ -27,6 +27,15 @@
     [null] or [], never an error; a parameters object the request cannot
     read is [InvalidParams] (-32602).
 
+    It also routes the seven editing requests of {!Features}, and advertises
+    them: completion with the trigger characters [#] and [:], signature help
+    with [(] and [,], rename with its prepare step, workspace symbols,
+    document highlights, and semantic tokens with the legend they are
+    encoded by. Each one parses its parameters, forces a check when the
+    document's text is newer than its last analysis, and answers the engine's
+    answer, or the empty answer the protocol has for an answer there is
+    none: never an error for an empty answer.
+
     Three limits of the protocol's client-capability negotiation are
     declared here rather than implemented: this server reads none of the
     client's capabilities, and the advertisement in [initialize] is fixed.
@@ -100,19 +109,22 @@ val max_delay : int
 val create :
   log:(string -> unit) ->
   ?engine:Jide_engine.Engine.t ->
+  ?features:Features.t ->
   ?analysis:analysis ->
   ?locate:locate ->
   ?delay:int ->
   ?now:(unit -> float) ->
   unit ->
   t
-(** [create ~log ?engine ?analysis ?locate ?delay ?now ()] is a server that
-    has not been initialized. [delay] is the debounce in milliseconds, clamped
-    to [min_delay] to [max_delay] (and 250 when it is not given); a client can
-    change it later with the [diagnostics.delay] setting. [now] is the clock
-    in seconds, [Unix.gettimeofday] unless a test supplies its own. [locate]
-    is the engine's answers, {!locate} over [engine] unless a test supplies
-    its own. *)
+(** [create ~log ?engine ?features ?analysis ?locate ?delay ?now ()] is a
+    server that has not been initialized. [delay] is the debounce in
+    milliseconds, clamped to [min_delay] to [max_delay] (and 250 when it is not
+    given); a client can change it later with the [diagnostics.delay] setting.
+    [now] is the clock in seconds, [Unix.gettimeofday] unless a test supplies
+    its own. [locate] is the engine's answers, {!locate} over [engine] unless a
+    test supplies its own. [features] are the engine's answers to the editing
+    requests, and {!Features.unavailable} when it is not given: every one of
+    them is then answered with the empty answer the protocol has for it. *)
 
 val delay : t -> int
 (** The debounce in force, in milliseconds. *)
