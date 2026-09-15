@@ -246,3 +246,115 @@ describe("numbers", () => {
   });
 });
 
+describe("operators", () => {
+  test("the function arrow is an operator", () => {
+    assertScope("export fn copy(reg u64 value) -> reg u64 {", "->", operatorScope);
+  });
+
+  test("arithmetic operators are operators", () => {
+    const source = "x = a + b - c * d / e % f & g | h ^ i ~ j;";
+    for (const operator of ["+", "-", "*", "/", "%", "&", "|", "^", "~"]) {
+      assertScope(source, operator, operatorScope);
+    }
+  });
+
+  test("shift operators keep their direction and width", () => {
+    const source = "x = a << 2; y = a >> 2; z = a <<r 2; w = a >>r 2; u = a >>8s 2; v = a +32u 3;";
+    for (const operator of ["<<", ">>", "<<r", ">>r", ">>8s", "+32u"]) {
+      assertScope(source, operator, operatorScope);
+    }
+  });
+
+  test("compound assignments are single operators", () => {
+    const source = "x <<r= 2; y >>r= 3; z <<= 4; w >>= 5; v +32u= 6;";
+    for (const operator of ["<<r=", ">>r=", "<<=", ">>=", "+32u="]) {
+      assertScope(source, operator, operatorScope);
+    }
+  });
+
+  test("comparison and logical operators are operators", () => {
+    const source = "if (a <= b && c >= d || e == f && g != h) { }";
+    assertScope(source, "<=", operatorScope);
+    assertScope(source, ">=", operatorScope);
+    assertScope(source, "==", operatorScope);
+    assertScope(source, "!=", operatorScope);
+    assertScope(source, "&&", operatorScope, 0);
+    assertScope(source, "&&", operatorScope, 1);
+    assertScope(source, "||", operatorScope);
+  });
+
+  test("the namespace accessor is punctuation", () => {
+    const source = "state = AES::round(word);";
+    assertScope(source, "::", "punctuation.accessor.namespace.jasmin.crypto");
+    refuteScope(source, "::", operatorScope);
+  });
+});
+
+describe("comments", () => {
+  test("a line comment runs to the end of the line", () => {
+    const source = ["// a line comment", "fn f() {}"].join("\n");
+    assertScope(source, "// a line comment", "comment.line.double-slash.jasmin.crypto");
+    assertScope(source, "fn", controlScope);
+    assertNoOpenScopes(source);
+  });
+
+  test("a block comment has begin and end punctuation", () => {
+    const source = ["/* a block comment */", "fn f() {}"].join("\n");
+    assertScope(source, "/*", blockCommentScope);
+    assertScope(source, "/*", "punctuation.definition.comment.begin.jasmin.crypto");
+    assertScope(source, " a block comment ", blockCommentScope);
+    assertScope(source, "*/", blockCommentScope);
+    assertScope(source, "*/", "punctuation.definition.comment.end.jasmin.crypto");
+    assertScope(source, "fn", controlScope);
+    assertNoOpenScopes(source);
+  });
+
+  test("a nested block comment keeps one scope per level", () => {
+    const source = ["/* outer", "   /* inner */", "   still outer */", "fn f() {}"].join("\n");
+
+    assert.equal(scopeCount(scopesOf(source, "/*", 0), blockCommentScope), 1);
+    assert.equal(scopeCount(scopesOf(source, "/*", 1), blockCommentScope), 2);
+    assert.equal(scopeCount(scopesOf(source, " inner ", 0), blockCommentScope), 2);
+    assert.equal(scopeCount(scopesOf(source, "*/", 0), blockCommentScope), 2);
+    assert.equal(scopeCount(scopesOf(source, "*/", 1), blockCommentScope), 1);
+    assertScope(source, "   still outer ", blockCommentScope);
+    assertScope(source, "fn", controlScope);
+    refuteScope(source, "fn", blockCommentScope);
+    assertNoOpenScopes(source);
+  });
+
+  test("a line comment does not open a block comment", () => {
+    const source = ["// /* not a block", "fn f() {}"].join("\n");
+    assertScope(source, "// /* not a block", "comment.line.double-slash.jasmin.crypto");
+    assertScope(source, "fn", controlScope);
+    assertNoOpenScopes(source);
+  });
+
+  test("a block comment does not start a string", () => {
+    const source = ['/* "not a string */', "fn f() {}"].join("\n");
+    const commentTokens = tokensOnLine(source, 0);
+    assert.ok(commentTokens.length >= 3, "Expected the comment to be tokenized in three parts.");
+    for (const token of commentTokens) {
+      assert.ok(
+        token.scopes.includes(blockCommentScope),
+        `Expected ${JSON.stringify(token.text)} on the comment line to carry ${blockCommentScope}.`
+      );
+      assert.ok(
+        !token.scopes.some((scope) => scope.startsWith("string.")),
+        `Expected ${JSON.stringify(token.text)} on the comment line not to start a string.`
+      );
+    }
+    assertScope(source, "fn", controlScope);
+    assertNoOpenScopes(source);
+  });
+
+  test("an unterminated comment is reported at end of file", () => {
+    assert.deepEqual(tokenizeSource(grammar, "/* open\nstill open").openScopes, [blockCommentScope]);
+  });
+
+  test("an unterminated string is reported at end of file", () => {
+    assert.deepEqual(tokenizeSource(grammar, 'x = "open').openScopes, [
+      "string.quoted.double.jasmin.crypto"
+    ]);
+  });
+});
