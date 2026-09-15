@@ -404,6 +404,102 @@ let test_poisoned_stream_is_ready () =
   close_out oc;
   close_in_noerr ic
 
+(* JSON null is a legal way to write "no parameters", and the pinned decoder
+   refuses it, so the reader must normalise it away. A request that writes
+   null has to arrive with no parameters at all; a notification likewise. *)
+let test_null_params_is_absent () =
+  (match
+     read_all
+       [ frame {|{"jsonrpc":"2.0","id":1,"method":"shutdown","params":null}|} ]
+   with
+  | [ Ok (Jsonrpc.Packet.Request request) ] ->
+      check "null params: method" (String.equal request.method_ "shutdown");
+      check "null params reads as absent" (request.params = None)
+  | other -> check ("null params: " ^ show_opt (Some (List.hd other))) false);
+  match
+    read_all [ frame {|{"jsonrpc":"2.0","method":"exit","params":null}|} ]
+  with
+  | [ Ok (Jsonrpc.Packet.Notification notification) ] ->
+      check "null params notification: method"
+        (String.equal notification.method_ "exit");
+      check "null params notification reads as absent"
+        (notification.params = None)
+  | other ->
+      check
+        ("null params notification: " ^ show_opt (Some (List.hd other)))
+        false
+
+(* The normalisation is for null and for nothing else. An object and an array
+   are still parameters, and a member of another type is still a frame the
+   reader refuses. *)
+let test_other_params_kept () =
+  (match
+     read_all
+       [
+         frame {|{"jsonrpc":"2.0","id":1,"method":"shutdown","params":{"a":1}}|};
+       ]
+   with
+  | [ Ok (Jsonrpc.Packet.Request request) ] ->
+      check "an object is kept"
+        (match request.params with Some (`Assoc _) -> true | _ -> false)
+  | other ->
+      check ("an object is kept: " ^ show_opt (Some (List.hd other))) false);
+  (match
+     read_all
+       [ frame {|{"jsonrpc":"2.0","id":1,"method":"shutdown","params":[1]}|} ]
+   with
+  | [ Ok (Jsonrpc.Packet.Request request) ] ->
+      check "an array is kept"
+        (match request.params with Some (`List _) -> true | _ -> false)
+  | other ->
+      check ("an array is kept: " ^ show_opt (Some (List.hd other))) false);
+  match
+    read_all
+      [ frame {|{"jsonrpc":"2.0","id":1,"method":"shutdown","params":"oops"}|} ]
+  with
+  | [ Error message ] ->
+      check "a string is still refused"
+        (contains message "invalid structured value")
+  | other ->
+      check
+        ("a string is still refused: " ^ show_opt (Some (List.hd other)))
+        false
+
+(* A parameter object is a value, not a message: a member it happens to name
+   [params] is left alone. Only the message's own member is normalised. *)
+let test_params_inside_params_untouched () =
+  let body =
+    {|{"jsonrpc":"2.0","id":1,"method":"x","params":{"params":null,"keep":1}}|}
+  in
+  match read_all [ frame body ] with
+  | [ Ok (Jsonrpc.Packet.Request request) ] -> (
+      match request.params with
+      | Some (`Assoc fields) ->
+          check "the inner null params is untouched"
+            (List.assoc_opt "params" fields = Some `Null);
+          check "the other member survives"
+            (List.assoc_opt "keep" fields = Some (`Int 1))
+      | _ -> check "the parameter object arrived" false)
+  | other ->
+      check ("params inside params: " ^ show_opt (Some (List.hd other))) false
+
+(* A batch is a list of messages, so a null params in an element is the same
+   null params. The element keeps its place and its method. *)
+let test_null_params_in_batch () =
+  let body =
+    {|[
+      {"jsonrpc":"2.0","id":1,"method":"shutdown","params":null},
+      {"jsonrpc":"2.0","method":"exit","params":null}
+    ]|}
+  in
+  match read_all [ frame body ] with
+  | [ Ok (Jsonrpc.Packet.Batch_call [ `Request request; `Notification n ]) ] ->
+      check "batch request method" (String.equal request.method_ "shutdown");
+      check "batch request params" (request.params = None);
+      check "batch notification method" (String.equal n.method_ "exit");
+      check "batch notification params" (n.params = None)
+  | other -> check ("batch: " ^ show_opt (Some (List.hd other))) false
+
 let () =
   test_notification ();
   test_request_numeric_id ();
@@ -429,6 +525,10 @@ let () =
   test_non_json_body ();
   test_waits_for_nothing ();
   test_poisoned_stream_is_ready ();
+  test_null_params_is_absent ();
+  test_other_params_kept ();
+  test_params_inside_params_untouched ();
+  test_null_params_in_batch ();
   if !failures = 0 then print_endline "all framing tests passed"
   else (
     Printf.printf "%d framing test(s) failed\n" !failures;
