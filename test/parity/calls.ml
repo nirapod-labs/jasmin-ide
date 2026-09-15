@@ -353,3 +353,75 @@ type tally = {
   mutable unlocated : int;
 }
 
+let empty_tally () =
+  {
+    files = 0;
+    typed = 0;
+    with_diagnostics = 0;
+    calls = 0;
+    one = 0;
+    none = 0;
+    many = 0;
+    not_the_callee = 0;
+    unlocated = 0;
+  }
+
+let count (tally : tally) (result : result) =
+  tally.files <- tally.files + 1;
+  if result.typed then tally.typed <- tally.typed + 1;
+  if result.diagnostics > 0 then
+    tally.with_diagnostics <- tally.with_diagnostics + 1;
+  List.iter
+    (fun (judgement : judgement) ->
+      tally.calls <- tally.calls + 1;
+      match judgement.verdict with
+      | One -> tally.one <- tally.one + 1
+      | None_found -> tally.none <- tally.none + 1
+      | Many -> tally.many <- tally.many + 1
+      | Not_the_callee -> tally.not_the_callee <- tally.not_the_callee + 1
+      | Unlocated -> tally.unlocated <- tally.unlocated + 1)
+    result.judgements
+
+let measure ~(root : string) ~(limit : int option) :
+    tally * (string * judgement) list * int =
+  let files =
+    match limit with
+    | None -> files_under root
+    | Some limit ->
+        let rec take count = function
+          | [] -> []
+          | _ when count >= limit -> []
+          | file :: rest -> file :: take (count + 1) rest
+        in
+        take 0 (files_under root)
+  in
+  let tally = empty_tally () in
+  let differences = ref [] in
+  List.iter
+    (fun file ->
+      match read file with
+      | None -> ()
+      | Some text ->
+          let result = check ~file text in
+          count tally result;
+          List.iter
+            (fun (judgement : judgement) ->
+              if judgement.verdict <> One then
+                differences := (file, judgement) :: !differences)
+            result.judgements)
+    files;
+  (tally, List.rev !differences, List.length files)
+
+(* The path as the corpus names it: a corpus is read relative to its root
+   where it can be, because a difference is looked up by the file name the
+   report prints and two folders may hold one name. *)
+let relative ~(root : string) (path : string) =
+  let prefix = if Filename.check_suffix root "/" then root else root ^ "/" in
+  if
+    String.length path > String.length prefix
+    && String.sub path 0 (String.length prefix) = prefix
+  then
+    String.sub path (String.length prefix)
+      (String.length path - String.length prefix)
+  else path
+
