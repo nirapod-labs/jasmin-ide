@@ -27,3 +27,8 @@
  (name test_complete)
  (modules test_complete)
  (libraries jide_engine jide_jasmin jide_lang))
+
+(test
+ (name test_locate)
+ (modules test_locate)
+ (libraries jide_engine jide_jasmin jide_lang))
