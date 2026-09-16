@@ -1,4 +1,7 @@
 // Sample input for the query job. MIT, see LICENSE.
+// It has to parse on the pinned upstream grammar as well as on the lab's
+// clone, so it carries no construct only one of them understands; the two
+// clone-only statements live in `sample-local.jazz`.
 from CRYPTO require "crypto.jinc"
 
 type lane = u32;
@@ -18,7 +21,6 @@ namespace CRYPTO {
 
     acc = 0;
     acc = #set0();
-    #spill(acc);
     acc = source[0];
     acc = [#aligned :u64 source + 0];
     acc += 3;
@@ -46,7 +48,6 @@ namespace CRYPTO {
     }
 
     check(ROUNDS > 0);
-    assert("mix: acc below the bound", acc < 8);
     return source;
   }
 }

@@ -58,15 +58,12 @@
 (intrinsic
   "#" @punctuation.special)
 
-; Intrinsic instructions such as `#spill(x);`, a statement of their own since
-; the grammar parses them as one rather than as an annotation.
-(intrinsic_instr
-  intrinsic: (intrinsic) @function)
-
-; `assert("message", condition);`, the compiler's ASSERT statement.
-(assert_statement
-  "assert" @keyword
-  message: (string_literal) @string)
+; An intrinsic instruction such as `#spill(x);` and the compiler's
+; `assert("message", condition);` are nodes only the lab's grammar clone has:
+; the pinned upstream grammar has neither, so a pattern for them here would
+; stop this whole file compiling and Zed would drop every highlight. They are
+; kept in `highlights.local.scm` beside this file, which Zed does not read and
+; `test/queries.sh` checks against the clone.
 
 ; Annotations and their contents
 (annotations) @attribute

@@ -16,7 +16,7 @@
  *
  * What remains outside this test is the editor's half: the client
  * capabilities VS Code supplies and the `LanguageClient` object that carries
- * them. That half needs a window and is in `tests/vscode/suite.js`.
+ * them. That half needs a window and is in `test/vscode/suite.js`.
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
