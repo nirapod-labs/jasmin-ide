@@ -425,3 +425,363 @@ let relative ~(root : string) (path : string) =
       (String.length path - String.length prefix)
   else path
 
+let report ~(root : string) ~(files : int) (tally : tally)
+    (differences : (string * judgement) list) =
+  Printf.printf "corpus: %s\n" root;
+  Printf.printf "files: %d read, %d with a typed call, %d with a diagnostic\n"
+    files tally.typed tally.with_diagnostics;
+  Printf.printf "typed calls: %d\n" tally.calls;
+  Printf.printf "exactly one reference inside the instruction: %d\n" tally.one;
+  Printf.printf "none: %d\n" tally.none;
+  Printf.printf "more than one: %d\n" tally.many;
+  Printf.printf "not the callee: %d\n" tally.not_the_callee;
+  Printf.printf "not located in the source: %d\n" tally.unlocated;
+  List.iter
+    (fun (file, judgement) ->
+      match read file with
+      | None -> ()
+      | Some text ->
+          let lines = Jide_lang.Line_index.create text in
+          Printf.printf "%s: %s\n" (relative ~root file)
+            (describe lines judgement))
+    differences;
+  flush stdout
+
+(* ------------------------------------------------------------------ *)
+(* The selftest *)
+
+(* A program with one call, and a second one with two calls, one inside an
+   [if] and one inside a [for], so the walk into nested statements is
+   exercised as well as the count. *)
+let one_call =
+  {|
+fn add(reg u64 a) -> reg u64 { return a; }
+
+fn caller(reg u64 n) -> reg u64 {
+  reg u64 s;
+  s = 0;
+  s = add(s);
+  return s;
+}
+|}
+
+let nested_calls =
+  {|
+fn add(reg u64 a) -> reg u64 { return a; }
+
+fn caller(reg u64 n) -> reg u64 {
+  reg u64 s;
+  reg u64 i;
+  s = 0;
+  if n > 0 {
+    s = add(s);
+  }
+  for i = 0 to n {
+    s = add(s);
+  }
+  return s;
+}
+|}
+
+(* A call in a declaration's initialiser is a call as much as one in an
+   assignment: [reg u64 t = add(n);] makes one. The second program has two
+   initialisers in one declaration. They share the declaration's instruction
+   range, and each keeps the name it was written with. *)
+let declared_call =
+  {|
+fn add(reg u64 a) -> reg u64 { return a; }
+
+fn caller(reg u64 n) -> reg u64 {
+  reg u64 t = add(n);
+  return t;
+}
+|}
+
+let two_declared_calls =
+  {|
+fn add(reg u64 a) -> reg u64 { return a; }
+fn dbl(reg u64 a) -> reg u64 { return a; }
+
+fn caller(reg u64 n) -> reg u64, reg u64 {
+  reg u64 t = add(n), u = dbl(n);
+  return t, u;
+}
+|}
+
+(* A function declared with a qualified name and called by that name. The
+   index keeps [ble::e] as the declaration's name, so the callee must match
+   whole, and the last part alone is not what decides it. *)
+let qualified_declaration =
+  {|
+inline fn ble::e () -> reg u32 {
+  reg u32 x = 0;
+  return x;
+}
+
+export fn caller() -> reg u32 {
+  reg u32 x = ble::e();
+  return x;
+}
+|}
+
+let index_of text needle =
+  let width = String.length needle in
+  let rec loop index =
+    if index + width > String.length text then None
+    else if String.sub text index width = needle then Some index
+    else loop (index + 1)
+  in
+  loop 0
+
+let span_in text ?(offset = 0) ?length needle =
+  let start_byte =
+    match index_of text needle with Some index -> index + offset | None -> 0
+  in
+  let width =
+    match length with
+    | Some width -> width
+    | None -> String.length needle - offset
+  in
+  Span.make ~start_byte ~end_byte:(start_byte + width)
+
+(* [named_at call check] is [check] applied to the range of the callee's name,
+   and false when the call has no such range. *)
+let named_at (call : Facts.call) (check : Span.t -> bool) : bool =
+  match call.Facts.c_span with Some name -> check name | None -> false
+
+let check_selftest () =
+  let failures = ref 0 in
+  let expect name condition =
+    if not condition then (
+      incr failures;
+      Printf.eprintf "selftest: %s: failed\n" name)
+  in
+  let file = "/selftest/calls.jazz" in
+  (* The facts and the resolver snapshot of [text], as the server holds them. *)
+  let snapshot_of text =
+    let facts =
+      (Jide_jasmin.Adapter.check
+         (arch_of_path default_arch)
+         (Option.get (Jide_jasmin.Adapter.call_conv_of_string "linux"))
+         ~file ~text ~idirs:[])
+        .Jide_jasmin.Adapter.facts
+    in
+    (facts, Locate.of_text ~facts:[ (file, facts) ] ~idirs:[] ~read ~file text)
+  in
+  expect "a qualified callee is compared by its last part"
+    (String.equal (unqualified "A::id") "id");
+  expect "an unqualified callee is compared whole"
+    (String.equal (unqualified "add") "add");
+  let result = check ~file one_call in
+  expect "one call: the facts hold one call" (List.length result.judgements = 1);
+  (match result.judgements with
+  | [ judgement ] ->
+      let call = judgement.call in
+      expect "one call: the callee is add"
+        (String.equal call.Facts.c_callee "add");
+      expect "one call: the call's bytes are in the checked file"
+        (String.equal call.Facts.c_file file);
+      expect "one call: the callee's name is where the source writes it"
+        (named_at call (fun name ->
+             Span.compare name
+               (span_in one_call "s = add(s);" ~offset:4 ~length:3)
+             = 0));
+      expect "one call: the instruction's range is the whole statement"
+        (Span.compare call.Facts.c_range (span_in one_call "s = add(s);") = 0);
+      expect "one call: the callee's name lies inside the instruction"
+        (named_at call (inside call.Facts.c_range));
+      expect "one call: the instruction lies inside the item"
+        (inside call.Facts.c_item call.Facts.c_range);
+      expect "one call: the requirement holds" (judgement.verdict = One)
+  | _ -> ());
+  let nested = check ~file nested_calls in
+  expect "nested calls: the facts hold two calls"
+    (List.length nested.judgements = 2);
+  expect "nested calls: both hold the requirement"
+    (List.for_all
+       (fun (judgement : judgement) -> judgement.verdict = One)
+       nested.judgements);
+  (* A call in a declaration's initialiser is judged like any other. With one
+     initialiser, the call is the only one; with two, each keeps the callee it
+     was written with, and the second is not the first's name. *)
+  let declared = check ~file declared_call in
+  expect "a declaration's initialiser: the facts hold its call"
+    (List.length declared.judgements = 1);
+  (match declared.judgements with
+  | [ judgement ] ->
+      expect "a declaration's initialiser: the callee is add"
+        (String.equal judgement.call.Facts.c_callee "add");
+      expect
+        "a declaration's initialiser: the callee's name is where it is written"
+        (named_at judgement.call (fun name ->
+             Span.compare name (span_in declared_call "add(n);" ~length:3) = 0));
+      expect "a declaration's initialiser: the instruction is the declaration"
+        (Span.compare judgement.call.Facts.c_range
+           (span_in declared_call "reg u64 t = add(n);")
+        = 0);
+      expect "a declaration's initialiser: the requirement holds"
+        (judgement.verdict = One)
+  | _ -> ());
+  let two = check ~file two_declared_calls in
+  expect "two initialisers in one declaration: the facts hold both calls"
+    (List.length two.judgements = 2);
+  (match two.judgements with
+  | [ first; second ] ->
+      expect "two initialisers: the first callee is add"
+        (String.equal first.call.Facts.c_callee "add");
+      expect "two initialisers: the second callee is dbl"
+        (String.equal second.call.Facts.c_callee "dbl");
+      expect "two initialisers: the second's name is where dbl is written"
+        (named_at second.call (fun name ->
+             Span.compare name (span_in two_declared_calls "dbl(n);" ~length:3)
+             = 0));
+      expect "two initialisers: both share the declaration's range"
+        (Span.compare first.call.Facts.c_range second.call.Facts.c_range = 0);
+      expect "two initialisers: both hold the requirement"
+        (first.verdict = One && second.verdict = One)
+  | _ -> ());
+  let qualified = check ~file qualified_declaration in
+  expect "a qualified declaration: the facts hold its call"
+    (List.length qualified.judgements = 1);
+  (match qualified.judgements with
+  | [ judgement ] ->
+      expect "a qualified declaration: the callee is called by its full name"
+        (String.equal judgement.call.Facts.c_callee "ble::e");
+      expect "a qualified declaration: the requirement holds"
+        (judgement.verdict = One)
+  | _ -> ());
+  (* Negative controls. A declaration's callee read at its variable's name is
+     not the callee, and a call with no name range is a difference of its own,
+     never a call that goes uncounted. *)
+  let declared_facts, declared_snapshot = snapshot_of declared_call in
+  (match declared_facts.Facts.calls with
+  | call :: _ ->
+      let at_variable =
+        judge declared_snapshot
+          {
+            call with
+            Facts.c_span =
+              Some
+                (span_in declared_call "reg u64 t = add(n);" ~offset:8 ~length:1);
+          }
+      in
+      expect "a declaration's name read at its variable is not the callee"
+        (at_variable.verdict = Not_the_callee)
+  | [] -> expect "the declaration program has a call to judge" false);
+  let nested_facts, nested_snapshot = snapshot_of nested_calls in
+  let call =
+    match nested_facts.Facts.calls with
+    | call :: _ -> call
+    | [] ->
+        expect "the selftest program has a call to judge" false;
+        {
+          Facts.c_span = None;
+          c_callee = "";
+          c_item = Span.make ~start_byte:0 ~end_byte:0;
+          c_range = Span.make ~start_byte:0 ~end_byte:0;
+          c_file = file;
+        }
+  in
+  let unlocated = judge nested_snapshot { call with Facts.c_span = None } in
+  expect "a call the source gives no name range is not located"
+    (unlocated.verdict = Unlocated);
+  let text = nested_calls in
+  let snapshot = nested_snapshot in
+  let fabricated c_span c_range =
+    { call with Facts.c_span = Some c_span; c_range }
+  in
+  (* One instruction range that covers both calls to [add] holds two
+     references to it: more than one. *)
+  let twice =
+    judge snapshot
+      (fabricated
+         (span_in text "add(s);" ~offset:0 ~length:3)
+         (Span.make ~start_byte:0 ~end_byte:(String.length text)))
+  in
+  expect "two calls to one callee inside one range are more than one"
+    (twice.verdict = Many);
+  (* The variable on the left of the assignment: the declaration it names is a
+     variable, so it is not the callee however many references fall inside. *)
+  let variable =
+    judge snapshot
+      (fabricated
+         (span_in text "s = add(s);" ~offset:0 ~length:1)
+         (span_in text "s = add(s);"))
+  in
+  expect "a name that is not the callee is a difference"
+    (variable.verdict = Not_the_callee);
+  (* Whitespace holds no occurrence at all, so the callee resolves to nothing
+     and the instruction holds no reference: none. *)
+  let nothing =
+    judge snapshot
+      (fabricated
+         (span_in text "s = 0;" ~offset:5 ~length:1)
+         (span_in text "s = add(s);"))
+  in
+  expect "a call whose callee resolves to nothing has none"
+    (nothing.verdict = None_found);
+  if !failures = 0 then print_endline "calls: selftest ok"
+  else (
+    Printf.eprintf "calls: %d selftest check(s) failed\n" !failures;
+    exit 1)
+
+(* ------------------------------------------------------------------ *)
+(* The command line *)
+
+(* [arguments] splits `--name value` pairs from the words that stand alone,
+   and refuses anything it does not know: a misspelt flag must not become a
+   silent default. *)
+type options = { corpus : string option; limit : int option; selftest : bool }
+
+let parse_arguments (arguments : string list) : options =
+  let rec loop options = function
+    | [] -> options
+    | "--selftest" :: rest -> loop { options with selftest = true } rest
+    | "--corpus" :: path :: rest ->
+        loop { options with corpus = Some path } rest
+    | "--limit" :: value :: rest ->
+        let limit =
+          match int_of_string_opt value with
+          | Some limit when limit > 0 -> limit
+          | _ ->
+              prerr_endline
+                ("calls: --limit takes a positive number, not " ^ value);
+              exit 2
+        in
+        loop { options with limit = Some limit } rest
+    | "--help" :: _ | "-help" :: _ | "-h" :: _ ->
+        print_endline usage;
+        exit 0
+    | argument :: _ ->
+        prerr_endline ("calls: unknown argument " ^ argument);
+        prerr_endline usage;
+        exit 2
+  in
+  loop { corpus = None; limit = None; selftest = false } arguments
+
+let main () =
+  let options = parse_arguments (List.tl (Array.to_list Sys.argv)) in
+  if options.selftest then (
+    check_selftest ();
+    exit 0);
+  match options.corpus with
+  | None ->
+      prerr_endline usage;
+      exit 2
+  | Some given ->
+      let root = corpus_root given in
+      if not (Sys.file_exists root && Sys.is_directory root) then (
+        Printf.eprintf "calls: no corpus directory at %s\n" given;
+        exit 2);
+      let tally, differences, files = measure ~root ~limit:options.limit in
+      report ~root ~files tally differences;
+      if files = 0 then (
+        Printf.eprintf "calls: no .jazz file under %s\n" root;
+        exit 2);
+      if tally.calls = 0 then (
+        Printf.eprintf
+          "calls: the corpus typed no call, so nothing was measured\n";
+        exit 2);
+      exit (if tally.one = tally.calls then 0 else 1)
+
+let () = main ()
