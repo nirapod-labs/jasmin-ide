@@ -14,6 +14,15 @@
 // into the capture file named by `JASMIN_IDE_VSCODE_CAPTURE`, and the checks
 // after the window has closed read it back: a window that dies before its
 // deactivation still leaves the record of what it did.
+//
+// Beside the lifecycle, the window runs the editing-help checks over a small
+// project written into the same throw-away workspace: completion at a `:`
+// trigger and a rename (prepareRename on a function name, then a refused
+// rename on a keyword). The suite decides each check from the capabilities
+// the client recorded in the server's initialize reply. A server that does
+// not advertise a capability is not asked for it, so the check is recorded as
+// SKIP with the missing capability named, and the skip is printed here: a
+// green run never claims a measurement it did not make.
 import { runTests } from "@vscode/test-electron";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -65,6 +74,38 @@ await writeFile(
   "utf8"
 );
 
+// The small project the editing-help checks run over: one entry file, one
+// library it requires, and a project file that names the entry. The entry
+// holds the three positions the suite finds by their text: the `:` of a
+// memory access's type annotation (the completion trigger), the declared
+// name `load` (the rename target), and the `fn` keyword on that line (the
+// rename that must be refused).
+const entrySource = `require "lib.jinc"
+
+export
+fn load(reg ptr u32[4] source) -> reg u32 {
+  reg u32 value;
+  value = [#aligned :u32 source + 0];
+  value = twice(value);
+  return value;
+}
+`;
+
+const librarySource = `fn twice(reg u32 value) -> reg u32 {
+  return value + value;
+}
+`;
+
+const projectSource = `${JSON.stringify({version: 1, arch: "x86-64", entries: ["main.jazz"]}, null, 2)}\n`;
+
+await writeFile(join(workspace, "jasmin-project.json"), projectSource, "utf8");
+await writeFile(join(workspace, "main.jazz"), entrySource, "utf8");
+await writeFile(join(workspace, "lib.jinc"), librarySource, "utf8");
+
+// The path is printed from this variable after the window, when the
+// throw-away workspace itself is already gone.
+const projectEntry = join(workspace, "main.jazz");
+
 let code;
 let failure;
 try {
@@ -100,6 +141,15 @@ await rm(workspace, {recursive: true, force: true});
 const texts = captured.map((entry) => entry.text);
 const count = (needle) => texts.filter((text) => text.includes(needle)).length;
 const firstAt = (needle) => texts.findIndex((text) => text.includes(needle));
+
+// The editing-help checks the suite recorded in the window, whatever their
+// outcome. A check that could not be measured is recorded as SKIP with its
+// reason, so a skip is named in this log instead of passing as an unmentioned
+// gap; the two checks are expected, and fewer means the window never got to
+// them.
+const editingHelp = captured
+  .filter((entry) => entry.channel === "suite" && entry.level === "m3-check")
+  .map((entry) => JSON.parse(entry.text));
 
 // The client's own message log, one line per message it sent. The window turns
 // it on for the checks below, so it is the client's account of the same four
@@ -182,7 +232,15 @@ const survivors = serverPids.filter((pid) => {
 
 const passed = checks.filter((check) => check.ok).length;
 
+const skippedChecks = editingHelp.filter((check) => check.status === "SKIP").length;
+const failedChecks = editingHelp.filter((check) => check.status === "FAIL").length;
+const editingHelpOk =
+  editingHelp.length === 2 &&
+  failedChecks === 0 &&
+  editingHelp.every((check) => check.status === "PASS" || check.status === "SKIP");
+
 console.log(`vscode-test: VS Code ${vscodeVersion}, server ${serverPath}`);
+console.log(`vscode-test: editing-help project ${projectEntry}`);
 console.log(
   `vscode-test: window exit code ${code ?? "none"}, ${captured.length} captured line(s), ` +
     `${serverPids.length} server process(es) seen`
@@ -193,6 +251,18 @@ if (summary !== undefined) {
 for (const check of checks) {
   console.log(`vscode-test: ${check.ok ? "PASS" : "FAIL"} ${check.step}: ${check.detail}`);
 }
+for (const check of editingHelp) {
+  console.log(`vscode-test: ${check.status} ${check.check}: ${check.detail}`);
+}
+if (editingHelp.length === 0) {
+  console.log("vscode-test: FAIL editing-help: the window recorded neither of the two checks");
+} else if (editingHelp.length !== 2) {
+  console.log(`vscode-test: FAIL editing-help: the window recorded ${editingHelp.length} check(s), expected 2`);
+}
+console.log(
+  `vscode-test: editing-help checks ${editingHelp.length - skippedChecks} ran, ` +
+    `${skippedChecks} skipped, ${failedChecks} failed`
+);
 if (serverPids.length === 0) {
   console.log("vscode-test: FAIL exit: no server process was seen inside the window");
 }
@@ -212,9 +282,15 @@ const ok =
   code === 0 &&
   failure === undefined &&
   serverPids.length > 0 &&
-  survivors.length === 0;
+  survivors.length === 0 &&
+  editingHelpOk;
 
 console.log(`vscode-test: ${passed}/${checks.length} lifecycle checks observed`);
+if (skippedChecks > 0) {
+  console.log(
+    `vscode-test: ${skippedChecks} editing-help check(s) skipped, not measured: the server does not advertise what they need (each SKIP line names it)`
+  );
+}
 console.log(`vscode-test: ${ok ? "PASS" : "FAIL"}`);
 
 if (failure !== undefined) {
