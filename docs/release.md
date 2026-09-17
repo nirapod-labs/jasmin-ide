@@ -68,3 +68,23 @@ exits 1 on any problem.
 A digest says the bytes didn't change. It doesn't say who built them: that's
 the attestation's job, which needs CI.
 
+## The double build
+
+Whether two builds of one commit give the same bytes is measured, not
+assumed. Check out the tag twice, assemble `vendor/jasmin` in both, then:
+
+```
+make release-double-build TREE_A=../tree-a TREE_B=../tree-b
+```
+
+Both trees must be clean and at the same commit. Each builds the server in
+the release profile with `SOURCE_DATE_EPOCH` set to the commit's time, and a
+source tarball; `JIDE_LINK_FLAGS` adds link flags and `JIDE_SRC_PREFIX` sets
+the tarball's prefix. `.artifacts/double-build/double-build.txt` records the
+digest and size of each file in both passes. When a file differs it also
+records how many bytes differ, the first offset, and whether either tree's
+path appears inside, since an embedded path is the usual cause. The target
+fails on any difference.
+
+Until a double build shows identical bytes, a release promises pinned inputs
+and an attested build, not identical bytes.
