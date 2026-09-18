@@ -948,3 +948,80 @@ let run (args : H.args) =
 (* ------------------------------------------------------------------ *)
 (* The readers, on the shapes the two tools and the record print. *)
 
+let selftest () =
+  let failures = ref 0 in
+  let check name ok =
+    if not ok then (
+      incr failures;
+      Printf.printf "FAIL %s\n" name)
+  in
+  check "checker: first error, column zero-based, escapes read"
+    (checker_first
+       "a.jazz:3:5: warning: unused\n\
+        a.jazz:4:2: typing: bad\\ntype   here\n\
+        a.jazz: 1 error\n"
+    = { line = 4; column = 1; kind = "typing"; message = "bad type here" });
+  check "checker: no error" (checker_first "a.jazz: ok\n" = nothing);
+  check "compiler: a range, a continuation, the root removed"
+    (compiler_first ~root:"/c"
+       "\"/c/a.jazz\", line 1 (0) to line 4 (1): warning: w\n\n\
+        \"/c/a.jazz\", line 3 (2-15):\n\
+        typing error: in /c/b.jinc\n\
+       \  more\n"
+    = {
+        line = 3;
+        column = 2;
+        kind = "typing error";
+        message = "in b.jinc more";
+      });
+  check "compiler: no location"
+    (compiler_first ~root:"/c" "\nFatal error: x\n"
+    = { nothing with message = "Fatal error: x" });
+  check "normalise: prefix dropped, a bare kind kept"
+    (normalise "parse error:  unexpected   token" = "unexpected token"
+    && normalise "parse error" = "parse error");
+  check "sub_of: the pass after a function"
+    (sub_of "in function f: stack allocation: x" = "stack allocation");
+  let records =
+    read_records
+      "fail/a.jazz:\n\n\
+       \"fail/a.jazz\", line 2 (4-6): typing error: bad\n\
+      \  more\n\n\
+       fail/a.jazz:\n\n\
+       \"fail/a.jazz\", line 3 (1-2):\n\
+       compilation error: stack allocation:\n\n"
+  in
+  check "record: two blocks, by architecture"
+    (match
+       ( record_for records "fail/a.jazz" "x86-64",
+         record_for records "fail/a.jazz" "arm-m4" )
+     with
+    | Some a, Some b ->
+        a.r_line = 2 && a.r_column = 4 && a.r_kind = "typing error"
+        && a.r_message = "typing error: bad more"
+        && (not a.r_beyond)
+        && b.r_sub = "stack allocation"
+        && b.r_beyond && b.r_bare
+    | _ -> false);
+  if !failures = 0 then print_endline "parity: selftest ok"
+  else (
+    Printf.printf "parity: %d selftests failed\n" !failures;
+    exit 1)
+
+let () =
+  match List.tl (Array.to_list Sys.argv) with
+  | [ "--selftest" ] -> selftest ()
+  | arguments ->
+      run
+        (H.parse_args ~usage ~flags:[]
+           ~options:
+             [
+               "--corpus";
+               "--checks";
+               "--jasminc";
+               "--checker";
+               "--jobs";
+               "--tsv";
+               "--keep";
+             ]
+           arguments)
