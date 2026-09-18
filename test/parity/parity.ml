@@ -828,3 +828,123 @@ let report ~rows ~records ~from_record ~reference ~version ~checker ~corpus
 (* ------------------------------------------------------------------ *)
 (* The run *)
 
+let folders = [ "success"; "fail"; "sct-checker"; "safety"; "exec"; "warning" ]
+
+let run (args : H.args) =
+  H.name := "parity";
+  let corpus = H.directory (Option.value ~default:"" (args.value "--corpus")) in
+  let root =
+    let tests = Filename.concat corpus "compiler/tests" in
+    if Sys.file_exists tests && Sys.is_directory tests then tests else corpus
+  in
+  let checker =
+    match args.value "--checker" with
+    | Some path -> H.executable ~what:"--checker" path
+    | None -> H.built "lsp-server/native/main.exe"
+  in
+  let expected = Filename.concat root "negative.expected" in
+  let records =
+    if Sys.file_exists expected then read_records (H.read_file expected)
+    else Hashtbl.create 1
+  in
+  let oracle, version =
+    match args.value "--jasminc" with
+    | Some _ as value ->
+        let path, version = H.compiler value in
+        (Some path, version)
+    | None ->
+        if not (Sys.file_exists expected) then
+          H.die "no --jasminc, and no %s: nothing to compare" expected;
+        (None, "the release record, negative.expected")
+  in
+  let in_root path =
+    if starts_with ~prefix:(root ^ "/") path then
+      drop (String.length root + 1) path
+    else path
+  in
+  let checks =
+    match args.value "--checks" with
+    | Some list ->
+        List.map
+          (fun (c : H.check) -> { c with path = in_root c.path })
+          (H.read_checks list)
+    | None ->
+        List.concat_map
+          (fun folder ->
+            let dir = Filename.concat root folder in
+            if Sys.file_exists dir && Sys.is_directory dir then
+              List.concat_map
+                (fun file ->
+                  let path = folder ^ "/" ^ file in
+                  let label =
+                    if H.group_of path = "fail" then "reject" else "accept"
+                  in
+                  List.map
+                    (fun arch -> { H.label; path; arch })
+                    (H.arches_of path))
+                (H.files dir)
+            else [])
+          folders
+  in
+  if checks = [] then
+    H.die "no checks: the corpus has none of %s" (String.concat " " folders);
+  let pending =
+    let dir = Filename.concat root "pending" in
+    if Sys.file_exists dir then List.length (H.files dir) else 0
+  in
+  let results =
+    H.parallel ~jobs:(H.jobs args)
+      (run_check ~root ~checker ~oracle ~records)
+      (List.mapi (fun i c -> (i + 1, c)) checks)
+  in
+  let rows =
+    List.map
+      (function
+        | Ok row -> row | Error why -> H.die "a check wrote no result: %s" why)
+      results
+  in
+  Option.iter
+    (fun file ->
+      H.write_file file
+        (String.concat ""
+           (List.map
+              (fun r ->
+                Printf.sprintf
+                  "%d\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%d\t%d\t%d\t%s\t%s\n"
+                  r.index r.group r.path r.arch r.label r.c_status r.c.line
+                  r.c.column r.c.kind r.c.message r.o_status r.o.line r.o.column
+                  r.o.message r.o.kind)
+              rows)))
+    (args.value "--tsv");
+  let reference = Option.value ~default:"negative.expected" oracle in
+  let agrees =
+    report ~rows ~records ~from_record:(oracle = None) ~reference ~version
+      ~checker ~corpus:root ~pending
+  in
+  Option.iter
+    (fun dir ->
+      if not agrees then (
+        if not (Sys.file_exists dir) then Unix.mkdir dir 0o755;
+        List.iter
+          (fun r ->
+            List.iteri
+              (fun i text ->
+                if text <> "" then
+                  H.write_file
+                    (Filename.concat dir
+                       (Printf.sprintf "check-%d.%s" r.index
+                          (List.nth [ "c"; "c.err"; "o" ] i)))
+                    text)
+              r.raw)
+          rows))
+    (args.value "--keep");
+  if agrees then (
+    H.say "every check agrees with %s" reference;
+    exit 0)
+  else (
+    H.say "the corpus does not agree with %s" reference;
+    exit 1)
+
+(* ------------------------------------------------------------------ *)
+(* The readers, on the shapes the two tools and the record print. *)
+
