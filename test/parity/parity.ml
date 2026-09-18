@@ -335,3 +335,196 @@ let compiler_first ~root log =
   | None, Some text -> { nothing with message = collapse text }
   | None, None -> nothing
 
+type record = {
+  r_line : int;
+  r_column : int;
+  r_message : string;
+  r_kind : string;
+  r_sub : string;
+  r_bare : bool;
+  r_beyond : bool;
+      (** The record names a pass after the checkpoint, read from its text. *)
+}
+
+(* The release's [negative.expected]: per file, one block per architecture
+   it is checked on, in that order. *)
+let read_records text =
+  let table = Hashtbl.create 256 in
+  let add path record =
+    let known = Option.value ~default:[] (Hashtbl.find_opt table path) in
+    Hashtbl.replace table path (known @ [ record ])
+  in
+  let finish path (l, c, message) =
+    let message = collapse message in
+    let plain =
+      match index_from message 0 " in function " with
+      | Some i -> (
+          match String.index_from_opt message (i + 13) ':' with
+          | Some j -> String.sub message 0 i ^ ":" ^ drop (j + 1) message
+          | None -> message)
+      | None -> message
+    in
+    let kind, sub, rest =
+      let compilation =
+        List.find_opt
+          (fun prefix -> starts_with ~prefix plain)
+          [ "internal compilation error"; "compilation error" ]
+      in
+      match compilation with
+      | Some kind -> (
+          let rest = drop (String.length kind) plain in
+          let rest =
+            if starts_with ~prefix:":" rest then spaces (drop 1 rest) else rest
+          in
+          match leading_name rest with
+          | Some (sub, after) -> (kind, sub, spaces after)
+          | None -> (kind, "", rest))
+      | None -> (
+          match
+            List.find_opt
+              (fun prefix -> starts_with ~prefix plain)
+              [
+                "parse error";
+                "annotation error";
+                "typing error";
+                "pretyping error";
+                "typing:";
+                "unexpected annotation";
+              ]
+          with
+          | Some kind ->
+              let rest = drop (String.length kind) plain in
+              let rest =
+                if starts_with ~prefix:":" rest then drop 1 rest else rest
+              in
+              (kind, "", spaces rest)
+          | None -> ("", "", plain))
+    in
+    add path
+      {
+        r_line = l;
+        r_column = c;
+        r_message = message;
+        r_kind = kind;
+        r_sub = sub;
+        r_bare = kind <> "" && is_blank rest;
+        r_beyond =
+          kind = "internal compilation error"
+          || kind = "compilation error" && sub <> "" && sub <> "param expansion";
+      }
+  in
+  let path = ref "" and state = ref `Out in
+  List.iter
+    (fun line ->
+      if line <> "" && line.[0] <> '"' && ends_with ~suffix:".jazz:" line then (
+        (match !state with `Message m -> finish !path m | _ -> ());
+        path := String.sub line 0 (String.length line - 1);
+        state := `Head)
+      else
+        match !state with
+        | `Out -> ()
+        | `Head ->
+            if is_blank line then ()
+            else if starts_with ~prefix:"\"" line && has_location line then
+              let at =
+                Option.value
+                  ~default:(String.length line - 2)
+                  (index_from line 0 "):")
+              in
+              let head = String.sub line 0 (at + 1) in
+              let l = Option.value ~default:0 (number_after head "line ") in
+              let c = Option.value ~default:0 (number_after head "(") in
+              state :=
+                `Message (l, c, drop (min (String.length line) (at + 2)) line)
+            else state := `Out
+        | `Message ((l, c, m) as group) ->
+            if is_blank line then (
+              finish !path group;
+              state := `Out)
+            else state := `Message (l, c, m ^ " " ^ line))
+    (String.split_on_char '\n' text);
+  (match !state with `Message m -> finish !path m | _ -> ());
+  table
+
+let record_for table path arch =
+  match Hashtbl.find_opt table path with
+  | None | Some [] -> None
+  | Some records ->
+      let nth n = List.nth_opt records n in
+      let pick =
+        match (List.length records, arch) with
+        | 1, _ -> nth 0
+        | _, "x86-64" -> nth 0
+        | _, "arm-m4" -> nth 1
+        | n, "riscv" when n >= 3 -> nth 2
+        | _ -> nth 0
+      in
+      pick
+
+(* ------------------------------------------------------------------ *)
+(* One check *)
+
+type row = {
+  index : int;
+  group : string;
+  path : string;
+  arch : string;
+  label : string;
+  c_status : int;
+  c : first;
+  o_status : int;
+  o : first;
+  raw : string list;  (** the checker's two streams and the compiler's log *)
+}
+
+let run_check ~root ~checker ~oracle ~records (index, (check : H.check)) =
+  let output =
+    H.run ~cwd:root checker [ "check"; "--arch"; check.arch; "--"; check.path ]
+  in
+  let o_status, o, log =
+    match oracle with
+    | Some compiler ->
+        let log =
+          H.run ~merge:true compiler
+            [
+              "-arch";
+              check.arch;
+              "-until_cstexp";
+              Filename.concat root check.path;
+            ]
+        in
+        (log.H.status, compiler_first ~root log.H.out, log.H.out)
+    | None -> (
+        match record_for records check.path check.arch with
+        | Some r when not r.r_beyond ->
+            ( 1,
+              {
+                line = r.r_line;
+                column = r.r_column;
+                kind = r.r_kind;
+                message = r.r_message;
+              },
+              "" )
+        | _ -> (0, nothing, ""))
+  in
+  {
+    index;
+    group = H.group_of check.path;
+    path = check.path;
+    arch = check.arch;
+    label = check.label;
+    c_status = output.H.status;
+    c = checker_first output.H.out;
+    o_status;
+    o = { o with message = normalise o.message };
+    raw = [ output.H.out; output.H.err; log ];
+  }
+
+(* ------------------------------------------------------------------ *)
+(* The report *)
+
+let ordered_groups rows =
+  List.fold_left
+    (fun acc r -> if List.mem r.group acc then acc else acc @ [ r.group ])
+    [] rows
+
