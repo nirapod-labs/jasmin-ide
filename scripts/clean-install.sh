@@ -197,3 +197,200 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
+if [ -z "$label" ]; then
+	label=${vsix##*/}
+	label=${label%.vsix}
+fi
+
+note "package $vsix"
+note "label $label"
+note "host $platform $(uname -m), $(uname -r)"
+note "date $(date -u +%FT%TZ)"
+note "work $work"
+
+note "size $(wc -c <"$vsix" | tr -d ' ') bytes"
+note "sha256 $(digest_of "$vsix")"
+
+install_package=$vsix
+if [ "$quarantine" -eq 1 ]; then
+	install_package="$work/quarantined-${vsix##*/}"
+	cp "$vsix" "$install_package"
+	if [ "$platform" = Darwin ]; then
+		xattr -w com.apple.quarantine "0081;$(date +%s);Safari;" "$install_package" ||
+			fatal "could not write the download attribute on $install_package"
+		note "quarantine written onto $(basename "$install_package") (a simulated download; the package was built on this machine)"
+	else
+		note "quarantine not applicable on $platform (the platform has no download attribute)"
+	fi
+fi
+
+if [ "$platform" = Darwin ]; then
+	download_attribute=$(xattr -p com.apple.quarantine "$install_package" 2>/dev/null)
+	note "xattr package $(basename "$install_package") $(xattr_of "$install_package" | sed 's/^$/none/')"
+	if [ -n "$download_attribute" ]; then
+		note "quarantine package yes ($download_attribute)"
+	else
+		note "quarantine package no (the package was built on this machine, not downloaded)"
+	fi
+else
+	note "quarantine package not applicable on $platform (the platform has no download attribute)"
+fi
+
+command -v unzip >/dev/null 2>&1 || skipped "no unzip on PATH"
+unpacked="$work/unpacked"
+mkdir -p "$unpacked" || fatal "could not make $unpacked"
+unzip -q "$install_package" -d "$unpacked" || fatal "unzip could not read $install_package"
+
+[ -f "$unpacked/extension/package.json" ] ||
+	fatal "$install_package holds no extension/package.json; it is not an editor package"
+
+note "unpacked $(find "$unpacked" -type f | wc -l | tr -d ' ') file(s) into $unpacked"
+find "$unpacked" -type f | LC_ALL=C sort | while IFS= read -r file; do
+	note "mode unpacked $(mode_of "$file")"
+done
+if [ "$platform" = Darwin ]; then
+	find "$unpacked" -type f | LC_ALL=C sort | while IFS= read -r file; do
+		note "xattr unpacked $(basename "$file") $(xattr_of "$file" | sed 's/^$/none/')"
+	done
+fi
+
+bundled="$unpacked/extension/server/jasmin-lsp"
+if [ -f "$bundled" ]; then
+	carries_server=1
+	note "server bundled extension/server/jasmin-lsp $(mode_bits "$bundled"), $(digest_of "$bundled")"
+	if ! is_executable "$bundled"; then
+		fatal "the bundled server is not executable in the unpacked package ($(mode_bits "$bundled"))"
+	fi
+elif [ "$require_server" -eq 1 ]; then
+	fatal "$install_package carries no extension/server/jasmin-lsp, and --require-server asks for one"
+else
+	carries_server=0
+	note "server none in this package: the extension finds jasmin-lsp on PATH"
+fi
+
+extensions="$work/extensions"
+user_data="$work/user-data"
+mkdir -p "$extensions" "$user_data" || fatal "could not make the editor directories"
+
+if ! command -v "$code_cli" >/dev/null 2>&1; then
+	skipped "no editor command line: $code_cli is not on PATH"
+fi
+
+editor_version=$("$code_cli" --version 2>/dev/null | tr '\n' ' ')
+[ -n "$editor_version" ] && note "editor $code_cli $editor_version"
+
+note "install $code_cli --install-extension $(basename "$install_package") --force"
+install_output=$("$code_cli" --install-extension "$install_package" --force \
+	--extensions-dir "$extensions" --user-data-dir "$user_data" 2>&1)
+install_status=$?
+[ -n "$install_output" ] && printf '%s\n' "$install_output" | sed 's/^/  | /'
+if [ "$install_status" -ne 0 ]; then
+	note "install exit $install_status"
+	fatal "the editor's command line could not install the package (exit $install_status)"
+fi
+note "install exit $install_status"
+
+installed=$(find "$extensions" -mindepth 1 -maxdepth 1 -type d | LC_ALL=C sort)
+count=$(printf '%s\n' "$installed" | grep -c . || true)
+[ "$count" -eq 1 ] ||
+	fatal "the install left $count directories in $extensions, not the one package it was given"
+note "installed $installed"
+
+find "$installed" -type f | LC_ALL=C sort | while IFS= read -r file; do
+	note "mode installed $(mode_of "$file")"
+done
+if [ "$platform" = Darwin ]; then
+	find "$installed" -type f | LC_ALL=C sort | while IFS= read -r file; do
+		note "xattr installed $(basename "$file") $(xattr_of "$file" | sed 's/^$/none/')"
+	done
+fi
+
+(cd "$unpacked/extension" && find . -type f | LC_ALL=C sort) >"$work/package-files.txt"
+changed=0
+checked=0
+byte_checked=0
+manifest_checked=0
+while IFS= read -r file; do
+	checked=$((checked + 1))
+	relative=${file#./}
+	source_file="$unpacked/extension/$relative"
+	installed_file="$installed/$relative"
+	if [ ! -f "$installed_file" ]; then
+		note "missing installed $relative"
+		changed=$((changed + 1))
+		continue
+	fi
+	if [ "$relative" = package.json ]; then
+		if command -v node >/dev/null 2>&1; then
+			if node "$here/clean-install/manifest.mjs" "$source_file" "$installed_file"; then
+				manifest_checked=1
+			else
+				changed=$((changed + 1))
+			fi
+		else
+			note "manifest installed package.json not compared (no node on PATH)"
+		fi
+		continue
+	fi
+	byte_checked=$((byte_checked + 1))
+	if [ "$(digest_of "$source_file")" != "$(digest_of "$installed_file")" ]; then
+		note "changed installed $relative"
+		changed=$((changed + 1))
+	fi
+done <"$work/package-files.txt"
+[ "$changed" -eq 0 ] ||
+	fatal "the installed tree differs from the package in $changed file(s)"
+note "bytes $byte_checked file(s) of $checked byte-identical after the install"
+[ "$manifest_checked" -eq 1 ] && note "manifest package.json installed with the same fields as the package"
+
+extra=$(cd "$installed" && find . -type f | LC_ALL=C sort | while IFS= read -r file; do
+	grep -qxF "$file" "$work/package-files.txt" || printf '%s\n' "${file#./}"
+done)
+if [ -n "$extra" ]; then
+	note "extra installed $(printf '%s' "$extra" | tr '\n' ' ')"
+fi
+
+if [ "$carries_server" -eq 1 ]; then
+	installed_server="$installed/server/jasmin-lsp"
+	[ -f "$installed_server" ] || fatal "the install dropped server/jasmin-lsp"
+	bits=$(mode_bits "$installed_server")
+	note "exec-bit server/jasmin-lsp $bits $(if is_executable "$installed_server"; then echo executable; else echo 'not executable'; fi)"
+	if [ "$platform" = Darwin ]; then
+		note "xattr installed server/jasmin-lsp $(xattr_of "$installed_server" | sed 's/^$/none/')"
+	fi
+	is_executable "$installed_server" ||
+		fatal "the installed server is not executable (mode $bits): the editor cannot start it"
+	note "PASS exec-bit server/jasmin-lsp is executable (mode $bits)"
+fi
+
+if [ "$window" -eq 0 ]; then
+	note "skip window (--no-window)"
+	done_message="installed and checked, the editor was not started"
+else
+	checker="$here/clean-install/check-vscode.mjs"
+	[ -f "$checker" ] || fatal "no window check at $checker"
+	command -v node >/dev/null 2>&1 || skipped "no node on PATH: the window check cannot run"
+
+	note "window node $checker --extension $installed"
+	window_status=0
+	if [ -n "$vscode_version" ]; then
+		node "$checker" --extension "$installed" --work "$work/window" \
+			--extensions-dir "$extensions" --user-data-dir "$user_data" \
+			--version "$vscode_version" || window_status=$?
+	else
+		node "$checker" --extension "$installed" --work "$work/window" \
+			--extensions-dir "$extensions" --user-data-dir "$user_data" || window_status=$?
+	fi
+	case $window_status in
+	0) ;;
+	3) skipped "the window check cannot run on this host, and said why above" ;;
+	*) fatal "the window check failed (exit $window_status)" ;;
+	esac
+
+	note "PASS diagnostics and definition from the installed package"
+	done_message="installed from $(basename "$vsix") and checked"
+fi
+
+note "the halves this run did not check:"
+status_of_halves
+note "DONE $label: $done_message"
