@@ -500,3 +500,36 @@ let selftest () =
 (* ------------------------------------------------------------------ *)
 (* The command line *)
 
+let () =
+  let corpora = ref []
+  and step = ref 13
+  and seed = ref 1
+  and limit = ref 20000 in
+  let quiet = ref false and selftest_requested = ref false in
+  let spec =
+    [
+      ( "--corpus",
+        Arg.String (fun directory -> corpora := directory :: !corpora),
+        "a corpus directory to sample" );
+      ("--step", Arg.Set_int step, "sample every Nth byte (default 13)");
+      ("--seed", Arg.Set_int seed, "the seed folded into the sample (default 1)");
+      ( "--limit",
+        Arg.Set_int limit,
+        "the most positions to compare (default 20000)" );
+      ("--quiet", Arg.Set quiet, "print only the differences");
+      ( "--selftest",
+        Arg.Set selftest_requested,
+        "check this program's own plumbing" );
+    ]
+  in
+  let anonymous argument =
+    raise (Arg.Bad ("unexpected argument: " ^ argument))
+  in
+  Arg.parse spec anonymous usage;
+  if !selftest_requested then selftest ()
+  else
+    let corpora = List.rev !corpora in
+    if corpora = [] then (
+      prerr_endline usage;
+      exit 2);
+    exit (run ~corpora ~step:!step ~seed:!seed ~limit:!limit ~quiet:!quiet)
