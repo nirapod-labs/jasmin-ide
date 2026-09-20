@@ -731,12 +731,6 @@ let handle_initialized_request t request =
           ])
 
 let dispatch_request t (request : Jsonrpc.Request.t) =
-  (let f =
-     open_out_gen [ Open_append; Open_creat ] 0o644 "/tmp/jasmin-inbound.log"
-   in
-   output_string f ("request: " ^ request.method_ ^ "\n");
-   flush f;
-   close_out f);
   if String.equal request.method_ "initialize" then
     match Lsp.Client_request.of_jsonrpc request with
     | Error message ->

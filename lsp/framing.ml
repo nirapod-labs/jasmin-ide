@@ -167,6 +167,34 @@ let too_deep (body : string) : bool =
     body;
   !deepest > max_json_depth
 
+(* A [params] member whose value is JSON null means "no parameters", which
+   JSON-RPC 2.0 allows and which LSP clients do send for [shutdown] and
+   [exit]. The [lsp] and [jsonrpc] packages are pinned at 1.27.0 and their
+   decoder reads that member with a converter that accepts only an object or
+   an array, so a null one is refused as ["invalid structured value"] and the
+   whole frame is lost: a client that sends it sees a server that ignores the
+   request. The member is therefore dropped before the decoder is handed the
+   value, which makes null mean exactly what an absent member means. The typed
+   message layer then answers ["params are required"] for a method that needs
+   them, and reads none for a method that takes none.
+
+   Nothing else is rewritten. A [params] of another type still reaches the
+   decoder and is still refused; a member named [params] inside a parameter
+   object is a value of its own, not a message, so it is left alone; and a
+   batch is normalised element by element, because each element of one is a
+   message. *)
+let drop_null_params : Yojson.Safe.t -> Yojson.Safe.t =
+  let is_null_params (name, value) =
+    String.equal name "params" && match value with `Null -> true | _ -> false
+  in
+  let message = function
+    | `Assoc fields ->
+        `Assoc (List.filter (fun field -> not (is_null_params field)) fields)
+    | json -> json
+  in
+  function
+  | `List messages -> `List (List.map message messages) | json -> message json
+
 let dispatch channels =
   let poison message =
     channels.poisoned <- true;
@@ -200,7 +228,10 @@ let dispatch channels =
         if looks_like_json text && too_deep text then
           poison "a JSON nesting depth above the limit"
         else
-          match Jsonrpc.Packet.t_of_yojson (Yojson.Safe.from_string text) with
+          match
+            Jsonrpc.Packet.t_of_yojson
+              (drop_null_params (Yojson.Safe.from_string text))
+          with
           | packet -> Some (Ok packet)
           | exception Yojson.Json_error message ->
               Some (Error ("invalid json: " ^ message))
