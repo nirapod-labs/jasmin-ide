@@ -84,3 +84,87 @@ export async function clearStagedServer(extensionDirectory) {
   await rm(serverDirectoryPath(extensionDirectory), {recursive: true, force: true});
 }
 
+/** Reports whether an extension directory has a staged `server/`. */
+export async function hasStagedServer(extensionDirectory) {
+  const found = await stat(serverDirectoryPath(extensionDirectory)).catch(() => undefined);
+  return found !== undefined;
+}
+
+/**
+ * What the extension's own lookup finds in a staged extension directory.
+ *
+ * The setting is empty and `PATH` is not consulted, because the question is
+ * only whether the package carries a server the extension will find: a host
+ * that has `jasmin-lsp` installed must not be able to make a package without
+ * one look correct.
+ */
+export function stagedResolution(extensionDirectory) {
+  return resolveServerPath({
+    settingPath: "",
+    extensionPath: extensionDirectory,
+    pathLookup: () => undefined,
+    isFile
+  });
+}
+
+/**
+ * Checks a staged extension directory the way a package of it is judged: the
+ * lookup finds `server/jasmin-lsp`, the digest file is there, it names that
+ * file, and the digest it records is the digest of the bytes on disk.
+ *
+ * Returns the list of problems, empty when the directory passes. Every
+ * problem is reported rather than the first, because a message that names one
+ * thing at a time makes a round trip for each.
+ */
+export async function inspectStagedServer(extensionDirectory) {
+  const problems = [];
+  const resolution = stagedResolution(extensionDirectory);
+
+  if (resolution.kind !== "found") {
+    problems.push(`the server lookup does not find ${serverDirectory}/${serverExecutable}`);
+    return problems;
+  }
+  if (resolution.source !== "extension") {
+    problems.push(`the server lookup found the server from ${resolution.source}`);
+  }
+  if (resolution.path !== bundledServerPath(extensionDirectory)) {
+    problems.push(`the server lookup found ${resolution.path}, not the bundled server`);
+  }
+
+  const serverPath = bundledServerPath(extensionDirectory);
+  const stagedMode = (await stat(serverPath)).mode & 0o777;
+  if ((stagedMode & 0o111) === 0) {
+    problems.push(`the bundled server has mode ${stagedMode.toString(8)}, which is not executable`);
+  }
+
+  let digestText;
+  try {
+    digestText = await readFile(bundledDigestPath(extensionDirectory), "utf8");
+  } catch {
+    problems.push(`${serverDirectory}/${digestFileName} is missing`);
+    return problems;
+  }
+
+  let entries;
+  try {
+    entries = parseDigestFile(digestText);
+  } catch (error) {
+    problems.push(`${serverDirectory}/${digestFileName} does not parse: ${error.message}`);
+    return problems;
+  }
+
+  const recorded = entries.get(serverExecutable);
+  if (recorded === undefined) {
+    problems.push(`${serverDirectory}/${digestFileName} has no line for ${serverExecutable}`);
+    return problems;
+  }
+
+  const actual = digestOfBytes(await readFile(serverPath));
+  if (recorded !== actual) {
+    problems.push(
+      `${serverDirectory}/${digestFileName} records ${recorded} for ${serverExecutable}, but the file is ${actual}`
+    );
+  }
+
+  return problems;
+}
