@@ -856,6 +856,7 @@ let positive option value =
 let command_of_word = function
   | "whole" -> Whole
   | "keystroke" -> Keystroke
+  | "request" -> Request
   | "largest" -> Largest
   | word -> die ("unknown command: " ^ word ^ " (whole, keystroke, largest)")
 
