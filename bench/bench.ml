@@ -858,7 +858,8 @@ let command_of_word = function
   | "keystroke" -> Keystroke
   | "request" -> Request
   | "largest" -> Largest
-  | word -> die ("unknown command: " ^ word ^ " (whole, keystroke, largest)")
+  | word ->
+      die ("unknown command: " ^ word ^ " (whole, keystroke, request, largest)")
 
 let parse_options arguments =
   let rec loop options rest =
