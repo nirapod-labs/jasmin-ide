@@ -938,12 +938,12 @@ let units_of options =
 let main arguments =
   let options = parse_options arguments in
   match options.command with
-  | None -> die "no command: one of whole, keystroke, largest"
+  | None -> die "no command: one of whole, keystroke, request, largest"
   | Some Largest -> (
       match options.files with
       | [ directory ] -> largest ~count:options.count directory
       | _ -> die "largest takes one directory")
-  | Some ((Whole | Keystroke) as command) -> (
+  | Some ((Whole | Keystroke | Request) as command) -> (
       let units = units_of options in
       if units = [] then die "no unit to measure: name a file or pass --units";
       match command with
@@ -961,6 +961,15 @@ let main arguments =
           let results = List.map (measure_keystroke ~runs:options.runs) units in
           if options.samples then print_keystroke_samples results;
           print_keystroke_table results
+      | Request ->
+          Printf.printf
+            "editor requests from a warm snapshot, %d runs per unit, \
+             milliseconds against 20 (snapshot) and 100 (project)\n"
+            options.runs;
+          let results = List.map (measure_requests ~runs:options.runs) units in
+          if options.samples then print_request_samples results;
+          print_request_table results;
+          print_request_tally results
       | Largest -> ())
 
 let () = main (List.tl (Array.to_list Sys.argv))
