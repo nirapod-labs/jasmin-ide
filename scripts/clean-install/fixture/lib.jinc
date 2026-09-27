@@ -1,0 +1,5 @@
+fn twice(reg u32 value) -> reg u32 {
+  reg u32 result;
+  result = value + value;
+  return result;
+}
