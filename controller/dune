@@ -1,3 +1,34 @@
 (library
  (name jide_controller)
- (libraries jide_lang jide_lsp jide_engine lsp jsonrpc yojson unix))
+ (libraries
+  jide_lang
+  jide_lsp
+  jide_engine
+  jide_jasmin
+  lsp
+  jsonrpc
+  yojson
+  unix))
+
+; Which Jasmin source this build uses, compiled in. It is a question only the
+; build can answer: the vendored library and an installed one carry the same
+; module name, so `%{lib-available:jasmin}` is true either way, and nothing at
+; run time can tell them apart. The rule asks the source tree and writes the
+; answer as a module, and controller/build-route.sh says how.
+;
+; (source_tree ../vendor/jasmin) is the dependency that matters: adding or
+; removing the vendored tree re-runs the rule and rewrites the module with the
+; other answer, in both directions (measured). It is also why the vendored
+; tree must not be named in a `(deps ...)` as a plain directory, which would
+; not track the files inside it.
+
+(rule
+ (targets build_route.ml)
+ (deps
+  (source_tree ../vendor/jasmin)
+  ../vendor/jasmin.lock
+  build-route.sh)
+ (action
+  (with-stdout-to
+   build_route.ml
+   (run sh build-route.sh))))

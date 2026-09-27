@@ -150,12 +150,36 @@ let serve () =
       log ("fatal: " ^ Printexc.to_string exn);
       1
 
+let print_line line =
+  print_string line;
+  print_newline ();
+  flush stdout
+
 let () =
-  (* `check` is read before the server is created, so the batch mode writes
-     nothing but its own lines to stdout and never touches the protocol. *)
+  (* The command line is read before the server is created, so the modes that
+     are not the server write nothing but their own lines to stdout and never
+     touch the protocol (`check` says so too: compiler/cli.ml). An argument
+     this program does not take is refused here rather than served: falling
+     through to `serve` would wait on standard input for an editor that is
+     not coming. *)
   let code =
-    match Array.to_list Sys.argv with
-    | _ :: "check" :: arguments -> Jide_check.Cli.main arguments
-    | _ -> serve ()
+    match
+      Jide_controller.Cli.parse
+        (match Array.to_list Sys.argv with
+        | _ :: arguments -> arguments
+        | [] -> [])
+    with
+    | Jide_controller.Cli.Check arguments -> Jide_check.Cli.main arguments
+    | Jide_controller.Cli.Version ->
+        print_line (Jide_controller.Cli.version_line ());
+        0
+    | Jide_controller.Cli.Help ->
+        print_line (Jide_controller.Cli.help ());
+        0
+    | (Jide_controller.Cli.Unknown _ | Jide_controller.Cli.Unexpected _) as
+      refused ->
+        List.iter prerr_endline (Jide_controller.Cli.refusal refused);
+        2
+    | Jide_controller.Cli.Serve -> serve ()
   in
   exit code
