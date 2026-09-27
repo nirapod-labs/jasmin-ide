@@ -346,3 +346,339 @@ let write_file path text =
   Out_channel.with_open_bin path (fun channel ->
       Out_channel.output_string channel text)
 
+let temp_suffix = function
+  | Unix.WEXITED code -> code
+  | Unix.WSIGNALED signal | Unix.WSTOPPED signal -> 128 + signal
+
+(* [run ~compiler ~arguments] runs the compiler once and answers its status
+   and the bytes it wrote on both streams. Its output goes to a file, which is
+   read after the process is reaped, so a chatty compiler cannot fill a pipe
+   nobody drains. *)
+let run ~(compiler : string) ~(arguments : string list) =
+  let log = remember (Filename.temp_file "intrinsics-run-" ".log") in
+  let out =
+    Unix.openfile log [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600
+  in
+  let devnull = Unix.openfile "/dev/null" [ Unix.O_RDONLY ] 0 in
+  let argv = Array.of_list (compiler :: arguments) in
+  let pid = Unix.create_process compiler argv devnull out out in
+  Unix.close out;
+  Unix.close devnull;
+  let status = snd (Unix.waitpid [] pid) in
+  (temp_suffix status, read_file log)
+
+(* [run_pool ~jobs ~spawn ~read_answer tasks] runs every task, at most [jobs]
+   at once, and returns their answers in the tasks' own order. [spawn task]
+   starts one process and answers its pid and the file its output goes to. *)
+let run_pool ~(jobs : int) ~(spawn : 'task -> int * string)
+    ~(read_answer : 'task -> int -> string -> 'result) (tasks : 'task list) =
+  let tasks = Array.of_list tasks in
+  let answers = Array.make (Array.length tasks) None in
+  let next = ref 0 and running = ref [] in
+  let total = Array.length tasks in
+  let fill () =
+    while List.length !running < max 1 jobs && !next < total do
+      let index = !next in
+      incr next;
+      let pid, log = spawn tasks.(index) in
+      running := (pid, index, log) :: !running
+    done
+  in
+  let rec pump () =
+    fill ();
+    if !running <> [] then
+      let pid, status = Unix.waitpid [] (-1) in
+      match List.find_opt (fun (other, _, _) -> other = pid) !running with
+      | None -> pump ()
+      | Some (_, index, log) ->
+          running := List.filter (fun (other, _, _) -> other <> pid) !running;
+          let output = try read_file log with Sys_error _ -> "" in
+          answers.(index) <-
+            Some (read_answer tasks.(index) (temp_suffix status) output);
+          pump ()
+  in
+  pump ();
+  (* [pump] returns only when every task has been spawned and reaped, and each
+     reaping writes its own index, so no slot is left empty. *)
+  Array.to_list answers
+  |> List.map (function
+       | Some answer -> answer
+       | None -> invalid_arg "intrinsics: a task was never reaped")
+
+(* ------------------------------------------------------------------ *)
+(* One architecture *)
+
+type entry = { name : string; suffixes : string list; class_ : int }
+type difference = { subject : string; compiler : string; engine : string }
+
+let sorted names = List.sort_uniq String.compare names
+let print_set names = "[" ^ String.concat "; " names ^ "]"
+
+let help_of ~(compiler : string) ~(arch : string) =
+  match run ~compiler ~arguments:[ "-arch"; arch; "-help-intrinsics" ] with
+  | 0, output -> output
+  | status, output ->
+      raise
+        (Unparsable
+           (Printf.sprintf "%s: -help-intrinsics exited %d: %s" arch status
+              (String.trim output)))
+
+(* The probes one name needs, before any answer is read. A name in the ARM
+   class is asked for its four spellings; every other name is asked once, with
+   a suffix of another class. *)
+let planned_probes ~(class_ : int) ~(name : string) =
+  if class_ = 6 then
+    List.map
+      (fun suffix -> (Spelling suffix, name ^ suffix))
+      [ ""; "S"; "cc"; "Scc" ]
+  else [ (Report, name ^ "_" ^ probe_suffix class_) ]
+
+(* [probe_all] runs every planned probe of every name and answers, per name,
+   the compiler's suffix list or why it was not measured. *)
+let probe_all ~(compiler : string) ~(jobs : int) ~(arch : string)
+    ~(entries : entry list) ~(raw_dir : string option) =
+  let tasks =
+    List.concat_map
+      (fun (entry : entry) ->
+        List.map
+          (fun (probe, written) -> (entry.name, entry.class_, probe, written))
+          (planned_probes ~class_:entry.class_ ~name:entry.name))
+      entries
+  in
+  let answers : (answer * int) list =
+    run_pool ~jobs
+      ~spawn:(fun (_, _, _, written) ->
+        let path =
+          remember
+            (Filename.temp_file (Printf.sprintf "probe-%s-" arch) ".jazz")
+        in
+        write_file path (source ~written);
+        let log = remember (Filename.temp_file "probe-" ".log") in
+        let out =
+          Unix.openfile log [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600
+        in
+        let devnull = Unix.openfile "/dev/null" [ Unix.O_RDONLY ] 0 in
+        let argv = [| compiler; "-arch"; arch; "-until_typing"; path |] in
+        let pid = Unix.create_process compiler argv devnull out out in
+        Unix.close out;
+        Unix.close devnull;
+        (pid, log))
+      ~read_answer:(fun (_, _, probe, _) status output ->
+        (classify ~probe ~status ~output, status))
+      tasks
+  in
+  let table = Hashtbl.create 128 in
+  List.iter2
+    (fun (name, class_, probe, written) (answer, status) ->
+      let previous = Option.value (Hashtbl.find_opt table name) ~default:[] in
+      Hashtbl.replace table name
+        ((class_, probe, written, answer, status) :: previous))
+    tasks answers;
+  (match raw_dir with
+  | None -> ()
+  | Some directory ->
+      let lines =
+        List.map2
+          (fun (name, class_, probe, written) (answer, status) ->
+            Printf.sprintf "%s\t%d\t%s\t%s\t%d\t%s" name class_
+              (match probe with
+              | Report -> "report"
+              | Spelling suffix -> "spelling:" ^ suffix)
+              written status (label_of_answer answer))
+          tasks answers
+      in
+      write_file
+        (Filename.concat directory ("probes-" ^ arch ^ ".tsv"))
+        (String.concat "\n" lines ^ "\n"));
+  let suffixes_of name =
+    let own = List.rev (Hashtbl.find table name) in
+    match
+      List.find_map
+        (fun (_, probe, _, answer, _) ->
+          match (probe, answer) with
+          | Report, `Known suffixes -> Some suffixes
+          | _ -> None)
+        own
+    with
+    | Some suffixes -> `Known suffixes
+    | None -> (
+        let spellings =
+          List.filter_map
+            (fun (_, probe, _, answer, _) ->
+              match (probe, answer) with
+              | Spelling suffix, `Accepted -> Some suffix
+              | _ -> None)
+            own
+        in
+        if spellings <> [] then `Known spellings
+        else
+          match
+            List.find_opt
+              (fun (_, _, _, answer, _) ->
+                match answer with `Unknown -> true | _ -> false)
+              own
+          with
+          | Some _ -> `Unknown
+          | None -> (
+              match own with
+              | (_, _, _, `Other reason, _) :: _ -> `Other reason
+              | (_, _, _, `Broken reason, _) :: _ -> `Other ("broken: " ^ reason)
+              | _ -> `Other "no answer"))
+  in
+  List.map (fun (entry : entry) -> (entry.name, suffixes_of entry.name)) entries
+
+let compare_arch ~(compiler : string) ~(jobs : int) ~(arch : string)
+    ~(raw_dir : string option) =
+  let help_text = help_of ~compiler ~arch in
+  (match raw_dir with
+  | None -> ()
+  | Some directory ->
+      write_file (Filename.concat directory ("help-" ^ arch ^ ".txt")) help_text);
+  let groups = groups_of_help help_text in
+  check_headers ~arch groups;
+  let printed =
+    List.concat
+      (List.mapi
+         (fun class_ (_, names) -> List.map (fun name -> (name, class_)) names)
+         groups)
+  in
+  let entries =
+    List.map
+      (fun (entry : Jide_jasmin.Intrinsics.t) ->
+        {
+          name = entry.Jide_jasmin.Intrinsics.name;
+          suffixes = entry.Jide_jasmin.Intrinsics.suffixes;
+          class_ = class_of_suffixes entry.Jide_jasmin.Intrinsics.suffixes;
+        })
+      (Jide_jasmin.Intrinsics.all ~arch)
+  in
+  let printed_names = List.map fst printed
+  and engine_names = List.map (fun (entry : entry) -> entry.name) entries in
+  let differences = ref [] in
+  let add subject compiler engine =
+    differences := { subject; compiler; engine } :: !differences
+  in
+  List.iter
+    (fun name ->
+      if not (List.mem name engine_names) then
+        add ("name " ^ name) "listed" "absent")
+    printed_names;
+  List.iter
+    (fun name ->
+      if not (List.mem name printed_names) then
+        add ("name " ^ name) "absent" "listed")
+    engine_names;
+  let moved =
+    List.filter
+      (fun name ->
+        match
+          ( List.assoc_opt name printed,
+            List.find_opt
+              (fun (entry : entry) -> String.equal entry.name name)
+              entries )
+        with
+        | Some compiler_class, Some entry -> compiler_class <> entry.class_
+        | _ -> false)
+      engine_names
+  in
+  List.iter
+    (fun name ->
+      let compiler_class = Option.get (List.assoc_opt name printed) in
+      let entry =
+        Option.get
+          (List.find_opt
+             (fun (entry : entry) -> String.equal entry.name name)
+             entries)
+      in
+      add ("group " ^ name)
+        ("group " ^ string_of_int compiler_class)
+        ("group " ^ string_of_int entry.class_))
+    moved;
+  let answers = probe_all ~compiler ~jobs ~arch ~entries ~raw_dir in
+  let compared = ref 0 and equal = ref 0 and not_compared = ref 0 in
+  let suffix_differences = ref [] in
+  List.iter
+    (fun (entry : entry) ->
+      match List.assoc_opt entry.name answers with
+      | Some (`Known compiler_suffixes) ->
+          incr compared;
+          if sorted compiler_suffixes = sorted entry.suffixes then incr equal
+          else
+            suffix_differences :=
+              {
+                subject = "suffixes " ^ entry.name;
+                compiler = print_set compiler_suffixes;
+                engine = print_set entry.suffixes;
+              }
+              :: !suffix_differences
+      | Some `Unknown ->
+          incr not_compared;
+          suffix_differences :=
+            {
+              subject = "suffixes " ^ entry.name;
+              compiler = "not measured: the compiler does not know the name";
+              engine = print_set entry.suffixes;
+            }
+            :: !suffix_differences
+      | Some (`Other reason) ->
+          incr not_compared;
+          suffix_differences :=
+            {
+              subject = "suffixes " ^ entry.name;
+              compiler = "not measured: " ^ reason;
+              engine = print_set entry.suffixes;
+            }
+            :: !suffix_differences
+      | None ->
+          incr not_compared;
+          suffix_differences :=
+            {
+              subject = "suffixes " ^ entry.name;
+              compiler = "not measured: no probe";
+              engine = print_set entry.suffixes;
+            }
+            :: !suffix_differences)
+    entries;
+  let differences = List.rev (!differences @ !suffix_differences) in
+  let same_bytes =
+    String.equal (Jide_jasmin.Intrinsics.compiler_help ~arch) help_text
+  in
+  let missing_from_engine =
+    List.length
+      (List.filter (fun name -> not (List.mem name engine_names)) printed_names)
+  and missing_from_compiler =
+    List.length
+      (List.filter (fun name -> not (List.mem name printed_names)) engine_names)
+  in
+  Printf.printf "== %s\n%!" arch;
+  Printf.printf
+    "names: the compiler prints %d in %d groups, the engine lists %d; missing \
+     from the compiler %d, missing from the engine %d, printed in another \
+     group %d\n\
+     %!"
+    (List.length printed_names)
+    (List.length groups) (List.length engine_names) missing_from_compiler
+    missing_from_engine (List.length moved);
+  Printf.printf
+    "suffixes: %d names probed, %d equal, %d different, %d not measured\n%!"
+    !compared !equal
+    (List.length !suffix_differences)
+    !not_compared;
+  Printf.printf "the linked library's own rendering: %s\n%!"
+    (if same_bytes then "the same bytes as the compiler's"
+     else "DIFFERENT from the compiler's");
+  List.iter
+    (fun difference ->
+      Printf.printf "different %s: compiler %s, engine %s\n%!"
+        difference.subject difference.compiler difference.engine)
+    differences;
+  flush stdout;
+  ( differences <> [] || (not same_bytes) || !not_compared > 0,
+    List.length printed_names,
+    List.length engine_names,
+    !compared,
+    !equal )
+
+(* ------------------------------------------------------------------ *)
+(* The self-test *)
+
