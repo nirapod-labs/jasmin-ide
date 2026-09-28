@@ -1,23 +1,28 @@
 ; The command line of the server binary, over the real binary: `--version`,
-; `--help`, an option it does not take, and the `check` mode that was already
-; there. One `.t` per behaviour.
+; `--help`, the `--stdio` a language client passes, an option it does not
+; take, and the `check` mode that was already there. One `.t` per behaviour.
 ;
 ; Every input is either a `.t` file, which dune adds to the stanza itself, or
-; one of the four entries below: the binary and the three files a test reads
-; to check what the binary says against where the fact comes from. A file a
-; test reads that is not listed here would not invalidate its recorded
-; result, so a dependency added later belongs in this list too.
+; one of the five entries below: the binary, the two files a test reads to
+; check what the binary says against where the fact comes from, and the two
+; helpers the one session test drives it through. A file a test reads that is
+; not listed here would not invalidate its recorded result, so a dependency
+; added later belongs in this list too.
+;
+; The two helpers are the lifecycle suite's own, for the same two reasons:
+; frames.sh turns one JSON body per line into protocol frames, and bounded.sh
+; kills a server that stops answering instead of letting the suite wait. Both
+; are read-only dependencies; the tests here that name no session use
+; neither.
 ;
 ; The binary is declared even though dune would build it anyway: the
 ; dependency is what makes a rebuilt server re-run these tests instead of
 ; leaving a recorded pass from the previous binary in place.
-;
-; None of the tests starts a protocol session: the point of the refusal test
-; is that a bad command line never reaches the loop, so nothing here waits on
-; a client, and no test needs `bounded.sh`.
 
 (cram
  (deps
   %{exe:../../../lsp-server/native/main.exe}
   ../../../controller/version.ml
-  ../../../vendor/jasmin.lock))
+  ../../../vendor/jasmin.lock
+  ../lifecycle/frames.sh
+  ../lifecycle/bounded.sh))

@@ -1,10 +1,10 @@
 A definition request is routed to the engine and answered with a result: the
-engine's locations, or `null` when it has none. The engine this milestone
-ships answers "unavailable" (engine/locate.ml is a stub), so every position is
-an empty answer; what the record pins is the routing — that a position on a
-name, a position in whitespace and a position past the end of the file are all
-answered `null` and none of them is an error. The initialize result shows the
-capability the routing advertises.
+engine's locations, or `null` when it has none. The engine answers from the
+index and the resolver, so the name at request 2 gives its declaration — the
+uri the client opened the document with, and the range of `x` in the
+`reg u32 x` that declares it. A position in whitespace and a position past the
+end of the file are `null`, and neither is an error. The initialize result
+shows the capability the routing advertises.
 
   $ cat > session.txt <<'EOF'
   > {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}
@@ -30,7 +30,7 @@ same text.
   $ sed 's/"version":"[^"]*"/"version":"<version>"/' replies.txt
   1 result {"capabilities":{"completionProvider":{"resolveProvider":false,"triggerCharacters":["#",":"]},"definitionProvider":true,"documentHighlightProvider":true,"documentSymbolProvider":true,"hoverProvider":true,"referencesProvider":true,"semanticTokensProvider":{"full":true,"legend":{"tokenModifiers":["declaration","inline","export"],"tokenTypes":["namespace","type","function","parameter","variable","property","keyword"]}},"signatureHelpProvider":{"triggerCharacters":["(",","]},"textDocumentSync":1,"workspaceSymbolProvider":true},"serverInfo":{"name":"jasmin-lsp","version":"<version>"}}
   - textDocument/publishDiagnostics {"diagnostics":[],"uri":"file:///tmp/navigation.jazz","version":1}
-  2 result null
+  2 result [{"range":{"end":{"character":11,"line":1},"start":{"character":10,"line":1}},"uri":"file:///tmp/navigation.jazz"}]
   3 result null
   4 result null
   5 result null

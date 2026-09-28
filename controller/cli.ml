@@ -5,7 +5,13 @@
     arguments of its own is [check] and its reader is
     {!Jide_check.Request.parse}. [CLI] does not depend on that library: the
     arguments after `check` are passed through unread, so the two readers
-    cannot disagree about which one owns `check --help`. *)
+    cannot disagree about which one owns `check --help`.
+
+    [--stdio] is the one word that names no mode. It names the transport —
+    standard input and output, which is the only one this server has — and a
+    language client passes it to every server it starts. It is accepted and
+    dropped before the mode is read, so it can precede any mode and changes
+    none of them; alone, it leaves the default serve mode. *)
 
 type t =
   | Serve
@@ -15,8 +21,11 @@ type t =
   | Unknown of string
   | Unexpected of string
 
-let parse = function
+let rec parse = function
   | [] -> Serve
+  (* The transport word, which names no mode: dropped, so that what follows
+     is read as if it came first. *)
+  | "--stdio" :: rest -> parse rest
   | "check" :: arguments -> Check arguments
   | ("--version" | "-v") :: _ -> Version
   | ("--help" | "-h") :: _ -> Help
@@ -25,7 +34,7 @@ let parse = function
   | argument :: _ -> Unexpected argument
 
 let usage_line =
-  "usage: jasmin-lsp [--version | --help | check [options] <file>...]"
+  "usage: jasmin-lsp [--stdio] [--version | --help | check [options] <file>...]"
 
 (** An argument that is not an option is refused with its own wording: it is
     not an unknown option, and it is not a file, because this program reads
@@ -61,23 +70,29 @@ let version_line () =
     (route ())
 
 (** The usage block. The modes named are the two the dispatcher has — the
-    default serve mode and [check] — and there is no third. The exit codes
-    are the ones those two already return, plus 2, which [check] already uses
-    for a command line of its own that is wrong, so one line covers both. *)
+    default serve mode and [check] — and there is no third; [--stdio] is an
+    option, not a mode, and the block says what it asks for and that the
+    answer is the only one there is. The exit codes are the ones those two
+    modes already return, plus 2, which [check] already uses for a command
+    line of its own that is wrong, so one line covers both. *)
 let help () =
   String.concat "\n"
     [
-      "usage: " ^ server ^ " [check [options] <file>...]";
+      usage_line;
       "";
       "A language server for Jasmin. With no argument it serves the language";
       "server protocol on standard input and output, which is how an editor";
-      "starts it.";
+      "starts it. Those two streams are the only transport this server has,";
+      "so `--stdio`, which asks for them, is accepted and changes nothing.";
       "";
       "modes:";
       "  (none)            serve the language server protocol on stdin/stdout";
       "  check <file>...   parse and type each file and print a verdict for it";
       "";
       "options:";
+      "  --stdio           serve on standard input and output, the only";
+      "                    transport there is: accepted for compatibility,";
+      "                    because a language client passes it";
       "  -v, --version     print the server version, the Jasmin version and";
       "                    the Jasmin source this build uses, then exit";
       "  -h, --help        print this text, then exit";

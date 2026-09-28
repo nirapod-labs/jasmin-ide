@@ -158,10 +158,12 @@ let print_line line =
 let () =
   (* The command line is read before the server is created, so the modes that
      are not the server write nothing but their own lines to stdout and never
-     touch the protocol (`check` says so too: compiler/cli.ml). An argument
+     touch the protocol (`check` says so too: compiler/cli.mli). An argument
      this program does not take is refused here rather than served: falling
      through to `serve` would wait on standard input for an editor that is
-     not coming. *)
+     not coming. `--stdio`, the transport word a language client passes, is
+     not such an argument: it names the stream this arm already reads, so it
+     is skipped and `serve` runs. *)
   let code =
     match
       Jide_controller.Cli.parse
