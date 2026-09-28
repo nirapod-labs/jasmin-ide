@@ -42,14 +42,23 @@ deps_of_macos() {
 		}'
 }
 
+#
 deps_of_linux() {
-	listing=$("$1" "$2" 2>&1) || true
+	if listing=$("$1" "$2" 2>&1); then
+		status=0
+	else
+		status=$?
+	fi
 	case $listing in
 	*"not a dynamic executable"* | *"statically linked"*)
 		printf 'static\n'
 		return 0
 		;;
 	esac
+	if [ "$status" -ne 0 ]; then
+		printf '%s\n' "${listing%%$'\n'*}" >&2
+		return "$status"
+	fi
 	printf '%s\n' "$listing" | awk '{
 		if (match($0, /\(0x[0-9a-fA-F]+\)/)) {
 			$0 = substr($0, 1, RSTART - 1)
