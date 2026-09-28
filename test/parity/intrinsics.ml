@@ -682,3 +682,201 @@ let compare_arch ~(compiler : string) ~(jobs : int) ~(arch : string)
 (* ------------------------------------------------------------------ *)
 (* The self-test *)
 
+let failures = ref 0
+
+let check name condition =
+  if not condition then (
+    incr failures;
+    Printf.printf "FAIL %s\n%!" name)
+
+let selftest () =
+  let sample_help =
+    String.concat "\n"
+      [
+        "Intrinsics accepting no size suffix:";
+        " - CLC";
+        " - swap";
+        "";
+        "Intrinsics accepting one optional size suffix, e.g., “_64”:";
+        " - ADD";
+        " - copy";
+        "";
+      ]
+  in
+  (match groups_of_help sample_help with
+  | [ (first, [ "CLC"; "swap" ]); (second, [ "ADD"; "copy" ]) ] ->
+      check "parse: the first header" (String.equal first (List.nth headers 0));
+      check "parse: the second header"
+        (String.equal second (List.nth headers 1))
+  | other ->
+      check
+        (Printf.sprintf "parse: two groups (got %d)" (List.length other))
+        false);
+  check "classify: a wrapped suffix list"
+    (classify ~probe:Report ~status:1
+       ~output:
+         "\"f.jazz\", line 3 (7-14):\n\
+          typing error: primitive “ADD” only accepts the following size \
+          annotations: _64,\n\
+          _32,\n\
+          _16,\n\
+          _8\n"
+    = `Known [ "64"; "32"; "16"; "8" ]);
+  check "classify: no size annotation"
+    (classify ~probe:Report ~status:1
+       ~output:
+         "\"f.jazz\", line 3 (7-13):\n\
+          typing error: primitive accepts no size annotation: `CLC'\n"
+    = `Known []);
+  check "classify: an unknown name"
+    (classify ~probe:Report ~status:1
+       ~output:
+         "\"f.jazz\", line 3 (7-14):\n\
+          typing error: unknown primitive: \"add_s16\"\n"
+    = `Unknown);
+  check "classify: a spelling refused"
+    (classify ~probe:(Spelling "S") ~status:1
+       ~output:
+         "typing error: unknown primitive: \"MLAS\" (this mnemonic cannot set \
+          flags)\n"
+    = `Refused);
+  check "classify: a spelling accepted but ill-typed"
+    (classify ~probe:(Spelling "") ~status:1
+       ~output:
+         "typing error: invalid number of arguments, 1 provided instead of 2\n"
+    = `Accepted);
+  check "classify: a wrapper that failed"
+    (match classify ~probe:Report ~status:127 ~output:"wrapper: not found" with
+    | `Broken _ -> true
+    | _ -> false);
+  check "class: none" (class_of_suffixes [] = 0);
+  check "class: a plain size" (class_of_suffixes [ "64"; "32" ] = 1);
+  check "class: a signed size" (class_of_suffixes [ "s16" ] = 2);
+  check "class: a zero/sign extension" (class_of_suffixes [ "u32u16" ] = 3);
+  check "class: one vector" (class_of_suffixes [ "4u64" ] = 4);
+  check "class: two vectors" (class_of_suffixes [ "2u16_2u64" ] = 5);
+  check "class: the probe suffix is never the name's own class"
+    (List.for_all
+       (fun class_ -> class_of_suffixes [ probe_suffix class_ ] <> class_)
+       [ 0; 1; 2; 3; 4; 5 ]);
+  (* The planned probes: a name in the ARM class has four spellings, every
+     other name one report probe. *)
+  check "probe plan: the ARM class"
+    (List.map snd (planned_probes ~class_:6 ~name:"ADD")
+    = [ "ADD"; "ADDS"; "ADDcc"; "ADDScc" ]);
+  check "probe plan: a plain size list"
+    (List.map snd (planned_probes ~class_:1 ~name:"ADD") = [ "ADD_s16" ]);
+  check "probe plan: no suffix list"
+    (List.map snd (planned_probes ~class_:0 ~name:"CLC") = [ "CLC_64" ]);
+  (* The comparison itself: the same table on both sides differs in nothing,
+     and one name removed or one suffix changed is a difference. *)
+  let table = [ ("ADD", [ "64"; "32" ]); ("CLC", []) ] in
+  let differs left right =
+    sorted (List.map fst left) <> sorted (List.map fst right)
+    || List.exists
+         (fun (name, suffixes) ->
+           match List.assoc_opt name right with
+           | Some other -> sorted suffixes <> sorted other
+           | None -> true)
+         left
+  in
+  check "compare: the same table" (not (differs table table));
+  check "compare: a missing name" (differs table (List.tl table));
+  check "compare: another suffix list"
+    (differs table ([ ("ADD", [ "64" ]) ] @ List.tl table));
+  if !failures = 0 then Printf.printf "intrinsics: selftest passed\n%!"
+  else (
+    Printf.printf "intrinsics: %d selftest failure(s)\n%!" !failures;
+    exit 1)
+
+(* ------------------------------------------------------------------ *)
+(* The command line *)
+
+let () =
+  let compiler = ref None and arches = ref [] and jobs = ref 4 in
+  let raw_dir = ref None and selftest_requested = ref false in
+  let spec =
+    [
+      ( "--compiler",
+        Arg.String (fun command -> compiler := Some command),
+        "the compiler command to run" );
+      ( "--arch",
+        Arg.String (fun arch -> arches := arch :: !arches),
+        "an architecture (default: every one)" );
+      ("--jobs", Arg.Set_int jobs, "how many compiler runs at once (default 4)");
+      ( "--raw-dir",
+        Arg.String (fun directory -> raw_dir := Some directory),
+        "write the compiler's own words here" );
+      ( "--selftest",
+        Arg.Set selftest_requested,
+        "check this program's own plumbing" );
+    ]
+  in
+  let anonymous argument =
+    raise (Arg.Bad ("unexpected argument: " ^ argument))
+  in
+  Arg.parse spec anonymous usage;
+  if !selftest_requested then selftest ()
+  else
+    match !compiler with
+    | None ->
+        prerr_endline usage;
+        exit 2
+    | Some compiler ->
+        let arches =
+          match List.rev !arches with
+          | [] -> Jide_jasmin.Intrinsics.arch_names
+          | arches -> arches
+        in
+        let cleanup () =
+          List.iter
+            (fun path -> try Sys.remove path with Sys_error _ -> ())
+            !scratch
+        in
+        (match !raw_dir with
+        | Some directory when not (Sys.file_exists directory) ->
+            Sys.mkdir directory 0o755
+        | _ -> ());
+        let status =
+          try
+            let results =
+              List.map
+                (fun arch ->
+                  compare_arch ~compiler ~jobs:!jobs ~arch ~raw_dir:!raw_dir)
+                arches
+            in
+            let failed =
+              List.exists (fun (failed, _, _, _, _) -> failed) results
+            in
+            let sum pick =
+              List.fold_left (fun sum result -> sum + pick result) 0 results
+            in
+            let names_compiler = sum (fun (_, c, _, _, _) -> c)
+            and names_engine = sum (fun (_, _, e, _, _) -> e)
+            and compared = sum (fun (_, _, _, c, _) -> c)
+            and equal = sum (fun (_, _, _, _, e) -> e) in
+            Printf.printf
+              "intrinsics: %d architectures, %d names the compiler prints, %d \
+               the engine lists; %d names probed, %d with the same suffix list\n\
+               %!"
+              (List.length results) names_compiler names_engine compared equal;
+            if failed then (
+              Printf.printf
+                "intrinsics: the engine's table is not the compiler's\n%!";
+              1)
+            else (
+              Printf.printf
+                "intrinsics: every name and suffix list is the compiler's own\n\
+                 %!";
+              0)
+          with
+          | Unparsable message ->
+              Printf.eprintf "intrinsics: %s\n%!" message;
+              2
+          | exn ->
+              Printf.eprintf "intrinsics: the run raised: %s\n%!"
+                (Printexc.to_string exn);
+              2
+        in
+        cleanup ();
+        exit status
