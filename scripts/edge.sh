@@ -76,3 +76,96 @@ case $switch in
 	;;
 esac
 
+if [ -n "$switch" ]; then
+	if ! command -v opam >/dev/null 2>&1; then
+		warn "no opam, so the switch named in JASMIN_EDGE_OPAM_SWITCH cannot be read"
+		exit 2
+	fi
+	if rocq_version=$(opam exec --switch "$switch" -- coqc --version 2>/dev/null); then
+		:
+	elif rocq_version=$(opam exec --switch "$switch" -- rocq --version 2>/dev/null); then
+		:
+	else
+		warn "no Rocq in opam switch $switch"
+		exit 2
+	fi
+else
+	if command -v coqc >/dev/null 2>&1; then
+		rocq_version=$(coqc --version 2>/dev/null)
+	elif command -v rocq >/dev/null 2>&1; then
+		rocq_version=$(rocq --version 2>/dev/null)
+	else
+		say "skip edge (no Rocq: set JASMIN_EDGE_OPAM_SWITCH or put coqc on PATH)"
+		exit 0
+	fi
+fi
+rocq_version=$(printf '%s\n' "$rocq_version" | sed -n 1p)
+
+if [ -n "$keep" ]; then
+	if [ -e "$keep" ] && [ -n "$(ls -A "$keep" 2>/dev/null)" ]; then
+		warn "JASMIN_EDGE_KEEP is not empty: $keep"
+		exit 2
+	fi
+	mkdir -p "$keep" || exit 2
+	work=$(cd -- "$keep" && pwd) || exit 2
+	cleanup() { :; }
+else
+	work=$(mktemp -d "${TMPDIR:-/tmp}/jasmin-edge.XXXXXX") || exit 2
+	cleanup() { rm -rf "$work"; }
+fi
+trap cleanup EXIT HUP INT TERM
+
+steps_log=$work/steps.tsv
+: >"$steps_log"
+
+now() {
+	t=$(date +%s%N 2>/dev/null)
+	case $t in
+	'' | *[!0-9]*) echo $(($(date +%s) * 10)) ;;
+	*) echo $((t / 100000000)) ;;
+	esac
+}
+
+seconds() { printf '%d.%ds' $(($1 / 10)) $(($1 % 10)); }
+
+step() {
+	step_name=$1
+	step_body=$2
+	step_start=$(now)
+	"$step_body"
+	step_status=$?
+	step_elapsed=$(($(now) - step_start))
+	printf '%s\t%s\t%s\n' "$step_name" "$step_status" "$(seconds "$step_elapsed")" >>"$steps_log"
+	if [ "$step_status" -eq 0 ]; then
+		printf 'ok %s %s\n' "$step_name" "$(seconds "$step_elapsed")"
+		return 0
+	fi
+	printf 'fail %s %s (exit %s)\n' "$step_name" "$(seconds "$step_elapsed")" "$step_status"
+	return "$step_status"
+}
+
+all_steps="source tree rocq cil dist digest vendor build parity"
+
+after() {
+	seen=
+	for s in $all_steps; do
+		[ -n "$seen" ] && printf '%s\n' "$s"
+		[ "$s" = "$1" ] && seen=1
+	done
+}
+
+stop() {
+	code=$2
+	[ "$code" -ne 0 ] || code=1
+	for s in $(after "$1"); do
+		printf 'skip %s (the %s step failed)\n' "$s" "$1"
+	done
+	printf 'edge: upstream %s\n' "${commit:-unknown}"
+	printf 'edge: %s failed with exit %s\n' "$1" "$2"
+	exit "$code"
+}
+
+commit=
+subject=
+when=
+
