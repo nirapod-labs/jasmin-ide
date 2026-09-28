@@ -1,6 +1,7 @@
 // The checks that need a VS Code window. `test/vscode/run.mjs` starts the
-// window and points the extension at the built server through the
-// `jasminIde.server.path` setting.
+// window, points the extension at the built server through the
+// `jasminIde.server.path` setting, and writes a small Jasmin project into the
+// throw-away workspace.
 //
 // What is checked here is the editor's half of the protocol lifecycle: VS Code
 // activates the extension, its language client starts the real `jasmin-lsp`,
@@ -8,6 +9,14 @@
 // sent), a `.jazz` file from the repository fixtures opens as the language,
 // the restart command stops that client and starts another one, and that stop
 // is a clean shutdown and exit.
+//
+// The window also runs the two editing-help checks, over the small project:
+// completion at a `:` trigger (an item list, empty or not, and no error) and a
+// rename (prepareRename on the declared function name returns a range, and a
+// rename on the `fn` keyword is refused). Both are requests the client only
+// sends for capabilities the server advertises, so a server that advertises
+// neither gets an explicit SKIP naming what is missing; the runner prints the
+// skips and counts them, so a green run never claims they were measured.
 //
 // The evidence is the extension's own output channel. The extension, the
 // language client and the server's stderr all write to it, and none of them
@@ -17,7 +26,9 @@
 // reads after the window has closed. The server writes its own markers there,
 // prefixed `[jasmin-lsp]`: `initialized` when it answers an initialize
 // request, `shutdown requested` when it answers a shutdown, and `exiting` when
-// it handles the exit notification with a shutdown behind it.
+// it handles the exit notification with a shutdown behind it. The client's
+// verbose trace adds the requests it sent and the initialize result it read,
+// which is where the editing-help checks take the server's capabilities from.
 const assert = require("node:assert/strict");
 const { execFile } = require("node:child_process");
 const { appendFileSync } = require("node:fs");
@@ -35,6 +46,16 @@ const running = "The Jasmin language server is running.";
 const initialized = "[jasmin-lsp] initialized";
 const shutdownRequested = "[jasmin-lsp] shutdown requested";
 const exiting = "[jasmin-lsp] exiting";
+
+// The editor commands and the client's trace lines the editing-help checks
+// use. `vscode.prepareRename` is the command the rename UI runs before it
+// offers an input box; the other two are the documented execution commands.
+const completionCommand = "vscode.executeCompletionItemProvider";
+const prepareRenameCommand = "vscode.prepareRename";
+const renameCommand = "vscode.executeDocumentRenameProvider";
+const completionRequest = "Sending request 'textDocument/completion";
+const prepareRenameRequest = "Sending request 'textDocument/prepareRename";
+const renameRequest = "Sending request 'textDocument/rename";
 
 // Where every captured line goes, so that a check after the window has closed
 // can still see it. Without the variable the run is a plain window check.
@@ -126,6 +147,196 @@ async function waitFor(predicate, timeoutMs, message) {
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
+}
+
+/** One editing-help check's outcome, recorded for `run.mjs` to print. */
+function recordCheck(check, status, detail) {
+  record("suite", "m3-check", JSON.stringify({check, status, detail}));
+}
+
+/** Records a failing check and fails the window with the same words. */
+function failCheck(check, detail) {
+  recordCheck(check, "FAIL", detail);
+  throw new Error(`${check}: ${detail}`);
+}
+
+/** The message of anything thrown. */
+function messageOf(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The capabilities the server advertised in its `initialize` reply, read from
+ * the client's own verbose trace of that reply. The client registers a
+ * feature only for a capability the reply carries, so this record decides
+ * whether an editing-help check can be measured at all: no completion
+ * provider for `textDocument/completion`, no rename provider for
+ * `textDocument/rename`, and no `prepareProvider` for
+ * `textDocument/prepareRename`.
+ */
+function serverCapabilities() {
+  const reply = captured.find((entry) => entry.text.includes("Received response 'initialize - ("));
+  assert.ok(reply, "the client recorded no initialize reply, so the server's capabilities are unknown");
+
+  const marker = reply.text.indexOf("Result:");
+  assert.ok(marker >= 0, "the client's initialize reply carries no result: the run's trace is not verbose");
+
+  let result;
+  try {
+    result = JSON.parse(reply.text.slice(marker + "Result:".length));
+  } catch (error) {
+    assert.fail(`the client's initialize reply could not be read as JSON: ${messageOf(error)}`);
+  }
+  return result.capabilities ?? {};
+}
+
+/** The word at a position, or an empty string when there is none. */
+function wordAt(document, position) {
+  const range = document.getWordRangeAtPosition(position);
+  return range === undefined ? "" : document.getText(range);
+}
+
+/**
+ * The three positions the editing-help checks use, found by their text in the
+ * small project's entry file: just past the `:` of a memory access's type
+ * annotation (the completion trigger), inside the declared name `load` (the
+ * rename target), and inside the `fn` keyword on the same line (the rename
+ * that must be refused). Each word is read back, so a project edit that moves
+ * the positions fails here instead of testing something else.
+ */
+function editingHelpPositions(document) {
+  const lines = document.getText().split("\n");
+  const annotated = lines.findIndex((line) => line.includes(":u32"));
+  assert.ok(annotated >= 0, "the editing-help project has no :u32 annotation for the completion check");
+  const declared = lines.findIndex((line) => /\bfn\s+load\b/u.test(line));
+  assert.ok(declared >= 0, "the editing-help project has no fn load declaration for the rename check");
+
+  const positions = {
+    completion: new vscode.Position(annotated, lines[annotated].indexOf(":u32") + 1),
+    name: new vscode.Position(declared, lines[declared].indexOf("load") + 1),
+    keyword: new vscode.Position(declared, lines[declared].indexOf("fn") + 1)
+  };
+
+  assert.equal(wordAt(document, positions.name), "load", "the rename position is not inside the name `load`");
+  assert.equal(wordAt(document, positions.keyword), "fn", "the refusal position is not inside the keyword `fn`");
+  return positions;
+}
+
+/**
+ * Completion at the `:` of a memory access's type annotation. The check
+ * passes when the editor command returns a list, empty or not, without an
+ * error, and the client's trace shows the `textDocument/completion` request
+ * it sent to the server: the request is the client passing the editor's ask
+ * through, and the list is the server's answer.
+ */
+async function checkCompletion(document, position, capabilities) {
+  const check = "completion";
+  if (capabilities.completionProvider === undefined) {
+    recordCheck(
+      check,
+      "SKIP",
+      "the server's initialize reply carries no completionProvider, so the client registers no completion provider and sends no textDocument/completion request"
+    );
+    return;
+  }
+
+  const before = count(completionRequest);
+  let result;
+  try {
+    result = await vscode.commands.executeCommand(completionCommand, document.uri, position, ":");
+  } catch (error) {
+    failCheck(check, `vscode.executeCompletionItemProvider rejected: ${messageOf(error)}`);
+  }
+
+  if (count(completionRequest) <= before) {
+    failCheck(check, "the command returned but the client sent no textDocument/completion request");
+  }
+
+  const items = Array.isArray(result) ? result : result?.items;
+  if (!Array.isArray(items)) {
+    failCheck(check, `the command returned no completion list: ${JSON.stringify(result)}`);
+  }
+
+  recordCheck(
+    check,
+    "PASS",
+    `textDocument/completion answered with ${items.length} item(s) at ${position.line + 1}:${position.character + 1} for the ":" trigger; an empty list would be accepted`
+  );
+}
+
+/**
+ * Rename on the small project: `prepareRename` on the declared function name
+ * must return the range of that name, and a rename on the `fn` keyword must
+ * be refused with an error rather than an empty edit. Both are the client
+ * passing `textDocument/prepareRename` and `textDocument/rename` through; the
+ * trace lines it writes are part of the check.
+ */
+async function checkRename(document, positions, capabilities) {
+  const check = "rename";
+  const provider = capabilities.renameProvider;
+  if (provider === undefined) {
+    recordCheck(
+      check,
+      "SKIP",
+      "the server's initialize reply carries no renameProvider, so the client registers no rename provider and sends neither textDocument/prepareRename nor textDocument/rename"
+    );
+    return;
+  }
+  if (typeof provider !== "object" || provider === null || provider.prepareProvider !== true) {
+    recordCheck(
+      check,
+      "SKIP",
+      "the server's renameProvider does not declare prepareProvider, so the client cannot send textDocument/prepareRename and VS Code falls back to its own word range; the refusal half is not measured either"
+    );
+    return;
+  }
+
+  const beforePrepare = count(prepareRenameRequest);
+  let location;
+  try {
+    location = await vscode.commands.executeCommand(prepareRenameCommand, document.uri, positions.name);
+  } catch (error) {
+    failCheck(check, `vscode.prepareRename rejected at the declaration of "load": ${messageOf(error)}`);
+  }
+  if (count(prepareRenameRequest) <= beforePrepare) {
+    failCheck(check, "the client sent no textDocument/prepareRename request");
+  }
+
+  const range = location?.range;
+  if (range === undefined) {
+    failCheck(check, `vscode.prepareRename returned no range: ${JSON.stringify(location)}`);
+  }
+  const covered = document.getText(
+    new vscode.Range(range.start.line, range.start.character, range.end.line, range.end.character)
+  );
+  if (covered !== "load") {
+    failCheck(check, `the prepareRename range covers ${JSON.stringify(covered)}, not the declared name "load"`);
+  }
+
+  const beforeRename = count(renameRequest);
+  let edit;
+  let refusal;
+  try {
+    edit = await vscode.commands.executeCommand(renameCommand, document.uri, positions.keyword, "renamed");
+  } catch (error) {
+    refusal = messageOf(error);
+  }
+  if (count(renameRequest) <= beforeRename) {
+    failCheck(check, "the client sent no textDocument/rename request for the keyword");
+  }
+  if (refusal === undefined) {
+    failCheck(check, `renaming the keyword "fn" did not refuse: the command returned ${JSON.stringify(edit)}`);
+  }
+  if (refusal.trim() === "") {
+    failCheck(check, "the server refused the keyword rename with an empty message");
+  }
+
+  recordCheck(
+    check,
+    "PASS",
+    `textDocument/prepareRename returned ${range.start.line + 1}:${range.start.character + 1}-${range.end.line + 1}:${range.end.character + 1} for "load"; ` +
+      `textDocument/rename refused the keyword "fn" with ${JSON.stringify(refusal)}`
+  );
 }
 
 /**
@@ -226,6 +437,32 @@ async function run() {
   await vscode.workspace
     .getConfiguration("jasminIde")
     .update("diagnostics.delay", 400, vscode.ConfigurationTarget.Workspace);
+
+  // The editing-help checks, over the small project the runner wrote into the
+  // workspace. They run on the first client, before the restart below, so the
+  // restart keeps its place as the last thing the window does. The server's
+  // capabilities come from the initialize reply the client recorded, and the
+  // document is waited for: the checks are about requests the client sends
+  // for an open document.
+  const capabilities = serverCapabilities();
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  assert.ok(folder, "the window has no workspace folder, so the editing-help project is unreachable");
+  const projectPath = join(folder.uri.fsPath, "main.jazz");
+  const didOpen = "Sending notification 'textDocument/didOpen";
+  const openedBefore = count(didOpen);
+  const project = await vscode.workspace.openTextDocument(projectPath);
+  assert.equal(project.languageId, languageId, `the editing-help project does not open as ${languageId}`);
+  await vscode.window.showTextDocument(project);
+  await waitFor(
+    () => count(didOpen) > openedBefore,
+    15000,
+    `the client never sent textDocument/didOpen for ${projectPath}`
+  );
+  record("suite", "state", `opened the editing-help project ${projectPath}`);
+
+  const positions = editingHelpPositions(project);
+  await checkCompletion(project, positions.completion, capabilities);
+  await checkRename(project, positions, capabilities);
 
   // The restart command stops the running client and starts another one, so
   // both halves of the lifecycle run once more, both observed.
