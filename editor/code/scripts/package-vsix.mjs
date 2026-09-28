@@ -70,3 +70,79 @@ if (rest.length > 0) {
   usage(`unexpected argument ${rest[0]}`);
 }
 
+const platform = platformByName(platformName);
+if (platform === undefined) {
+  usage(`unknown platform "${platformName}"`);
+}
+
+const manifest = JSON.parse(await readFile(join(editorDirectory, "package.json"), "utf8"));
+
+// A `server/` that is already there is refused rather than replaced: it is
+// written per package, so a stale one is a package of another platform
+// waiting to be shipped under this platform's name. Nothing is deleted, so
+// the run leaves the caller's directory the way it found it.
+if (await hasStagedServer(editorDirectory)) {
+  fail(
+    "server/ is already in the extension directory. " +
+      "It is written per package, so remove it before building another one."
+  );
+}
+
+if (needsServer(platform)) {
+  if (binaryArgument === undefined) {
+    usage(`${platform.name} needs the server executable built for it`);
+  }
+
+  const binary = await stat(binaryArgument).catch(() => undefined);
+  if (binary === undefined) {
+    fail(`no file at ${binaryArgument}; build the server for ${platform.name} first`);
+  }
+  if (!binary.isFile()) {
+    fail(`${binaryArgument} is not a regular file`);
+  }
+  if ((binary.mode & 0o111) === 0) {
+    fail(`${binaryArgument} is not executable; a server with no execute bit cannot start`);
+  }
+
+  const staged = await stageServer(editorDirectory, binaryArgument);
+  process.stdout.write(`staged ${platform.name} server at ${staged.serverPath} with mode 0755\n`);
+  process.stdout.write(`digest ${staged.digest} written to ${staged.digestPath}\n`);
+
+  const problems = await inspectStagedServer(editorDirectory);
+  if (problems.length > 0) {
+    await clearStagedServer(editorDirectory);
+    fail(`the staged package does not hold a usable server:\n  ${problems.join("\n  ")}`);
+  }
+} else if (binaryArgument !== undefined) {
+  usage("universal takes no server; it is the package that finds jasmin-lsp on PATH");
+}
+
+await mkdir(artifactsDirectory, {recursive: true});
+
+const output = join(artifactsDirectory, packageFileName(platform, manifest.version));
+await rm(output, {force: true});
+
+const vsceArguments = ["package", "--no-dependencies", "--out", output];
+if (platform.vsceTarget !== undefined) {
+  vsceArguments.push("--target", platform.vsceTarget);
+}
+
+const vsce = spawnSync(vsceCli, vsceArguments, {cwd: editorDirectory, encoding: "utf8"});
+
+if (vsce.error !== undefined) {
+  await clearStagedServer(editorDirectory);
+  fail(`could not run ${vsceCli}: ${vsce.error.message}`);
+}
+process.stdout.write(vsce.stdout ?? "");
+process.stderr.write(vsce.stderr ?? "");
+if (vsce.status !== 0) {
+  await clearStagedServer(editorDirectory);
+  fail(`${vsceCli} exited with ${vsce.status}`);
+}
+
+const packaged = await readFile(output);
+process.stdout.write(`vsix ${output}\n`);
+process.stdout.write(`sha256 ${digestOfBytes(packaged)}\n`);
+process.stdout.write(`size ${packaged.length}\n`);
+
+await clearStagedServer(editorDirectory);
