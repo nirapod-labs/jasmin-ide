@@ -1,0 +1,9 @@
+require "lib.jinc"
+
+export
+fn load(reg u32 x) -> reg u32 {
+  reg u32 value;
+  value = twice(x);
+  value = missing(value);
+  return value;
+}
