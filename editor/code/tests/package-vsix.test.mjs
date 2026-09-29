@@ -180,3 +180,106 @@ test("the check notices a missing digest file", async (t) => {
   assert.deepEqual(problems, [`${serverDirectory}/${digestFileName} is missing`]);
 });
 
+test("the check notices a digest file with no line for the server", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const binary = await fakeServer(directory);
+  const extension = join(directory, "extension");
+  await stageServer(extension, binary);
+
+  await writeFile(
+    bundledDigestPath(extension),
+    digestFileContents([["another-file", digestOfBytes(await readFile(binary))]])
+  );
+
+  const problems = await inspectStagedServer(extension);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /has no line for jasmin-lsp/u);
+});
+
+test("the check notices a digest file that does not parse", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const binary = await fakeServer(directory);
+  const extension = join(directory, "extension");
+  await stageServer(extension, binary);
+
+  // A digest cut short, which is what a hand edit that lost characters
+  // leaves behind. A reader that skipped the line would report a clean
+  // package with no server digest in it.
+  await writeFile(bundledDigestPath(extension), "abc123  jasmin-lsp\n");
+
+  const problems = await inspectStagedServer(extension);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /does not parse/u);
+});
+
+test("the check notices a server with no execute bit", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const binary = await fakeServer(directory);
+  const extension = join(directory, "extension");
+  await stageServer(extension, binary);
+
+  await chmod(bundledServerPath(extension), 0o644);
+
+  const problems = await inspectStagedServer(extension);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /not executable/u);
+});
+
+test("the check notices an extension with no server at all", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const extension = join(directory, "extension");
+  await mkdir(extension, {recursive: true});
+
+  assert.deepEqual(await inspectStagedServer(extension), [
+    `the server lookup does not find ${serverDirectory}/${serverExecutable}`
+  ]);
+});
+
+test("staging refuses a binary that is not executable", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const binary = join(directory, "not-executable");
+  await writeFile(binary, "#!/bin/sh\nexit 0\n", "utf8");
+  await chmod(binary, 0o644);
+
+  await assert.rejects(() => stageServer(join(directory, "extension"), binary), /not executable/u);
+});
+
+test("staging refuses a path that is not a file", async (t) => {
+  const directory = await temporaryDirectory(t);
+
+  await assert.rejects(
+    () => stageServer(join(directory, "extension"), join(directory, "nothing-here")),
+    /ENOENT|no such file/u
+  );
+});
+
+test("staging a second time replaces the first server and its digest", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const first = await fakeServer(directory, "first");
+  const second = await fakeServer(directory, "second");
+  const extension = join(directory, "extension");
+
+  const before = await stageServer(extension, first);
+  await writeFile(second, "#!/bin/sh\nprintf 'jasmin-lsp 2\\n'\n", "utf8");
+  const after = await stageServer(extension, second);
+
+  assert.notEqual(before.digest, after.digest);
+  assert.equal(await readFile(bundledDigestPath(extension), "utf8"), digestFileContents([[serverExecutable, after.digest]]));
+  assert.deepEqual(await inspectStagedServer(extension), []);
+});
+
+test("clearing the staged server leaves the extension without one", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const binary = await fakeServer(directory);
+  const extension = join(directory, "extension");
+  await stageServer(extension, binary);
+
+  assert.equal(await hasStagedServer(extension), true);
+  await clearStagedServer(extension);
+  assert.equal(await hasStagedServer(extension), false);
+
+  // Clearing twice is not an error: the packaging script clears in its exit
+  // paths, and a run that has already cleared must not fail there.
+  await clearStagedServer(extension);
+  assert.equal(await hasStagedServer(extension), false);
+});
