@@ -169,3 +169,190 @@ commit=
 subject=
 when=
 
+step_source() {
+	commit=$(git -C "$src" rev-parse HEAD 2>/dev/null) || return 2
+	[ -n "$commit" ] || return 2
+	dirty=$(git -C "$src" status --porcelain 2>/dev/null) || return 2
+	if [ -n "$dirty" ]; then
+		warn "$src has uncommitted changes, so it is not the commit this run would name"
+		return 2
+	fi
+	subject=$(git -C "$src" log -1 --format=%s 2>/dev/null) || return 2
+	when=$(git -C "$src" log -1 --format=%aI 2>/dev/null) || return 2
+	printf 'edge: source   %s\n' "$src"
+	printf 'edge: commit   %s\n' "$commit"
+	printf 'edge: date     %s\n' "$when"
+	printf 'edge: subject  %s\n' "$subject"
+}
+
+tree=$work/src
+
+step_tree() {
+	mkdir -p "$tree" || return 2
+	git -C "$src" archive --format=tar HEAD | tar -x -C "$tree" || return 2
+	[ -f "$tree/compiler/Makefile" ] || {
+		warn "no compiler/Makefile in the export of $commit"
+		return 1
+	}
+	printf 'edge: export   %s\n' "$tree"
+}
+
+step_rocq() {
+	if [ -n "$switch" ]; then
+		printf 'edge: rocq     %s (opam switch %s)\n' "$rocq_version" "$switch"
+	else
+		printf 'edge: rocq     %s (PATH)\n' "$rocq_version"
+	fi
+}
+
+make_prefix=
+if [ -n "$switch" ]; then
+	make_prefix="opam exec --switch $switch -- "
+fi
+
+step_cil() {
+	cd "$tree" || return 2
+	printf 'edge: $        %s%smake -C compiler CIL -j %s\n' "$runner " "$make_prefix" "$jobs"
+	$runner $make_prefix make -C compiler CIL -j "$jobs"
+	status=$?
+	cd "$repo" || return 2
+	[ "$status" -eq 0 ] || return "$status"
+	[ -f "$tree/compiler/src/CIL/expr.ml" ] || {
+		warn "no compiler/src/CIL/expr.ml after the extraction"
+		return 1
+	}
+	printf 'edge: CIL      %s modules\n' "$(ls "$tree/compiler/src/CIL"/*.ml 2>/dev/null | wc -l | tr -d ' ')"
+}
+
+install_shim() {
+	probe=$work/install-probe
+	mkdir -p "$probe" || return 1
+	: >"$probe/file" || return 1
+	if install -m 0644 -t "$probe" "$probe/file" >/dev/null 2>&1; then
+		rm -rf "$probe"
+		return 0
+	fi
+	rm -rf "$probe"
+	return 1
+}
+
+make_install_shim() {
+	real=$(command -v install) || return 1
+	mkdir -p "$work/bin" || return 1
+	{
+		printf '#!/bin/bash\n'
+		printf '# GNU install -t DIR for a host whose install is BSD.\n'
+		printf 'set -eu\n'
+		printf 'out=\n'
+		printf 'args=()\n'
+		printf 'while [ $# -gt 0 ]; do\n'
+		printf '  case $1 in\n'
+		printf '  -t) out=$2; shift 2 ;;\n'
+		printf '  -t*) out=${1#-t}; shift ;;\n'
+		printf '  *) args+=("$1"); shift ;;\n'
+		printf '  esac\n'
+		printf 'done\n'
+		printf 'if [ -n "$out" ]; then exec %s "${args[@]}" "$out"; fi\n' "$real"
+		printf 'exec %s "${args[@]}"\n' "$real"
+	} >"$work/bin/install" || return 1
+	chmod +x "$work/bin/install" || return 1
+	printf 'edge: install  %s takes no -t, so the dist step runs a shim\n' "$real"
+}
+
+dist_path=$PATH
+if ! install_shim; then
+	make_install_shim || {
+		warn "the host's install has no -t, and no shim could be made"
+		exit 2
+	}
+	dist_path=$work/bin:$PATH
+fi
+
+tarball=$tree/compiler/jasmin-compiler.tgz
+
+step_dist() {
+	cd "$tree" || return 2
+	printf 'edge: $        make -C compiler dist\n'
+	PATH=$dist_path make -C compiler dist
+	status=$?
+	cd "$repo" || return 2
+	[ "$status" -eq 0 ] || return "$status"
+	[ -f "$tarball" ] || {
+		warn "no compiler/jasmin-compiler.tgz after the distribution step"
+		return 1
+	}
+	printf 'edge: tarball  %s\n' "$tarball"
+}
+
+digest=
+
+sha256_of() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	elif command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$1" | cut -d' ' -f1
+	else
+		return 1
+	fi
+}
+
+step_digest() {
+	digest=$(sha256_of "$tarball") || {
+		warn "neither sha256sum nor shasum is installed"
+		return 2
+	}
+	[ -n "$digest" ] || return 1
+	printf 'edge: sha256   %s\n' "$digest"
+	printf 'edge: bytes    %s\n' "$(wc -c <"$tarball" | tr -d ' ')"
+}
+
+step_vendor() {
+	printf 'edge: $        sh vendor/fetch.sh <tarball> %s\n' "$digest"
+	sh vendor/fetch.sh "$tarball" "$digest" || return "$?"
+	[ "$(cat vendor/jasmin/.source-sha256 2>/dev/null)" = "$digest" ] || {
+		warn "vendor/jasmin/ is not assembled from $digest"
+		return 1
+	}
+}
+
+step_build() {
+	JIDE_JASMIN_CHANNEL=edge
+	export JIDE_JASMIN_CHANNEL
+	printf 'edge: $        JIDE_JASMIN_CHANNEL=%s %s build --root . @install -j %s\n' \
+		"$JIDE_JASMIN_CHANNEL" "$dune" "$jobs"
+	$runner $dune build --root . @install -j "$jobs"
+	status=$?
+	[ "$status" -eq 0 ] || return "$status"
+	binary=./_build/install/default/bin/jasmin-lsp
+	[ -x "$binary" ] || {
+		warn "no executable at $binary"
+		return 1
+	}
+	version=$("$binary" --version 2>/dev/null) || version=
+	printf 'edge: server   %s\n' "${version:-no version printed}"
+	printf 'edge: binary   %s\n' "$binary"
+}
+
+step_parity() {
+	printf 'edge: $        PARITY_JOBS=%s sh test/parity/parity.sh %s\n' "$jobs" "$tree"
+	$runner env PARITY_JOBS="$jobs" sh test/parity/parity.sh "$tree"
+}
+
+step source step_source || stop source $?
+step tree step_tree || stop tree $?
+step rocq step_rocq || stop rocq $?
+step cil step_cil || stop cil $?
+step dist step_dist || stop dist $?
+step digest step_digest || stop digest $?
+step vendor step_vendor || stop vendor $?
+step build step_build || stop build $?
+step parity step_parity || stop parity $?
+
+printf 'edge: upstream %s\n' "$commit"
+printf 'edge: sha256   %s\n' "$digest"
+printf 'edge: exit codes:'
+while IFS='	' read -r step_name step_status step_elapsed; do
+	printf ' %s=%s' "$step_name" "$step_status"
+done <"$steps_log"
+printf '\n'
+printf 'edge: the edge channel is green at %s\n' "$commit"
