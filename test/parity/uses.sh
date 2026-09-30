@@ -299,3 +299,85 @@ while IFS=$tab read -r ordinal label relative arch status accepted uses check_sa
 		done
 done <"$results"
 
+files=$(awk -F'\t' '!seen[$3]++' "$results" | wc -l | tr -d ' ')
+groups=$work/groups.tsv
+awk -F'\t' '
+	function group(rel,   parts, n) {
+		n = split(rel, parts, "/")
+		if (n >= 2) return parts[2]
+		return rel
+	}
+	{
+		g = group($3)
+		if (!(g in seen)) { seen[g] = 1; order[++count] = g }
+		files[g]++
+		if ($6 == "yes") accepted[g]++
+		uses[g] += ($7 == "unknown" ? 0 : $7)
+		same[g] += ($8 == "unknown" ? 0 : $8)
+		elsewhere[g] += ($9 == "unknown" ? 0 : $9)
+		unresolved[g] += ($10 == "unknown" ? 0 : $10)
+		othername[g] += ($11 == "unknown" ? 0 : $11)
+		unlocated[g] += ($12 == "unknown" ? 0 : $12)
+	}
+	END {
+		for (i = 1; i <= count; i++) {
+			g = order[i]
+			printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", g, files[g],
+				accepted[g], uses[g], same[g], elsewhere[g], unresolved[g],
+				othername[g], unlocated[g]
+		}
+	}' "$results" >"$groups"
+
+if [ -n "$checks" ]; then
+	say "the check list names $total checks"
+fi
+say "$files files, $index checks; the check accepts $accepted_checks, refuses $rejected"
+say "typed variable uses: $typed_uses; the compiler's declaration: $same; resolved elsewhere: $elsewhere; unresolved: $unresolved; other-name: $othername; unlocated: $unlocated"
+say "the counts reconcile: $same + $elsewhere + $unresolved + $othername + $unlocated = $((same + elsewhere + unresolved + othername + unlocated)) of $typed_uses"
+if [ -s "$groups" ]; then
+	say "by folder: files, accepted, typed uses, the compiler's declaration, elsewhere, unresolved, other-name, unlocated"
+	while IFS=$tab read -r group group_files group_accepted group_uses group_same \
+		group_elsewhere group_unresolved group_othername group_unlocated; do
+		say "  $group: $group_files files, $group_accepted accepted, $group_uses uses, $group_same same, $group_elsewhere elsewhere, $group_unresolved unresolved, $group_othername other-name, $group_unlocated unlocated"
+	done <"$groups"
+fi
+
+if [ -s "$unlocated_list" ]; then
+	say "unlocated uses: the compiler placed them where no file the resolution reached writes their name; they are listed, not counted as differences"
+	while IFS= read -r line; do
+		say "unlocated $line"
+	done <"$unlocated_list"
+fi
+
+if [ -s "$mismatches" ]; then
+	if [ -n "${USES_KEEP:-}" ]; then
+		mkdir -p "$USES_KEEP" || die "cannot make USES_KEEP=$USES_KEEP"
+		i=1
+		while [ "$i" -le "$index" ]; do
+			cp "$work/answer.$i" "$USES_KEEP/answer.$i.txt" ||
+				die "cannot write USES_KEEP=$USES_KEEP"
+			i=$((i + 1))
+		done
+	fi
+	while IFS= read -r line; do
+		say "different $line"
+	done <"$mismatches"
+fi
+
+# A run that measured nothing is not a pass, and it is not a corpus difference
+# either: it is the harness or the tool failing to run.
+if [ "$noanswer" -gt 0 ] || [ "$broken" -gt 0 ]; then
+	say "$noanswer check(s) answered nothing and $broken could not run: $tool is not a working comparison"
+	exit 2
+fi
+if [ "$typed_uses" -eq 0 ]; then
+	say "the corpus holds no typed variable use in any file the check accepts: nothing was measured"
+	exit 2
+fi
+if [ "$rejected" -eq 0 ] && [ "$elsewhere" -eq 0 ] && [ "$unresolved" -eq 0 ] &&
+	[ "$othername" -eq 0 ]; then
+	say "every typed use of every accepted file is the compiler's declaration"
+	exit 0
+fi
+say "the corpus does not agree"
+exit 1

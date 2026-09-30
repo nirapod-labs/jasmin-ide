@@ -1,105 +1,92 @@
-(** The typed-use half of the resolver parity gate: for every variable
-    occurrence the compiler typed in one file, the declaration the resolver
-    answers with against the declaration the compiler bound the occurrence to.
+(** The typed-use half of the resolver parity gate.
+
+    The gate's clause is one sentence: 100% of typed variable uses in the
+    corpus resolve to the compiler's declaration, its [v_dloc]. This program
+    measures that clause over one file. It runs the compiler's own check
+    ({!Jide_jasmin.Adapter.check}), which leaves the typed facts of the
+    file, and the engine's resolver over the same bytes
+    ({!Jide_engine.Resolve.of_text}), and for every typed use asks the
+    resolver what the use's name names.
 
     The two sides come from one text and one architecture:
 
-    - the compiler's side is the typed facts the adapter returns for the file
-      ({!Jide_jasmin.Adapter.check}). A {!Jide_jasmin.Facts.use} is one
-      variable occurrence of a typed body, with [u_decl] and [u_dfile]: the
-      range [v_dloc] names and the file that range indexes. That pair is the
-      declaration the compiler's pretyping bound the occurrence to.
-    - the resolver's side is {!Jide_engine.Resolve}, asked at the byte the
-      occurrence starts at. The answer is a declaration when the name is one,
-      and that declaration carries the file and the range of the name it
-      declares.
+    - the compiler's side is {!Jide_jasmin.Facts.use}. [u_file] and [u_span]
+      say where the compiler placed the occurrence, [u_name] is the name it
+      holds the variable by, and [u_dfile] and [u_decl] are the declaration it
+      bound the occurrence to. Nothing here reads the compiler's unique ids.
+    - the resolver's side is {!Jide_engine.Resolve.visit_answers}, asked at
+      the byte where the occurrence's name starts. A file a namespace reads is
+      read once per namespace, so the resolver gives one answer per reading,
+      and each reading is compared with the compiler's use of that reading.
 
-    The comparison is the design's identity of a declaration (section 9): the
-    normalised file and the byte where the name starts. Nothing else takes
-    part, because nothing else survives a re-check.
+    The identity of a declaration is the design's (section 9): the normalised
+    file and the byte where its name starts.
 
-    The file is compared through {!Jide_engine.Index.normalise}, so the two
-    sides agree on a spelling: the compiler records the name the file was
-    parsed under, the resolver records the path it resolved.
+    {2 What is a use the source writes}
 
-    A leading UTF-8 byte-order mark is removed once, and the same bytes go to
-    the check and to the resolver. The engine strips the mark for the check
-    alone (the resolver reads the document as the caller holds it), which is a
-    question about the engine's byte coordinates and not about the resolver's
-    answer; here both sides see one text, so a mark cannot make a difference
-    of its own.
+    A use is measured when the bytes the compiler placed it at spell its name:
+    the first identifier equal to the name's last segment inside the use's
+    span, at a token boundary. A qualified name [A::x] is compared by its last
+    segment, because a byte spells one segment. Two kinds of use are not
+    measured, and each is counted and listed:
 
-    A file is measured only when the check accepts it: a file the check
-    reports an error for has no compiler-side answer to compare with, and its
-    typed uses are not counted. The run says so per file ("accepted: no"), and
-    the caller (test/parity/uses.sh) counts those files apart and fails on
-    them, because the gate's corpus is the release's positive folder.
+    - [unlocated]: no identifier of that name lies in the compiler's span.
+      These are uses the compiler made up on an instruction's location: a flag
+      it names [_zf_] and its siblings, a temporary, an intrinsic's expansion.
+      The source never writes them, so no occurrence exists to ask about.
+    - [unchecked]: the uses of a file the check refuses. The run fails on such
+      a file, because the corpus is the release's accepted folder.
 
-    A use is compared in the file its span indexes, which is not always the
-    document: a [require] inside a namespace is spliced into the document's
-    item stream, so the compiler types the required file's body there and
-    records its occurrences with that file's offsets. The typed facts name
-    only the declaration's file ([u_dfile]), never the use's, so the file of a
-    use is read from the bytes: the first file the resolution reached whose
-    text writes the use's name at the span, the document first.
+    The gate's percentage is over the measured uses. The run prints all five
+    counts and the total, and they reconcile.
 
-    A use whose span writes no such name in any file of the resolution is one
-    the compiler placed with a location that is not the source's: an implicit
-    flag it made up ([_zf_] and its siblings), an intrinsic's expansion
-    ([bytes] of [#randombytes]), or the variable a [?{...}] group receives.
-    Nothing in the text declares or uses that name there, so no occurrence
-    holds the byte and no resolver can answer; those uses are counted apart
-    as [unlocated] and listed, never as a difference.
+    {2 Differences}
 
-    A qualified name is compared by its last segment: the compiler holds
-    [C::A::x] for a use the index records as [x], because a byte only spells
-    the segment written at it. The declaration both sides name is still
-    compared by file and byte, so the segment is all either side needs.
+    A measured use is one of these, and each is printed with its file, its
+    byte and its position:
 
-    Nothing here raises. Every question the file asks is answered by a count.
+    - [elsewhere]: the resolver answers another declaration;
+    - [unresolved]: the resolver answers no declaration at that byte (no
+      occurrence, [Unresolved], or a name that is not a declaration), or the
+      resolution never reached the file;
+    - [other-name]: the occurrence at the byte holds another name.
+
+    Uses at one byte are matched one-to-one with the readings of the file at
+    that byte, so a use the compiler gives a declaration the resolver gives to
+    no reading of that byte is a difference, and a reading the compiler never
+    typed is not counted as one.
 
     Usage:
 
     {v
-      typed_uses <file> [<architecture>]
+      typed_uses <file> [<architecture>] [--negative-control]
       typed_uses --selftest
     v}
 
-    The architecture is one the adapter knows ([x86-64] by default), because
-    the corpus names the target in the folder a file sits under.
+    [--negative-control] moves the declaration the compiler is said to have
+    bound the first measured use to, so the run must report one difference.
+    It exists to show the comparison fails when a binding is wrong; the
+    script that runs it expects the failure.
 
-    Stdout carries nothing. Stderr carries the counts and, for each use that
-    is not the compiler's declaration, one line naming it:
+    Stdout carries nothing. Stderr carries the counts, and one line per
+    difference:
 
     {v
       accepted: yes
       errors: 0
       typed-uses: 12
+      source-written: 12
       same-declaration: 12
       elsewhere: 0
       unresolved: 0
       other-name: 0
       unlocated: 0
+      unchecked: 0
     v}
 
-    and, for each difference and each use that cannot be compared:
-
-    {v
-      use-elsewhere: 41 (3:10) x: the compiler declares it at /a/lib.jinc:1:13, the resolver answers /a/main.jazz:2:13
-      use-unresolved: 77 (5:3) y: no occurrence at that byte
-      use-other-name: 90 (6:9) a: the resolver's occurrence at that byte is b
-      use-unlocated: 113 (7:3) _zf_: no file the resolution reached writes that name at those bytes
-    v}
-
-    A position is written one-based, [line:column], because a reader looks it
-    up in an editor; the byte before it is the identity and is printed too, so
-    the two readings cannot be confused.
-
-    The exit status is 0 when the check accepted the file and every typed use
-    is the compiler's declaration, 1 when one use is not (a use the resolver
-    leaves unresolved, one it resolves elsewhere, or a byte whose occurrence
-    carries another name), and 2 when the program cannot run at all. An
-    unlocated use is neither: it has no occurrence to compare. *)
+    The exit status is 0 when the check accepted the file and every measured
+    use is the compiler's declaration, 1 when one is not or the check refused
+    the file, and 2 when the program cannot run at all. *)
 
 module A = Jide_jasmin.Adapter
 module Arch = Jide_jasmin.Arch
@@ -112,14 +99,15 @@ module S = Jide_lang.Span
 let usage =
   String.concat "\n"
     [
-      "usage: typed_uses <file> [<architecture>]";
+      "usage: typed_uses <file> [<architecture>] [--negative-control]";
       "       typed_uses --selftest";
       "";
       "For <file>, compare the declaration every typed variable use resolves";
       "to with the declaration the compiler's v_dloc names, and print the";
       "counts and each difference on stderr.";
       "";
-      "<architecture> is one of " ^ String.concat ", " A.arch_names
+      "<architecture> is one of "
+      ^ String.concat ", " A.arch_names
       ^ "; x86-64 by default.";
     ]
 
@@ -131,43 +119,25 @@ let read (path : string) =
   | text -> Some text
   | exception Sys_error _ -> None
 
-(* A UTF-8 byte-order mark, as three bytes. [strip_bom text] is the text the
-   compiler is given and how many bytes were removed, so a position the
-   compiler reports can be read back in the document as the caller holds it. *)
+(* A UTF-8 byte-order mark, as three bytes. The mark is removed once, and the
+   same bytes go to the check and to the resolver, so a mark cannot make a
+   difference of its own. *)
 let strip_bom (text : string) =
   if
-    String.length text >= 3 && text.[0] = '\xef' && text.[1] = '\xbb'
+    String.length text >= 3
+    && text.[0] = '\xef'
+    && text.[1] = '\xbb'
     && text.[2] = '\xbf'
   then (3, String.sub text 3 (String.length text - 3))
   else (0, text)
 
 (* ------------------------------------------------------------------ *)
-(* The comparison *)
+(* Names and bytes *)
 
-(** One use and what the resolver answered for it. *)
-type outcome =
-  | Same  (** the resolver's declaration is the one [v_dloc] names *)
-  | Elsewhere of I.declaration
-      (** the resolver resolved the use to another declaration *)
-  | Unresolved of string
-      (** the resolver answered no declaration, and why: no occurrence at the
-          byte, [Unresolved], or an answer that is not a declaration at all *)
-  | Other_name of string
-      (** the occurrence at the byte carries another name than the compiler
-          typed there, so the two sides are not speaking about one name *)
-  | Unlocated of string
-      (** no file the resolution reached writes the use's name where the
-          compiler placed it, so there is no occurrence to ask about: the
-          compiler invented the use and gave it an instruction's location *)
+let is_ident_char (c : char) =
+  match c with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true | _ -> false
 
-let same_declaration (compiler : F.use) (resolver : I.declaration) =
-  String.equal (I.normalise resolver.I.file) (I.normalise compiler.F.u_dfile)
-  && resolver.I.name_span.S.start_byte = compiler.F.u_decl.S.start_byte
-
-(** [last_segment name] is the part of a name one byte range spells: a
-    qualified use's [u_name] is the whole path the compiler keeps
-    ([C::A::x]), while the occurrence at the byte is the segment written
-    there ([x]). *)
+(** [last_segment name] is the part of a qualified name after its last [::]. *)
 let last_segment (name : string) =
   let rec start index =
     if index <= 0 then 0
@@ -176,32 +146,47 @@ let last_segment (name : string) =
   let first = start (String.length name) in
   String.sub name first (String.length name - first)
 
-(** [squash text] is [text] without its spaces, tabs and newlines: a
-    qualified name may be written with spaces around its colons, and the
-    compiler's own spelling drops them. *)
-let squash (text : string) =
-  let buffer = Buffer.create (String.length text) in
-  String.iter
-    (fun character ->
-      match character with
-      | ' ' | '\t' | '\r' | '\n' -> ()
-      | _ -> Buffer.add_char buffer character)
-    text;
-  Buffer.contents buffer
+(** [spelled_in text ~start ~stop name] is the byte where the first identifier
+    equal to [name] begins inside [text] between [start] and [stop], at a token
+    boundary on both sides, or [None] when no such identifier lies there. *)
+let spelled_in (text : string) ~(start : int) ~(stop : int) (name : string) :
+    int option =
+  let length = String.length text in
+  let n = String.length name in
+  let stop = min stop length in
+  let matches index =
+    index + n <= stop
+    && (index = 0 || not (is_ident_char text.[index - 1]))
+    && (index + n >= length || not (is_ident_char text.[index + n]))
+    && String.equal (String.sub text index n) name
+  in
+  let rec scan index =
+    if index + n > stop then None
+    else if matches index then Some index
+    else scan (index + 1)
+  in
+  if n = 0 then None else scan (max 0 start)
 
-(** [spelled index use] is true when the bytes [use]'s span covers in [index]
-    write the use's name: the source really names it there. *)
-let spelled (index : I.t) (use : F.use) =
-  String.equal
-    (last_segment (squash (I.text_of_span index.I.text use.F.u_span)))
-    (last_segment use.F.u_name)
+(** [where index byte] is the one-based position of [byte] in [index]'s text,
+    as a reader finds it in an editor. *)
+let where (text : LI.t) (byte : int) =
+  let position = LI.position_of_byte text byte in
+  Printf.sprintf "%d:%d"
+    (position.Jide_lang.Position.line + 1)
+    (position.Jide_lang.Position.character + 1)
 
-(** [file_of_use resolve use] is the file the compiler's span of [use]
-    indexes: the first file the resolution reached whose text writes the name
-    at that span, the document first. [None] when no file does, which is what
-    a use the compiler made up itself looks like (see [Unlocated]). *)
-let file_of_use (resolve : R.t) (use : F.use) : I.t option =
-  List.find_opt (fun (index : I.t) -> spelled index use) (R.files resolve)
+(* ------------------------------------------------------------------ *)
+(* The comparison *)
+
+(* [with_decl ~byte use] is [use] with its compiler-side declaration moved to
+   [byte]: a fact the compiler would not produce, used to prove the comparison
+   answers a difference. *)
+let with_decl ~(byte : int) (use : F.use) : F.use =
+  { use with F.u_decl = S.make ~start_byte:byte ~end_byte:(byte + 1) }
+
+let same_declaration (compiler : F.use) (resolver : I.declaration) =
+  String.equal (I.normalise resolver.I.file) (I.normalise compiler.F.u_dfile)
+  && resolver.I.name_span.S.start_byte = compiler.F.u_decl.S.start_byte
 
 let name_of_answer (answer : R.answer) =
   match answer with
@@ -211,32 +196,6 @@ let name_of_answer (answer : R.answer) =
   | R.Include_path -> "an include path"
   | R.Unresolved -> "nothing"
 
-let outcome_of (resolve : R.t) (use : F.use) : outcome =
-  match file_of_use resolve use with
-  | None ->
-      Unlocated
-        "no file the resolution reached writes that name at those bytes"
-  | Some index -> (
-      match
-        R.answer_at resolve ~file:index.I.file
-          ~byte:use.F.u_span.S.start_byte
-      with
-      | None -> Unresolved "no occurrence at that byte"
-      | Some (occurrence, answer) ->
-          if
-            not
-              (String.equal
-                 (last_segment occurrence.I.name)
-                 (last_segment use.F.u_name))
-          then Other_name occurrence.I.name
-          else
-            match answer with
-            | R.Resolved declaration ->
-                if same_declaration use declaration then Same
-                else Elsewhere declaration
-            | other -> Unresolved ("the resolver answers " ^ name_of_answer other))
-
-(** What one file's comparison found. *)
 type answer = {
   accepted : bool;  (** the check reported no error for the file *)
   diagnostics : int;  (** how many error diagnostics it reported *)

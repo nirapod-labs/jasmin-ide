@@ -60,11 +60,22 @@ val answer_at :
   t -> file:string -> byte:int -> (Index.occurrence * answer) option
 (** [answer_at t ~file ~byte] is the occurrence holding [byte] and what it
     names, when the resolution reached that file and an occurrence holds the
-    byte. *)
+    byte. A file read into more than one namespace has one answer per
+    reading (see {!visit_answers}); this one is the first reading's. *)
 
 val answers : t -> string -> (Index.occurrence * answer) list
 (** [answers t file] is every occurrence of [file] with its answer, in
-    source order. An occurrence the resolver never reached is [Unresolved]. *)
+    source order, the first reading's. An occurrence the resolver never
+    reached is [Unresolved]. *)
+
+val visit_answers :
+  t -> file:string -> byte:int -> Index.occurrence option * answer list
+(** [visit_answers t ~file ~byte] is the occurrence holding [byte] in [file],
+    if one holds it, and what each reading of [file] names there: one answer
+    per time the resolution read the file, in the order it read it. A file
+    that a namespace reads is read once per namespace, and the namespaces may
+    hold different declarations, so the readings may disagree. The list is
+    empty when the resolution never reached the file. *)
 
 val loaded : t -> (string * string) list
 (** The (namespace key, file) pairs the resolver read once each, for the

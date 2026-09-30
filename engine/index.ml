@@ -341,9 +341,25 @@ and lvalue state (lv : Syntax.plvalue) =
       Option.iter (expression state) length
   | PLMem (_aligned, _size, address) -> expression state address
 
+(* The flag group [?{...}] of a multi-result instruction: a label with no
+   attribute is the variable that receives the flag, so it is a use of that
+   variable; a label with one is a flag or a condition, and the attribute is
+   the variable. *)
+and flag_group state (labels : Syntax.pannotations) =
+  List.iter
+    (fun ((label : string Location.located), attribute) ->
+      match attribute with
+      | None -> use_ident state Var label
+      | Some attribute ->
+          let value = annotation_value (Location.unloc attribute) in
+          add_occurrence state
+            (occurrence_of_ident state ~role:Annot ~value label);
+          attribute_ state attribute)
+    labels
+
 and lvalues state ((annotations_, values) : Syntax.plvals) =
   Option.iter
-    (fun located -> annotations state (Location.unloc located))
+    (fun located -> flag_group state (Location.unloc located))
     annotations_;
   List.iter (lvalue state) values
 
