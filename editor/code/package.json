@@ -117,8 +117,10 @@
     "test": "node --test tests/*.test.mjs",
     "test:vscode": "pnpm run bundle && node test/vscode/run.mjs",
     "corpus": "node tests/corpus-tokenize.mjs",
+    "test:package": "sh tests/package-universal.sh",
     "compile": "tsc --noEmit",
     "bundle": "node esbuild.mjs",
+    "package:vsix": "node scripts/package-vsix.mjs",
     "package:check": "node scripts/package-check.mjs",
     "validate": "pnpm run check && pnpm run test && pnpm run corpus && pnpm run compile && pnpm run bundle && pnpm run package:check",
     "vscode:prepublish": "pnpm run bundle"

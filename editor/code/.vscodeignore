@@ -1,13 +1,33 @@
+# What `vsce package` leaves out.
+#
+# The package holds what VS Code reads at runtime: the manifest, the bundled
+# `dist/extension.js`, the language configuration, the TextMate grammar, the
+# README, the licence and the notice. Everything a developer needs to build or
+# test the extension is out, and so is every source map: a `.map` next to the
+# bundle is 1.6 MB, it names the absolute paths of the machine that built it,
+# and nothing in the editor opens it.
+#
+# `server/**` is not excluded. A platform package carries the server at
+# `server/jasmin-lsp` beside `server/SHA256SUMS`, and the universal package
+# carries neither; the difference is whether the directory was staged before
+# `vsce` ran, not a line here. An exclusion of `**/*.map` still leaves the
+# bundled server alone, because it is an executable with no extension.
 .artifacts/**
 .vscode/**
 .vscode-test/**
-.gitignore
+.vscode-test-web/**
+coverage/**
 fixtures/**
 node_modules/**
 scripts/**
-src/**
 test/**
 tests/**
+src/**
+**/*.map
+**/*.ts
+.gitignore
+.gitattributes
+.editorconfig
 esbuild.mjs
 pnpm-lock.yaml
 pnpm-workspace.yaml
