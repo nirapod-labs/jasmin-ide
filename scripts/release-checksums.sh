@@ -59,7 +59,10 @@ main() {
 	done >"$staged"
 
 	count=$(wc -l <"$staged" | tr -d ' ')
-	want=$(printf '%s\n' "$files" | grep -c . || true)
+	want=0
+	if counted=$(printf '%s\n' "$files" | grep -c .); then
+		want=$counted
+	fi
 	if [ "$count" -ne "$want" ]; then
 		rm -f "$staged"
 		printf '%s: error: wrote %s of %s lines, so the list would be incomplete\n' \
@@ -67,8 +70,16 @@ main() {
 		exit 1
 	fi
 
-	if ! (cd "$directory" && { command -v sha256sum >/dev/null 2>&1 && sha256sum -c "$(basename "$staged")"; } >/dev/null 2>&1 ||
-		(cd "$directory" && shasum -a 256 -c "$(basename "$staged")" >/dev/null 2>&1)); then
+	verified=0
+	if command -v sha256sum >/dev/null 2>&1 &&
+		(cd "$directory" && sha256sum -c "$(basename "$staged")") >/dev/null 2>&1; then
+		verified=1
+	fi
+	if [ "$verified" -eq 0 ] && command -v shasum >/dev/null 2>&1 &&
+		(cd "$directory" && shasum -a 256 -c "$(basename "$staged")") >/dev/null 2>&1; then
+		verified=1
+	fi
+	if [ "$verified" -eq 0 ]; then
 		rm -f "$staged"
 		printf '%s: error: the written list does not verify against %s\n' \
 			"${0##*/}" "$directory" >&2
