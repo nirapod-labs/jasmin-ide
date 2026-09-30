@@ -26,7 +26,7 @@ advance: the version in it comes from `controller/version.ml`.
 
   $ server_version=$(sed -n 's/^let version = "\(.*\)"$/\1/p' ../../../controller/version.ml)
   $ grep -o "\"serverInfo\":{\"name\":\"jasmin-lsp\",\"version\":\"$server_version\"}" out.txt
-  "serverInfo":{"name":"jasmin-lsp","version":"0.0.0"}
+  "serverInfo":{"name":"jasmin-lsp","version":"0.1.0"}
 
 The log goes to standard error, which is the stream the protocol does not
 use, and a served session says the three things it did:
