@@ -5,6 +5,9 @@ say which member failed, because that is what a client shows its user.
 
 A refused request costs nothing: no check runs (no diagnostics are published
 before it) and the session keeps serving, which the last two requests show.
+The six refusals ahead of them parse nothing, so the publish that precedes
+request 7 is the check that request runs, and request 7 answers the
+declaration the others did not get to ask about.
 
   $ cat > session.txt <<'EOF'
   > {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}
@@ -37,5 +40,5 @@ before it) and the session keeps serving, which the last two requests show.
   5 error {"code":-32602,"message":"textDocument is missing"}
   6 error {"code":-32602,"message":"params must be an object"}
   - textDocument/publishDiagnostics {"diagnostics":[],"uri":"file:///tmp/navigation.jazz","version":1}
-  7 result null
+  7 result [{"range":{"end":{"character":11,"line":1},"start":{"character":10,"line":1}},"uri":"file:///tmp/navigation.jazz"}]
   8 result null
