@@ -1,4 +1,5 @@
-The list of known compiler defects in `mutate.sh`, over a corpus this test
+The list of known compiler defects of the first-error run on mutants
+(`mutate.exe`), over a corpus this test
 writes and stand-ins for both tools, so the rules are checked on every tree
 without a compiler. The stand-in checker reports a syntax error at 1:1 of
 every file; the stand-in compiler does the same, so every mutant agrees,
@@ -26,19 +27,17 @@ that mutant too when COPY is set.
   > exit 1
   > SH
   $ chmod +x bin/jasminc bin/checker
-  $ export JASMINC=$PWD/bin/jasminc JASMIN_LSP=$PWD/bin/checker
-  $ export MUTANTS="$(pwd)/../../test/mutation/mutants.exe"
-  $ run() { (CRASH=${1:-}; COPY=${2:-}; export CRASH COPY; sh ../../test/parity/mutate.sh corpus > out.txt 2>&1); echo "status $?"; grep -E '^mutate: (agreement|known compiler defect|stale defect|mismatch|every|the mutants|[0-9]+ entr)' out.txt | sed 's/ mutant [0-9]* / mutant N /'; }
+  $ mutate=../../test/parity/mutate.exe
+  $ run() { (CRASH=${1:-}; COPY=${2:-}; export CRASH COPY; $mutate --corpus corpus --jasminc bin/jasminc --checker bin/checker --defects defects.tsv --jobs 2 > out.txt 2>&1); echo "status $?"; grep -E '^mutate: (agreement|known compiler defect|stale defect|mismatch|every|the mutants|[0-9]+ entr)' out.txt | sed 's/ mutant [0-9]* / mutant N /'; }
 
 The mutant the list names is the one the emitter makes for the seed, the
 path, the family and the label.
 
-  $ "$MUTANTS" --output m --seed 0 --files 0 corpus > /dev/null
+  $ mkdir m && $mutate --corpus corpus --list --write m > m/manifest.tsv
   $ label=$(awk -F'\t' '$3 == "success/x86-64/b.jazz" && $2 == "delete" { print $4 }' m/manifest.tsv)
   $ listed=$PWD/m/$(awk -F'\t' '$3 == "success/x86-64/b.jazz" && $2 == "delete" { print $1 }' m/manifest.tsv).jazz
   $ other=$PWD/m/$(awk -F'\t' '$3 == "success/x86-64/a.jazz" && $2 == "delete" { print $1 }' m/manifest.tsv).jazz
   $ printf '0\tsuccess/x86-64/b.jazz\tdelete\t%s\t2\t0\t0\tFatal error: exception Failure("hd")\tthe compiler crashes\n' "$label" > defects.tsv
-  $ export PARITY_DEFECTS=$PWD/defects.tsv
 
 With every mutant agreeing, the listed one is stale: the compiler does not do
 what the list says.

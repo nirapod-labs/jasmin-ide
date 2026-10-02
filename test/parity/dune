@@ -112,13 +112,18 @@
  (applies_to uses)
  (deps %{exe:typed_uses.exe}))
 
-; The list of known compiler defects in mutate.sh, the script behind the
-; first-error parity run, with stand-ins for the checker and the compiler:
-; an excused defect, a stale entry, an unlisted crash and a copied defect.
+; The first-error run on mutants, and its list of known compiler defects, with
+; stand-ins for the checker and the compiler: an excused defect, a stale
+; entry, an unlisted crash and a copied defect.
+
+(executable
+ (name mutate)
+ (modules mutate)
+ (libraries parity_readers mutation_support jide_harness unix))
 
 (cram
  (applies_to mutate-defects)
- (deps mutate.sh checker.awk oracle.awk %{exe:../mutation/mutants.exe}))
+ (deps %{exe:mutate.exe}))
 
 ; The tree half over a corpus tree.t writes itself, with a stand-in for the
 ; release's parse-and-print, including the negative control.
@@ -134,7 +139,12 @@
 (executable
  (name parity)
  (modules parity)
- (libraries jide_harness unix))
+ (libraries parity_readers jide_harness unix))
+
+(library
+ (name parity_readers)
+ (wrapped false)
+ (modules readers))
 
 (rule
  (alias runtest)
