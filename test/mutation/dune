@@ -2,25 +2,20 @@
 ; does not carry, so `dune runtest` runs only its own checks and the corpus
 ; run is the `mutation` target of the Makefile.
 ;
-; The tokenizer and the single-token families are a library of their own
-; because the first-error parity run emits the same families as files: its
-; emitter, `mutants`, links this library so that the two harnesses agree on
-; what a single-token mutation is.
+; The tokenizer, the single-token families and the choice of sites are a
+; library of their own because the first-error parity run (test/parity/mutate)
+; emits the same families as files, so the two harnesses agree on what a
+; single-token mutation is.
 
 (library
  (name mutation_support)
  (wrapped false)
- (modules mutant token))
+ (modules mutant token emit))
 
 (executable
  (name mutation)
  (modules mutation outline isolate probe report selftest witness)
  (libraries jide_jasmin jide_lang jasmin.jasmin unix mutation_support))
-
-(executable
- (name mutants)
- (modules mutants)
- (libraries mutation_support))
 
 (rule
  (alias runtest)
