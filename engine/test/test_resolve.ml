@@ -470,6 +470,100 @@ let test_identity_across_files () =
     | Some declaration -> String.equal declaration.file library_file
     | None -> false)
 
+(* A flag group [?{...}] names a variable: a label with no attribute is the
+   variable that receives the flag, and an attribute is the variable of a
+   labelled flag. The label of a labelled flag names the flag, not a symbol. *)
+let flag_groups =
+  "fn f(reg u64 x) -> reg u64 {\n\
+  \  reg u64 z;\n\
+  \  reg bool cf zf CF;\n\
+  \  z = x;\n\
+  \  ?{CF=cf}, z = #ADC(z,z,cf);\n\
+  \  ?{cf}, z = #ADC(z,z,cf);\n\
+  \  ?{CF, zf}, z = #ADC(z,z,cf);\n\
+  \  return z;\n\
+   }\n"
+
+let test_flag_groups_name_variables () =
+  let file = "/work/flags.jazz" in
+  let resolved = resolve file flag_groups in
+  let index = index_of resolved file in
+  let cf = declaration_named index "cf" Jide_engine.Index.Variable in
+  let zf = declaration_named index "zf" Jide_engine.Index.Variable in
+  let big = declaration_named index "CF" Jide_engine.Index.Variable in
+  check "flags: a label with no attribute is the variable it names"
+    (is_resolved_to resolved ~file ~text:flag_groups ~within:"?{cf}" ~name:"cf"
+       ~declaration:cf);
+  check "flags: the attribute of a labelled flag is the variable"
+    (is_resolved_to resolved ~file ~text:flag_groups ~within:"?{CF=cf}"
+       ~name:"cf" ~declaration:cf);
+  check "flags: a label with no attribute in a later group is resolved too"
+    (is_resolved_to resolved ~file ~text:flag_groups ~within:"?{CF, zf}"
+       ~name:"zf" ~declaration:zf);
+  check "flags: a label with no attribute names its variable, CF"
+    (is_resolved_to resolved ~file ~text:flag_groups ~within:"?{CF, zf}"
+       ~name:"CF" ~declaration:big);
+  check "flags: the label of a labelled flag is not a symbol"
+    (match
+       answer_of resolved ~file ~text:flag_groups ~within:"?{CF=cf}" ~name:"CF"
+     with
+    | Some Jide_engine.Resolve.Annotation -> true
+    | _ -> false)
+
+(* A file a namespace reads is read once per namespace. Each reading names a
+   byte by the declaration its own namespace holds, so the answers of the two
+   readings differ, and the first reading is the one the single answer gives. *)
+let twice_entry =
+  "namespace Short {\n\
+  \  param int N = 1;\n\
+  \  require \"sum.jinc\"\n\
+   }\n\
+   namespace Long {\n\
+  \  param int N = 8;\n\
+  \  require \"sum.jinc\"\n\
+   }\n"
+
+let twice_library =
+  "fn sum(reg u32[N] t) -> reg u32 {\n  reg u32 s;\n  s = N;\n  return s;\n}\n"
+
+let test_a_file_read_twice_answers_per_reading () =
+  let file = "/work/twice.jazz" in
+  let library_file = "/work/sum.jinc" in
+  let resolved =
+    resolve ~files:[ ("sum.jinc", twice_library) ] file twice_entry
+  in
+  let short = byte_of_in twice_entry ~within:"param int N = 1;" ~name:"N" in
+  let long = byte_of_in twice_entry ~within:"param int N = 8;" ~name:"N" in
+  let byte = byte_of_in twice_library ~within:"s = N;" ~name:"N" in
+  (match (short, long, byte) with
+  | Some short, Some long, Some byte ->
+      let _occurrence, readings =
+        Jide_engine.Resolve.visit_answers resolved ~file:library_file ~byte
+      in
+      check "twice: one answer per reading of the file"
+        (List.length readings = 2);
+      check "twice: the readings name the two namespaces' declarations"
+        (match readings with
+        | [
+         Jide_engine.Resolve.Resolved first; Jide_engine.Resolve.Resolved second;
+        ] ->
+            first.Jide_engine.Index.name_span.start_byte = short
+            && second.Jide_engine.Index.name_span.start_byte = long
+        | _ -> false);
+      check "twice: the single answer is the first reading's"
+        (match
+           Jide_engine.Resolve.answer_at resolved ~file:library_file ~byte
+         with
+        | Some (_, Jide_engine.Resolve.Resolved first) ->
+            first.Jide_engine.Index.name_span.start_byte = short
+        | _ -> false)
+  | _ -> check "twice: the fixture has the three names" false);
+  let unread = resolve file twice_entry in
+  let _occurrence, none =
+    Jide_engine.Resolve.visit_answers unread ~file:library_file ~byte:0
+  in
+  check "twice: a file the resolution never reached has no reading" (none = [])
+
 let () =
   test_a_name_resolves_to_its_declaration ();
   test_a_byte_order_mark_resolves ();
@@ -482,6 +576,8 @@ let () =
   test_a_required_file ();
   test_intrinsics_annotations_and_include_names ();
   test_answers_and_unknown_bytes ();
+  test_flag_groups_name_variables ();
+  test_a_file_read_twice_answers_per_reading ();
   test_the_entry_path_is_normalised ();
   test_identity_across_files ();
   if !failures = 0 then print_endline "all resolve tests passed"
