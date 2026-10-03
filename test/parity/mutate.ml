@@ -508,3 +508,20 @@ let run (args : H.args) =
   H.say "every mutant agrees";
   exit 0
 
+let () =
+  run
+    (H.parse_args ~usage ~flags:[ "--list" ]
+       ~options:
+         [
+           "--corpus";
+           "--jasminc";
+           "--defects";
+           "--seed";
+           "--files";
+           "--checker";
+           "--jobs";
+           "--tsv";
+           "--keep";
+           "--write";
+         ]
+       (List.tl (Array.to_list Sys.argv)))
