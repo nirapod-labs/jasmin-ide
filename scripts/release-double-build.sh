@@ -187,3 +187,97 @@ sha_of() {
 	fi
 }
 
+bytes_of() { wc -c <"$1" | tr -d ' '; }
+
+occurs_in() {
+	if grep -qF -- "$1" "$2" 2>/dev/null; then printf 'yes'; else printf 'no'; fi
+}
+
+record=$out/double-build.txt
+{
+	printf '# Double build of the release artefacts, from two clean trees at one commit\n'
+	printf 'commit %s\n' "$commit_a"
+	printf 'tree-a %s\n' "$tree_a"
+	printf 'tree-b %s\n' "$tree_b"
+	printf 'source-date-epoch %s\n' "$epoch"
+	printf 'platform %s %s\n' "$(uname -s)" "$(uname -m)"
+	printf 'profile release\n'
+	printf 'jobs %s\n' "$jobs"
+	if [ -n "$flags" ]; then
+		printf 'link-flags %s\n' "$flags"
+	else
+		printf 'link-flags (none)\n'
+	fi
+	printf 'src-prefix %s\n' "$src_prefix"
+	printf 'artefacts %s\n' "$count"
+} >"$record"
+
+compared=0
+differing=0
+for name in $artefacts; do
+	a=$out/pass-a/$name
+	b=$out/pass-b/$name
+	[ -f "$a" ] || die "pass a wrote no $name"
+	[ -f "$b" ] || die "pass b wrote no $name"
+	sha_a=$(sha_of "$a")
+	sha_b=$(sha_of "$b")
+	bytes_a=$(bytes_of "$a")
+	bytes_b=$(bytes_of "$b")
+	compared=$((compared + 1))
+	{
+		printf 'artefact %s\n' "$name"
+		printf 'a:sha256 %s\n' "$sha_a"
+		printf 'a:bytes %s\n' "$bytes_a"
+		printf 'b:sha256 %s\n' "$sha_b"
+		printf 'b:bytes %s\n' "$bytes_b"
+	} >>"$record"
+	if [ "$sha_a" = "$sha_b" ]; then
+		printf 'match yes\n' >>"$record"
+		say "identical $name ${sha_a} (${bytes_a} bytes)"
+		continue
+	fi
+
+	differing=$((differing + 1))
+	#
+	set +e
+	n=$(cmp -l "$a" "$b" 2>/dev/null | wc -l | tr -d ' ')
+	first=$(cmp "$a" "$b" 2>&1 |
+		sed -n -e 's/.* char \([0-9][0-9]*\),.*/\1/p' \
+			-e 's/.* byte \([0-9][0-9]*\),.*/\1/p' | head -1)
+	set -e
+	{
+		printf 'match no\n'
+		printf 'differing-bytes %s\n' "$n"
+		printf 'first-differing-byte %s\n' "${first:-unknown}"
+		printf 'a:holds-tree-a-path %s\n' "$(occurs_in "$tree_a" "$a")"
+		printf 'a:holds-tree-b-path %s\n' "$(occurs_in "$tree_b" "$a")"
+		printf 'b:holds-tree-a-path %s\n' "$(occurs_in "$tree_a" "$b")"
+		printf 'b:holds-tree-b-path %s\n' "$(occurs_in "$tree_b" "$b")"
+	} >>"$record"
+	say "differ $name ($n of $bytes_a bytes; first at ${first:-unknown})"
+done
+
+[ "$compared" -gt 0 ] ||
+	die "compared no artefact, so there is nothing this run can claim"
+
+if [ "$differing" -eq 0 ]; then
+	verdict=identical
+else
+	verdict=differ
+fi
+{
+	printf 'verdict %s\n' "$verdict"
+	printf 'artefacts-compared %s\n' "$compared"
+	printf 'artefacts-differing %s\n' "$differing"
+} >>"$record"
+
+if [ "$verdict" = identical ]; then
+	say "double build: $compared of $compared artefacts identical"
+else
+	say "double build: $differing of $compared artefacts differ"
+fi
+say "record: $record"
+
+if [ "$verdict" = differ ] && [ "$require_identical" = yes ]; then
+	die "the two builds of $commit_a are not identical, and --require-identical was given"
+fi
