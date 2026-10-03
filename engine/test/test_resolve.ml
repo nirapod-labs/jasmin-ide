@@ -535,34 +535,45 @@ let test_a_file_read_twice_answers_per_reading () =
   let short = byte_of_in twice_entry ~within:"param int N = 1;" ~name:"N" in
   let long = byte_of_in twice_entry ~within:"param int N = 8;" ~name:"N" in
   let byte = byte_of_in twice_library ~within:"s = N;" ~name:"N" in
+  let declared_at = function
+    | Some (_, Jide_engine.Resolve.Resolved declaration) ->
+        Some declaration.Jide_engine.Index.name_span.start_byte
+    | _ -> None
+  in
   (match (short, long, byte) with
   | Some short, Some long, Some byte ->
-      let _occurrence, readings =
-        Jide_engine.Resolve.visit_answers resolved ~file:library_file ~byte
-      in
-      check "twice: one answer per reading of the file"
-        (List.length readings = 2);
-      check "twice: the readings name the two namespaces' declarations"
-        (match readings with
-        | [
-         Jide_engine.Resolve.Resolved first; Jide_engine.Resolve.Resolved second;
-        ] ->
-            first.Jide_engine.Index.name_span.start_byte = short
-            && second.Jide_engine.Index.name_span.start_byte = long
+      check "twice: the file is read once in each namespace"
+        (Jide_engine.Resolve.readings resolved library_file
+        = [ "Short"; "Long" ]);
+      check "twice: the Short reading names the Short declaration"
+        (declared_at
+           (Jide_engine.Resolve.reading_answer resolved ~file:library_file ~byte
+              ~reading:"Short")
+        = Some short);
+      check "twice: the Long reading names the Long declaration"
+        (declared_at
+           (Jide_engine.Resolve.reading_answer resolved ~file:library_file ~byte
+              ~reading:"Long")
+        = Some long);
+      check "twice: a reading the file was never walked in names nothing"
+        (match
+           Jide_engine.Resolve.reading_answer resolved ~file:library_file ~byte
+             ~reading:"Other"
+         with
+        | Some (_, Jide_engine.Resolve.Unresolved) -> true
         | _ -> false);
       check "twice: the single answer is the first reading's"
-        (match
-           Jide_engine.Resolve.answer_at resolved ~file:library_file ~byte
-         with
-        | Some (_, Jide_engine.Resolve.Resolved first) ->
-            first.Jide_engine.Index.name_span.start_byte = short
-        | _ -> false)
+        (declared_at
+           (Some
+              ( (),
+                Jide_engine.Resolve.answer_at resolved ~file:library_file ~byte
+                |> Option.map snd
+                |> Option.value ~default:Jide_engine.Resolve.Unresolved ))
+        = Some short)
   | _ -> check "twice: the fixture has the three names" false);
   let unread = resolve file twice_entry in
-  let _occurrence, none =
-    Jide_engine.Resolve.visit_answers unread ~file:library_file ~byte:0
-  in
-  check "twice: a file the resolution never reached has no reading" (none = [])
+  check "twice: a file the resolution never reached has no reading"
+    (Jide_engine.Resolve.readings unread "/work/missing.jinc" = [])
 
 let () =
   test_a_name_resolves_to_its_declaration ();

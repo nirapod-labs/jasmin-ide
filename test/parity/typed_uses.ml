@@ -1,60 +1,48 @@
 (** The typed-use half of the resolver parity gate.
 
-    The gate's clause is one sentence: 100% of typed variable uses in the
-    corpus resolve to the compiler's declaration, its [v_dloc]. This program
-    measures that clause over one file. It runs the compiler's own check
-    ({!Jide_jasmin.Adapter.check}), which leaves the typed facts of the
-    file, and the engine's resolver over the same bytes
-    ({!Jide_engine.Resolve.of_text}), and for every typed use asks the
-    resolver what the use's name names.
+    The gate's clause is one sentence: 100% of typed variable uses in the corpus
+    resolve to the compiler's declaration, its [v_dloc]. This program measures that
+    clause over one file. It runs the compiler's check ({!Jide_jasmin.Adapter.check}),
+    which leaves the typed facts of the file, and the engine's resolver over the same
+    bytes, and for every typed use asks what the use's name names in the namespace the
+    compiler typed the use in.
 
-    The two sides come from one text and one architecture:
+    The two sides:
 
-    - the compiler's side is {!Jide_jasmin.Facts.use}. [u_file] and [u_span]
-      say where the compiler placed the occurrence, [u_name] is the name it
-      holds the variable by, and [u_dfile] and [u_decl] are the declaration it
-      bound the occurrence to. Nothing here reads the compiler's unique ids.
-    - the resolver's side is {!Jide_engine.Resolve.visit_answers}, asked at
-      the byte where the occurrence's name starts. A file a namespace reads is
-      read once per namespace, so the resolver gives one answer per reading,
-      and each reading is compared with the compiler's use of that reading.
+    - the compiler's side is {!Jide_jasmin.Facts.use}. [u_file] and [u_span] say where
+      the compiler placed the occurrence, [u_name] is the name, [u_dfile] and [u_decl]
+      are the declaration the occurrence was bound to, and [u_reading] is the namespace
+      path the use was typed in.
+    - the resolver's side is {!Jide_engine.Resolve.reading_answer}, asked at the byte
+      where the occurrence's name starts, in the reading of the same namespace.
 
-    The identity of a declaration is the design's (section 9): the normalised
-    file and the byte where its name starts.
+    A use is paired with the reading it was typed in and with no other. A use the
+    compiler typed in namespace [Long] is judged by the resolver's answer for namespace
+    [Long] only, so a resolver that answers the right declaration in one reading and a
+    wrong one in the other fails on exactly the wrong use. The identity of a declaration
+    is the design's (section 9): the normalised file and the byte where its name starts.
 
-    {2 What is a use the source writes}
+    {2 The classes}
 
-    A use is measured when the bytes the compiler placed it at spell its name:
-    the first identifier equal to the name's last segment inside the use's
-    span, at a token boundary. A qualified name [A::x] is compared by its last
-    segment, because a byte spells one segment. Two kinds of use are not
-    measured, and each is counted and listed:
+    Every typed use of the checked file falls in exactly one class:
 
-    - [unlocated]: no identifier of that name lies in the compiler's span.
-      These are uses the compiler made up on an instruction's location: a flag
-      it names [_zf_] and its siblings, a temporary, an intrinsic's expansion.
-      The source never writes them, so no occurrence exists to ask about.
-    - [unchecked]: the uses of a file the check refuses. The run fails on such
-      a file, because the corpus is the release's accepted folder.
+    - [same], [elsewhere], [unresolved], [other-name]: measured. They are the resolver's
+      answers for the use's byte in its own reading.
+    - [misplaced]: measured and a failure. The compiler's span holds no identifier of
+      the name, but the file writes the name somewhere else. The span is wrong, so the
+      use may be a user's own use, and it is never excluded.
+    - [excluded]: not measured. The name is not an identifier token anywhere in the file
+      the use's span indexes, so the source writes no occurrence for the compiler to
+      have placed. The compiler invents these uses on an instruction: a flag it names
+      [_zf_] or one of its siblings ([flag]), or a temporary such as the [bytes] of
+      [#randombytes] ([temporary]). The run prints the count of each reason and lists
+      every excluded use.
+    - [unchecked]: a use of a file the check refused. The run fails on such a file.
 
-    The gate's percentage is over the measured uses. The run prints all five
-    counts and the total, and they reconcile.
+    The gate's percentage is over the measured uses. The run checks that the classes
+    add up to the typed uses, so no use leaves the tally.
 
-    {2 Differences}
-
-    A measured use is one of these, and each is printed with its file, its
-    byte and its position:
-
-    - [elsewhere]: the resolver answers another declaration;
-    - [unresolved]: the resolver answers no declaration at that byte (no
-      occurrence, [Unresolved], or a name that is not a declaration), or the
-      resolution never reached the file;
-    - [other-name]: the occurrence at the byte holds another name.
-
-    Uses at one byte are matched one-to-one with the readings of the file at
-    that byte, so a use the compiler gives a declaration the resolver gives to
-    no reading of that byte is a difference, and a reading the compiler never
-    typed is not counted as one.
+    {2 Output}
 
     Usage:
 
@@ -63,29 +51,16 @@
       typed_uses --selftest
     v}
 
-    [--negative-control] moves the declaration the compiler is said to have
-    bound the first measured use to, so the run must report one difference.
-    It exists to show the comparison fails when a binding is wrong; the
-    script that runs it expects the failure.
+    [--negative-control] plants a wrong binding: the declaration of the first measured
+    use of the file is moved to byte 0. The run must then report that one use, which
+    proves the comparison fails when a binding is wrong. The script that runs it expects
+    the failure.
 
-    Stdout carries nothing. Stderr carries the counts, and one line per
-    difference:
+    Stdout carries nothing. Stderr carries the counts, then one line per difference and
+    one per excluded use. A position is one-based, [line:column].
 
-    {v
-      accepted: yes
-      errors: 0
-      typed-uses: 12
-      source-written: 12
-      same-declaration: 12
-      elsewhere: 0
-      unresolved: 0
-      other-name: 0
-      unlocated: 0
-      unchecked: 0
-    v}
-
-    The exit status is 0 when the check accepted the file and every measured
-    use is the compiler's declaration, 1 when one is not or the check refused
+    The exit status is 0 when the check accepted the file and every measured use is the
+    compiler's declaration in its own reading, 1 when one is not or the check refused
     the file, and 2 when the program cannot run at all. *)
 
 module A = Jide_jasmin.Adapter
@@ -102,9 +77,11 @@ let usage =
       "usage: typed_uses <file> [<architecture>] [--negative-control]";
       "       typed_uses --selftest";
       "";
-      "For <file>, compare the declaration every typed variable use resolves";
-      "to with the declaration the compiler's v_dloc names, and print the";
-      "counts and each difference on stderr.";
+      "For <file>, compare the declaration every typed variable use resolves \
+       to,";
+      "in the namespace the compiler typed it in, with the declaration the";
+      "compiler's v_dloc names, and print the counts and each difference on \
+       stderr.";
       "";
       "<architecture> is one of "
       ^ String.concat ", " A.arch_names
@@ -119,9 +96,9 @@ let read (path : string) =
   | text -> Some text
   | exception Sys_error _ -> None
 
-(* A UTF-8 byte-order mark, as three bytes. The mark is removed once, and the
-   same bytes go to the check and to the resolver, so a mark cannot make a
-   difference of its own. *)
+(* A UTF-8 byte-order mark, as three bytes. The mark is removed once, and the same
+   bytes go to the check and to the resolver, so a mark cannot make a difference of
+   its own. *)
 let strip_bom (text : string) =
   if
     String.length text >= 3
@@ -132,7 +109,7 @@ let strip_bom (text : string) =
   else (0, text)
 
 (* ------------------------------------------------------------------ *)
-(* Names and bytes *)
+(* Names and tokens *)
 
 let is_ident_char (c : char) =
   match c with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true | _ -> false
@@ -146,43 +123,56 @@ let last_segment (name : string) =
   let first = start (String.length name) in
   String.sub name first (String.length name - first)
 
-(** [spelled_in text ~start ~stop name] is the byte where the first identifier
-    equal to [name] begins inside [text] between [start] and [stop], at a token
-    boundary on both sides, or [None] when no such identifier lies there. *)
-let spelled_in (text : string) ~(start : int) ~(stop : int) (name : string) :
+(** [find_token text ~from ~until name] is the byte where the first identifier token
+    equal to [name] begins, the token lying wholly between [from] and [until], or
+    [None]. A token has an identifier boundary on both sides. *)
+let find_token (text : string) ~(from : int) ~(until : int) (name : string) :
     int option =
   let length = String.length text in
+  let until = min until length in
   let n = String.length name in
-  let stop = min stop length in
   let matches index =
-    index + n <= stop
+    index + n <= until
     && (index = 0 || not (is_ident_char text.[index - 1]))
     && (index + n >= length || not (is_ident_char text.[index + n]))
     && String.equal (String.sub text index n) name
   in
   let rec scan index =
-    if index + n > stop then None
+    if index + n > until then None
     else if matches index then Some index
     else scan (index + 1)
   in
-  if n = 0 then None else scan (max 0 start)
+  if n = 0 then None else scan (max 0 from)
 
-(** [where index byte] is the one-based position of [byte] in [index]'s text,
-    as a reader finds it in an editor. *)
-let where (text : LI.t) (byte : int) =
-  let position = LI.position_of_byte text byte in
+(** [find_sub text fragment] is the byte where [fragment] first occurs in [text]. *)
+let find_sub (text : string) (fragment : string) : int option =
+  let length = String.length text and n = String.length fragment in
+  let rec scan index =
+    if index + n > length then None
+    else if String.equal (String.sub text index n) fragment then Some index
+    else scan (index + 1)
+  in
+  scan 0
+
+(** [is_flag_name name] is true for the name shape of a flag the compiler names for an
+    intrinsic's unnamed flag: [_xf_] with one lower-case letter [x]. The corpus writes
+    no such name. *)
+let is_flag_name (name : string) =
+  String.length name = 4
+  && name.[0] = '_'
+  && name.[2] = 'f'
+  && name.[3] = '_'
+  && match name.[1] with 'a' .. 'z' -> true | _ -> false
+
+(** [where lines byte] is the one-based [line:column] of [byte]. *)
+let where (lines : LI.t) (byte : int) =
+  let position = LI.position_of_byte lines byte in
   Printf.sprintf "%d:%d"
     (position.Jide_lang.Position.line + 1)
     (position.Jide_lang.Position.character + 1)
 
 (* ------------------------------------------------------------------ *)
 (* The comparison *)
-
-(* [with_decl ~byte use] is [use] with its compiler-side declaration moved to
-   [byte]: a fact the compiler would not produce, used to prove the comparison
-   answers a difference. *)
-let with_decl ~(byte : int) (use : F.use) : F.use =
-  { use with F.u_decl = S.make ~start_byte:byte ~end_byte:(byte + 1) }
 
 let same_declaration (compiler : F.use) (resolver : I.declaration) =
   String.equal (I.normalise resolver.I.file) (I.normalise compiler.F.u_dfile)
@@ -725,57 +715,58 @@ let check_selftest () =
   (* A use the compiler made up itself: its span is an instruction's and the
      bytes spell no such name, so it is not measured and never fails a run. *)
   let made_up =
-    let checked = A.check arch Arch.Linux ~file:"valid.jazz" ~text:valid ~idirs:[] in
+    let checked =
+      A.check arch Arch.Linux ~file:"valid.jazz" ~text:valid ~idirs:[]
+    in
     match checked.A.facts.F.uses with
     | [] -> empty_answer
     | first :: _ ->
-        let use =
-          {
-            F.u_span = first.F.u_span;
-            u_name = "_zf_";
-            u_item = first.F.u_item;
-            u_decl = first.F.u_decl;
-            u_dfile = first.F.u_dfile;
-          }
-        in
+        let use = { first with F.u_name = "_zf_" } in
         let resolve = R.of_text ~idirs:[] ~read ~file:"valid.jazz" valid in
         answer_of_facts ~resolve { F.items = []; uses = [ use ] }
   in
-  check "a made-up use is not located" (List.length made_up.unlocated = 1);
+  check "a made-up use is not measured" (made_up.measured = 0);
+  check "a made-up use is listed as unlocated"
+    (List.length made_up.unlocated = 1);
   check "a made-up use is not a difference"
     (made_up.unresolved = [] && made_up.elsewhere = []
    && made_up.other_name = []);
   check "a made-up use does not fail the run"
     (status { made_up with accepted = true } = 0);
-  (* A qualified name is one name on both sides: the compiler's [A::x] is the
-     index's [x] at the same byte, and the declaration compared is the same. *)
   let qualification = compare_text ~arch ~file:"qualified.jazz" qualified in
   check "qualified: the check accepts it" qualification.accepted;
-  check "qualified: it holds typed uses" (qualification.uses > 0);
   check "qualified: every use is the compiler's declaration"
-    (qualification.same = qualification.uses && qualification.elsewhere = []
-   && qualification.unresolved = [] && qualification.other_name = []);
-  (* The shadowing source is the same answer: every use is the declaration its
-     own block wrote, which is the case a resolver that ignores blocks gets
-     wrong. *)
+    (qualification.same = qualification.measured
+    && qualification.measured > 0
+    && qualification.elsewhere = []
+    && qualification.unresolved = []
+    && qualification.other_name = []);
   let blocks = compare_text ~arch ~file:"shadowed.jazz" shadowed in
   check "shadowed: the check accepts it" blocks.accepted;
   check "shadowed: every use is its own block's declaration"
-    (blocks.same = blocks.uses && blocks.uses > 0);
-  (* A file the compiler cannot type is not accepted, and its uses are not
-     counted: there is no compiler-side answer to compare with. *)
+    (blocks.same = blocks.measured && blocks.measured > 0);
   let broken = compare_text ~arch ~file:"untyped.jazz" untyped in
   check "untyped: the check does not accept it" (not broken.accepted);
-  check "untyped: no use is counted" (broken.uses = 0);
+  check "untyped: no use is measured" (broken.measured = 0);
+  check "untyped: its uses are counted as unchecked"
+    (broken.unchecked = broken.uses);
   check "untyped: the first error is reported" (broken.first_diagnostic <> None);
-  (* The byte-order mark is stripped once, for both sides: the same source with
-     a mark gives the same answer. *)
+  check "untyped: the run fails" (status broken = 1);
   let marked = compare_text ~arch ~file:"valid.jazz" ("\xef\xbb\xbf" ^ valid) in
   check "a marked file holds the same typed uses" (marked.uses = good.uses);
   check "a marked file resolves every use the same way"
-    (marked.same = marked.uses && marked.accepted);
-  (* A declaration in a required file: the compiler names that file in
-     [u_dfile] and the resolver has to name it too. *)
+    (marked.same = marked.measured && marked.accepted);
+  let flagged = compare_text ~arch ~file:"flags.jazz" flags in
+  check "flags: the check accepts it" flagged.accepted;
+  check "flags: it holds typed uses" (flagged.measured > 0);
+  check "flags: every flag group's variable is the compiler's declaration"
+    (flagged.same = flagged.measured
+    && flagged.elsewhere = [] && flagged.unresolved = []
+    && flagged.other_name = []);
+  (* The files a directory holds: the requirer and its library, the body a
+     namespace requires, the namespaces that read one file twice, and a file
+     named twice. The compiler's answer is the same whether the test runs
+     alone or among the rest. *)
   let directory =
     let path = Filename.temp_file "typed-use-parity" ".dir" in
     Sys.remove path;
@@ -797,33 +788,83 @@ let check_selftest () =
       write "main.jazz" requirer;
       write "body.jinc" body;
       write "namespaced.jazz" namespaced_requirer;
+      write "sum.jinc" sum;
+      write "twice.jazz" namespaces_twice;
+      write "named.jazz" twice_named;
       let path = Filename.concat directory "main.jazz" in
       (match compare_file ~arch path with
       | Error message -> check ("required: it runs (" ^ message ^ ")") false
       | Ok required ->
           check "required: the check accepts it" required.accepted;
-          check "required: it holds typed uses" (required.uses > 0);
+          check "required: it holds typed uses" (required.measured > 0);
           check "required: every use is the compiler's declaration"
-            (required.same = required.uses && required.elsewhere = []
-           && required.unresolved = [] && required.other_name = []
-           && required.unlocated = []);
+            (required.same = required.measured
+            && required.elsewhere = [] && required.unresolved = []
+            && required.other_name = [] && required.unlocated = []);
           check "required: the exit status is the passing one"
             (status required = 0));
-      (* The required file a namespace brought in is typed as part of the
-         document's item, so its body's uses carry the required file's offsets.
-         They are compared in that file, not in the document. *)
       let path = Filename.concat directory "namespaced.jazz" in
-      match compare_file ~arch path with
+      (match compare_file ~arch path with
       | Error message -> check ("namespaced: it runs (" ^ message ^ ")") false
       | Ok namespaced ->
           check "namespaced: the check accepts it" namespaced.accepted;
-          check "namespaced: it holds typed uses" (namespaced.uses > 0);
-          check "namespaced: the document's use is the compiler's declaration"
-            (namespaced.unresolved = [] && namespaced.elsewhere = []
-           && namespaced.other_name = []
-           && namespaced.same = namespaced.uses);
+          check "namespaced: it holds typed uses" (namespaced.measured > 0);
+          check "namespaced: every use is the compiler's declaration"
+            (namespaced.same = namespaced.measured
+            && namespaced.elsewhere = [] && namespaced.unresolved = []
+            && namespaced.other_name = []);
           check "namespaced: the exit status is the passing one"
             (status namespaced = 0));
+      (* A file read into two namespaces: every reading of each byte of
+         sum.jinc is compared with the compiler's use of that reading, so the
+         two declarations of [N] are each the right answer for their reading. *)
+      let path = Filename.concat directory "twice.jazz" in
+      (match compare_file ~arch path with
+      | Error message -> check ("twice: it runs (" ^ message ^ ")") false
+      | Ok twice ->
+          check "twice: the check accepts it" twice.accepted;
+          check "twice: every reading agrees with the compiler"
+            (twice.same = twice.measured
+            && twice.elsewhere = [] && twice.unresolved = []
+            && twice.other_name = []);
+          check "twice: the file's uses are measured in both readings"
+            (twice.measured > 0);
+          let resolve =
+            R.of_text ~idirs:[] ~read ~file:(I.normalise path)
+              (Option.get (read path))
+          in
+          let sum_path = I.normalise (Filename.concat directory "sum.jinc") in
+          let sum_text = Option.get (read sum_path) in
+          let byte =
+            let rec find index =
+              if index + 1 >= String.length sum_text then -1
+              else if String.sub sum_text index 1 = "N" then index
+              else find (index + 1)
+            in
+            find 0
+          in
+          let _occurrence, readings =
+            R.visit_answers resolve ~file:sum_path ~byte
+          in
+          check "twice: the file has one reading per namespace"
+            (List.length readings = 2);
+          check "twice: the readings name different declarations"
+            (match readings with
+            | [ R.Resolved first; R.Resolved second ] ->
+                first.I.name_span.S.start_byte
+                <> second.I.name_span.S.start_byte
+            | _ -> false));
+      (* Two requires of one file, spelled two ways: read once, as the
+         compiler reads it, so its functions are declared once. *)
+      let path = Filename.concat directory "named.jazz" in
+      match compare_file ~arch path with
+      | Error message -> check ("named: it runs (" ^ message ^ ")") false
+      | Ok named ->
+          check "named: the check accepts a file required twice" named.accepted;
+          check "named: every use is the compiler's declaration"
+            (named.same = named.measured
+            && named.elsewhere = [] && named.unresolved = []
+            && named.other_name = []));
   if !failures = 0 then print_endline "typed_uses: selftest ok"
   else (
     Printf.eprintf "typed_uses: %d selftest check(s) failed\n" !failures;
@@ -834,32 +875,37 @@ let check_selftest () =
 let arch_of_name name =
   match A.arch_of_string name with
   | Some arch -> Ok arch
-  | None -> Error (Printf.sprintf "%S is not an architecture of the adapter" name)
+  | None ->
+      Error (Printf.sprintf "%S is not an architecture of the adapter" name)
 
 let main () =
-  match Array.to_list Sys.argv with
-  | _ :: [ "--selftest" ] -> check_selftest ()
-  | _ :: [ "--help" ] | _ :: [ "-help" ] ->
+  let args = List.tl (Array.to_list Sys.argv) in
+  let negative = List.mem "--negative-control" args in
+  let positional = List.filter (fun a -> a <> "--negative-control") args in
+  match positional with
+  | [ "--selftest" ] -> check_selftest ()
+  | [ "--help" ] | [ "-help" ] ->
       print_endline usage;
       exit 0
-  | _ :: (path :: rest) -> (
-      let name = match rest with [] -> "x86-64" | [ name ] -> name | _ -> "" in
+  | path :: rest -> (
+      let name =
+        match rest with [] -> "x86-64" | [ name ] -> name | _ -> ""
+      in
       match arch_of_name name with
       | Error message ->
           Printf.eprintf "typed_uses: %s\n%s\n" message usage;
           exit 2
       | Ok arch -> (
-          match compare_file ~arch path with
-          | Error message ->
-              Printf.eprintf "typed_uses: %s\n" message;
+          match read path with
+          | None ->
+              Printf.eprintf "typed_uses: cannot read %s\n" path;
               exit 2
-          | Ok answer ->
-              let text = match read path with Some text -> text | None -> "" in
-              let _bom, body = strip_bom text in
+          | Some text ->
+              let answer = compare_text ~plant:negative ~arch ~file:path text in
               say_answer answer;
-              say_differences ~index:(LI.create body) answer;
+              say_differences answer;
               exit (status answer)))
-  | _ ->
+  | [] ->
       prerr_endline usage;
       exit 2
 
