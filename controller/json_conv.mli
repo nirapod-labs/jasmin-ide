@@ -7,9 +7,9 @@
     the text it describes still produces a well-formed range.
 
     The severity numbers are the protocol's: 1 error, 2 warning, 3
-    information, 4 hint. [delay_of_settings] reads a setting, so it goes the
-    other way, from the client's JSON to a number the server can use; it
-    checks the shape only, not the range. *)
+    information, 4 hint. [delay_of_settings] and [delay_of_initialize] read
+    a setting, so they go the other way, from the client's JSON to a number
+    the server can use; they check the shape only, not the range. *)
 
 val position_json : Jide_lang.Position.t -> Yojson.Safe.t
 (** [position_json position] is [{"line":..., "character":...}]. *)
@@ -99,4 +99,16 @@ val delay_of_settings : Yojson.Safe.t -> int option
     The keys are looked for under [jasminIde], then at the top level, then as
     a dotted name ([diagnostics.delay]), because clients differ in how deep
     they nest a section. The number is returned as written: the caller
-    clamps it to the range it accepts. *)
+    clamps it to the range it accepts. This is the reader of the parameters
+    of a [workspace/didChangeConfiguration] notification, whose [settings]
+    object is the configuration section itself. *)
+
+val delay_of_initialize : Yojson.Safe.t -> int option
+(** [delay_of_initialize params] is the value of [diagnostics.delay] in an
+    initialize request's parameters, or [None] when the request does not
+    carry one. An initialize request carries the setting one key per level:
+    [initializationOptions] holds [diagnostics] holds [delay]. That is the
+    shape every client sends and the only name the request's options use; a
+    flat name for the same setting, or the configuration section's name
+    around the nested one, would be a second wire shape, and this reader does
+    not take one. *)
