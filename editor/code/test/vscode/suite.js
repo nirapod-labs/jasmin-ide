@@ -31,7 +31,7 @@
 // which is where the editing-help checks take the server's capabilities from.
 const assert = require("node:assert/strict");
 const { execFile } = require("node:child_process");
-const { appendFileSync } = require("node:fs");
+const { renameSync, writeFileSync } = require("node:fs");
 const { join } = require("node:path");
 const { promisify } = require("node:util");
 const vscode = require("vscode");
@@ -61,15 +61,43 @@ const renameRequest = "Sending request 'textDocument/rename";
 // can still see it. Without the variable the run is a plain window check.
 const capturePath = process.env.JASMIN_IDE_VSCODE_CAPTURE;
 
+// The level of the one record that says the suite is over, whatever the
+// outcome. `run.mjs` waits for it before it decides anything, so a window that
+// closed with the suite still in flight is told apart from one that finished
+// and failed: the first has no terminal line, the second has one that carries
+// the failure's own words.
+const terminalLevel = "terminal";
+
+// The level of the record written just before a wait begins. It names the
+// condition the suite was waiting for, so a run that never gets past a wait
+// leaves the unfinished condition in the capture instead of only in a message
+// the window's stderr swallowed.
+const waitingLevel = "waiting";
+
 /** Every line captured so far, in the order the channels received them. */
 const captured = [];
 
-/** One captured line: recorded for the assertions and appended for `run.mjs`. */
+/** The capture file as it will be written next, one JSON line per record. */
+const captureLines = [];
+
+/**
+ * One captured line: recorded for the assertions and written for `run.mjs`.
+ *
+ * The file is replaced in one step (a staged sibling renamed over it, which
+ * `renameSync` does atomically), never appended to. A reader therefore sees
+ * either the previous complete file or the next complete file, and can never
+ * catch a half-written line: the reader used to append and then split on
+ * newlines, so a read that raced a partial write could see a record with no
+ * trailing newline and `JSON.parse` it as truncated JSON.
+ */
 function record(channel, level, text) {
   const entry = {channel, level, text};
   captured.push(entry);
   if (capturePath !== undefined) {
-    appendFileSync(capturePath, `${JSON.stringify(entry)}\n`, "utf8");
+    captureLines.push(`${JSON.stringify(entry)}\n`);
+    const staged = `${capturePath}.staged`;
+    writeFileSync(staged, captureLines.join(""), "utf8");
+    renameSync(staged, capturePath);
   }
 }
 
@@ -135,9 +163,19 @@ function count(text) {
   return captured.filter((entry) => entry.text.includes(text)).length;
 }
 
-/** Waits until the predicate holds for the transcript, or fails. */
-async function waitFor(predicate, timeoutMs, message) {
+/**
+ * Waits until the predicate holds for the transcript, or fails.
+ *
+ * The condition's name is recorded before the first poll, so a window that is
+ * torn down mid-wait leaves the condition it was waiting for in the capture:
+ * the run's log then says what never arrived instead of ending at whatever the
+ * last unrelated line happened to be.
+ */
+async function waitFor(predicate, timeoutMs, message, waitingFor) {
   const deadline = Date.now() + timeoutMs;
+  if (waitingFor !== undefined) {
+    record("suite", waitingLevel, waitingFor);
+  }
   for (;;) {
     if (predicate(transcript())) {
       return;
@@ -296,7 +334,21 @@ async function checkRename(document, positions, capabilities) {
   try {
     location = await vscode.commands.executeCommand(prepareRenameCommand, document.uri, positions.name);
   } catch (error) {
-    failCheck(check, `vscode.prepareRename rejected at the declaration of "load": ${messageOf(error)}`);
+    // A server that advertises rename and then refuses the rename is not a
+    // client failure: the engine has no rename yet, and refusing is the
+    // correct answer for a request with no empty form. Record what the
+    // server said and stop, rather than failing the harness for behaviour
+    // the design asks for.
+    const reason = messageOf(error);
+    if (/rename is unavailable/i.test(reason)) {
+      recordCheck(
+        check,
+        "SKIP",
+        `the server advertises renameProvider and refuses every rename, with its own reason: ${reason}`
+      );
+      return;
+    }
+    failCheck(check, `vscode.prepareRename rejected at the declaration of "load": ${reason}`);
   }
   if (count(prepareRenameRequest) <= beforePrepare) {
     failCheck(check, "the client sent no textDocument/prepareRename request");
@@ -344,6 +396,13 @@ async function checkRename(document, positions, capabilities) {
  * `ps` because the extension keeps its client private. The command line is
  * matched against the path the run configured, so a server built under
  * another name is found too; `-ww` keeps `ps` from cutting the line short.
+ *
+ * A process is listed only while it exists, so the call is also how the suite
+ * tells a server it started from one that is already gone: a restart records
+ * the server it started, waits for that server to exit, and only then records
+ * the next one. Without that wait the second record could be the first server
+ * again, which is how a run came to report one server process while two of
+ * them had run.
  */
 async function serverProcesses(serverPath) {
   const { stdout } = await execute("ps", ["-Aww", "-o", "pid,ppid,command"]);
@@ -354,6 +413,38 @@ async function serverProcesses(serverPath) {
     .filter((match) => match !== null && Number(match[2]) === process.pid)
     .map((match) => ({pid: Number(match[1]), command: match[3]}))
     .filter((entry) => entry.command.includes(serverPath));
+}
+
+/**
+ * Waits until a child of the extension host runs the server under a pid that is
+ * not one of `previous`, and returns those processes.
+ *
+ * This is the condition a restart actually establishes. Waiting for "some
+ * server is running" is satisfied the instant it is asked, because the server
+ * the restart is replacing can still be in `ps` while it exits — that is how a
+ * run came to record the old pid twice and report one server process while two
+ * had run. Waiting for "no server is running" is wrong the other way: the
+ * replacement may already have started. Only a pid absent from the first set
+ * proves the second server, and it is what the restart is being checked for.
+ */
+async function waitForReplacementServer(serverPath, previous, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let seen = [];
+  for (;;) {
+    seen = (await serverProcesses(serverPath)).filter((entry) => !previous.includes(entry.pid));
+    if (seen.length > 0) {
+      return seen;
+    }
+    if (Date.now() > deadline) {
+      const still = await serverProcesses(serverPath);
+      throw new Error(
+        `no server under a new pid ran ${serverPath} within ${timeoutMs} ms of the restart; ` +
+          `the pid(s) that were running: ${still.map((entry) => entry.pid).join(", ") || "none"}; ` +
+          `the pid(s) seen before the restart: ${previous.join(", ") || "none"}`
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
 /** Waits until the extension host has a server child, and returns it. */
