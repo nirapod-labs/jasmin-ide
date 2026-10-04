@@ -128,13 +128,55 @@ try {
   failure = error;
 }
 
-// The window is gone by now. Its record of what it did is what decides the
-// check, so read it before the throw-away workspace goes.
-let captured = [];
-if (existsSync(capturePath)) {
-  const lines = (await readFile(capturePath, "utf8")).split("\n").filter((line) => line.trim() !== "");
-  captured = lines.map((line) => JSON.parse(line));
+// The window is gone by now, but its record is not necessarily complete: the
+// window's exit and the suite's own end are two events, and the suite's end is
+// the one that decides. A window whose extension host was torn down while the
+// suite was still waiting leaves a capture with no terminal record, and reading
+// it once at that moment reported every step after the teardown as a failure of
+// the code under test. So the read waits for the terminal record the suite
+// writes as its last act, whatever the outcome, and gives up only after a
+// bound. The bound is not a fixed sleep: the read returns the moment the record
+// is there, and on timeout the message names the record that never arrived.
+const terminalWaitMs = 30000;
+
+/** One complete read of the capture file the suite keeps replacing atomically. */
+async function readCapture(path) {
+  if (!existsSync(path)) {
+    return {records: [], malformed: []};
+  }
+  const records = [];
+  const malformed = [];
+  for (const line of (await readFile(path, "utf8")).split("\n")) {
+    if (line.trim() === "") {
+      continue;
+    }
+    try {
+      records.push(JSON.parse(line));
+    } catch (error) {
+      malformed.push(`${line.slice(0, 120)} (${error instanceof Error ? error.message : String(error)})`);
+    }
+  }
+  return {records, malformed};
 }
+
+/** Waits until the capture holds a terminal record, or the bound passes. */
+async function waitForTerminal(path, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const read = await readCapture(path);
+    const terminal = read.records.find((entry) => entry.level === "terminal");
+    if (terminal !== undefined) {
+      return {...read, terminal};
+    }
+    if (Date.now() > deadline) {
+      return {...read, terminal: undefined};
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+const capture = await waitForTerminal(capturePath, terminalWaitMs);
+const captured = capture.records;
 
 await rm(workspace, {recursive: true, force: true});
 
@@ -171,25 +213,36 @@ const summary = captured.find((entry) => entry.level === "summary");
 // server writes its own markers to stderr and the client pipes them into the
 // extension's output channel, so a marker in this list is a message the server
 // actually handled with the client VS Code started on the other end.
+//
+// Each check also names the line it looked for, so a FAIL prints the terminal
+// line that never arrived rather than only the property that was hoped for. A
+// reader of the gate log does not have the capture file, so the name of the
+// missing line is the whole diagnosis.
 const checks = [
   {
     step: "initialize",
     detail: "the server answered an initialize request",
+    missing: 'the server line "[jasmin-lsp] initialized", which it writes when it answers an initialize request',
     ok: count("[jasmin-lsp] initialized") >= 1
   },
   {
     step: "initialized",
     detail: "the client reached the running state, which it reports only after sending the initialized notification",
+    missing: 'the client line "The Jasmin language server is running.", which it logs after the initialized notification',
     ok: count("The Jasmin language server is running.") >= 1
   },
   {
     step: "shutdown",
     detail: "the server answered a shutdown request",
+    missing: 'the server line "[jasmin-lsp] shutdown requested", which it writes when it answers a shutdown',
     ok: count("[jasmin-lsp] shutdown requested") >= 1
   },
   {
     step: "exit",
     detail: "the server handled the exit notification after a shutdown",
+    missing:
+      'the server line "[jasmin-lsp] exiting" after "[jasmin-lsp] shutdown requested"; the server writes it only ' +
+      "when it handles the exit notification",
     ok:
       count("[jasmin-lsp] exiting") >= 1 &&
       firstAt("[jasmin-lsp] shutdown requested") < firstAt("[jasmin-lsp] exiting")
@@ -197,26 +250,33 @@ const checks = [
   {
     step: "client initialize",
     detail: "the client logged the initialize request it sent",
+    missing: `the client trace line "${messages.initialize}", which it writes when it sends the initialize request`,
     ok: sent("initialize") >= 1
   },
   {
     step: "client initialized",
     detail: "the client logged the initialized notification it sent",
+    missing: `the client trace line "${messages.initialized}", which it writes when it sends the initialized notification`,
     ok: sent("initialized") >= 1
   },
   {
     step: "client shutdown",
     detail: "the client logged the shutdown request it sent",
+    missing: `the client trace line "${messages.shutdown}", which it writes when it sends the shutdown request`,
     ok: sent("shutdown") >= 1
   },
   {
     step: "client exit",
     detail: "the client logged the exit notification it sent",
+    missing: `the client trace line "${messages.exit}", which it writes when it sends the exit notification`,
     ok: sent("exit") >= 1
   },
   {
     step: "suite summary",
     detail: "the suite recorded the lifecycle counts it observed",
+    missing:
+      'the suite line "[suite/summary]", which it records after the restart; without it the suite never reached the ' +
+      "restart, so the whole second half of the lifecycle is unmeasured",
     ok: summary !== undefined
   }
 ];
@@ -248,14 +308,47 @@ console.log(
 if (summary !== undefined) {
   console.log(`vscode-test: suite summary ${summary.text}`);
 }
+
+// The terminal record the suite writes as its own last act, and the condition
+// it had begun to wait for when it never got there. A run that finished prints
+// only the outcome; a run that did not prints which condition was outstanding,
+// so a failing log says by itself what the window was waiting for instead of
+// making a reader infer it from the last unrelated captured line.
+const terminal = capture.terminal;
+const lastWaiting = [...captured].reverse().find((entry) => entry.level === "waiting");
+const suiteFinished = terminal !== undefined && terminal.text.startsWith("PASS");
+
+if (terminal !== undefined) {
+  console.log(`vscode-test: suite ended: ${terminal.text}`);
+} else {
+  console.log(
+    `vscode-test: FAIL suite did not finish: the capture holds no terminal line after ` +
+      `${terminalWaitMs} ms, so the suite never wrote its last record: the window was torn down ` +
+      `while the suite was still running`
+  );
+}
+if (!suiteFinished && lastWaiting !== undefined) {
+  console.log(`vscode-test: FAIL suite never got: ${lastWaiting.text}`);
+}
+for (const line of capture.malformed) {
+  console.log(`vscode-test: FAIL capture line is not JSON: ${line}`);
+}
+
 for (const check of checks) {
   console.log(`vscode-test: ${check.ok ? "PASS" : "FAIL"} ${check.step}: ${check.detail}`);
+  if (!check.ok) {
+    console.log(`vscode-test:   never arrived: ${check.missing}`);
+  }
 }
 for (const check of editingHelp) {
   console.log(`vscode-test: ${check.status} ${check.check}: ${check.detail}`);
 }
 if (editingHelp.length === 0) {
   console.log("vscode-test: FAIL editing-help: the window recorded neither of the two checks");
+  console.log(
+    "vscode-test:   never arrived: a [suite/m3-check] record for each of completion and rename, written when " +
+      "the suite reaches them; none means the suite stopped before the editing-help project was open"
+  );
 } else if (editingHelp.length !== 2) {
   console.log(`vscode-test: FAIL editing-help: the window recorded ${editingHelp.length} check(s), expected 2`);
 }
@@ -281,6 +374,9 @@ const ok =
   passed === checks.length &&
   code === 0 &&
   failure === undefined &&
+  terminal !== undefined &&
+  terminal.text.startsWith("PASS") &&
+  capture.malformed.length === 0 &&
   serverPids.length > 0 &&
   survivors.length === 0 &&
   editingHelpOk;
@@ -294,8 +390,18 @@ if (skippedChecks > 0) {
 console.log(`vscode-test: ${ok ? "PASS" : "FAIL"}`);
 
 if (failure !== undefined) {
+  // The window's own exit code and the suite's terminal line are separate
+  // events, so a reader needs both to tell "the suite failed" from "the window
+  // closed under the suite". The second half names which of the two happened,
+  // and when the suite never finished, the condition it was still waiting for.
+  const suiteEnd =
+    terminal === undefined
+      ? "the suite never finished: it wrote no terminal line, and the last condition it waited for was " +
+        `${lastWaiting === undefined ? "not recorded" : JSON.stringify(lastWaiting.text)}`
+      : `the suite's own last line was ${JSON.stringify(terminal.text)}`;
   console.error(
-    `vscode-test: the window did not complete: ${failure instanceof Error ? failure.message : String(failure)}`
+    `vscode-test: the window did not complete: ${failure instanceof Error ? failure.message : String(failure)}; ` +
+      `${suiteEnd}`
   );
 }
 
