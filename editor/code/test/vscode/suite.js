@@ -494,10 +494,14 @@ async function run() {
   // which is after the initialize reply and after the initialized
   // notification. A client that failed either step logs the failure instead
   // and never this line.
+  // The `waiting` text deliberately does not quote the marker it waits for:
+  // `count` reads every captured line, so quoting a marker in a record the
+  // suite writes itself would count as the marker having arrived.
   await waitFor(
     (text) => text.includes(running),
     60000,
-    `the extension never reported the language client running; transcript:\n${transcript()}`
+    `the extension never reported the language client running; transcript:\n${transcript()}`,
+    "the language client reporting it reached the running state"
   );
   record("suite", "state", "the language client reported the running state");
 
@@ -512,7 +516,8 @@ async function run() {
   await waitFor(
     (text) => text.includes(initialized),
     30000,
-    `the server never reported that it answered an initialize request; transcript:\n${transcript()}`
+    `the server never reported that it answered an initialize request; transcript:\n${transcript()}`,
+    'the server writing its own "[jasmin-lsp] initialized" marker'
   );
 
   // A `.jazz` file from the repository's fixtures, opened the way a person
@@ -539,15 +544,26 @@ async function run() {
   const folder = vscode.workspace.workspaceFolders?.[0];
   assert.ok(folder, "the window has no workspace folder, so the editing-help project is unreachable");
   const projectPath = join(folder.uri.fsPath, "main.jazz");
-  const didOpen = "Sending notification 'textDocument/didOpen";
-  const openedBefore = count(didOpen);
   const project = await vscode.workspace.openTextDocument(projectPath);
   assert.equal(project.languageId, languageId, `the editing-help project does not open as ${languageId}`);
   await vscode.window.showTextDocument(project);
+  // The condition is the fact itself — the client sent `didOpen` for this one
+  // document — not "the didOpen count went up since a moment ago". The count
+  // form was the flake: the client can send `didOpen` for the project before
+  // the snapshot is taken (the window tells the server about an open document
+  // on its own schedule, not between two of the suite's awaits), and then the
+  // required increment never comes. The suite then waited its full bound,
+  // failed with a message that read like a client bug, and took the run down
+  // before the restart — so `exit`, `client exit` and the summary were all
+  // absent and only one server process was ever recorded. The fact is monotone
+  // and idempotent: an earlier `didOpen` for the same document satisfies it.
+  const projectUri = project.uri.toString();
+  const didOpen = "Sending notification 'textDocument/didOpen";
   await waitFor(
-    () => count(didOpen) > openedBefore,
+    () => captured.some((entry) => entry.text.includes(didOpen) && entry.text.includes(projectUri)),
     15000,
-    `the client never sent textDocument/didOpen for ${projectPath}`
+    `the client never sent textDocument/didOpen for ${projectPath}`,
+    `a textDocument/didOpen notification for ${project.name}`
   );
   record("suite", "state", `opened the editing-help project ${projectPath}`);
 
@@ -556,16 +572,21 @@ async function run() {
   await checkRename(project, positions, capabilities);
 
   // The restart command stops the running client and starts another one, so
-  // both halves of the lifecycle run once more, both observed.
+  // both halves of the lifecycle run once more, both observed. The new server is
+  // waited for by pid, not by "a server is running": the server being replaced
+  // can still be in `ps` while it exits, so "a server is running" was already
+  // true when it was asked — which is how a run recorded the old pid twice and
+  // reported one server process while two had run.
+  const firstPids = started.map((entry) => entry.pid);
   await vscode.commands.executeCommand("jasminIde.restartServer");
   await waitFor(
     () => count(running) >= 2,
     60000,
-    `the restarted language client never reported the running state; transcript:\n${transcript()}`
+    `the restarted language client never reported the running state; transcript:\n${transcript()}`,
+    "the language client reporting a second running state, after the restart command"
   );
 
-  const restarted = await waitForServer(configured, 30000);
-  assert.ok(restarted.length > 0, "the server is not running after the restart command");
+  const restarted = await waitForReplacementServer(configured, firstPids, 30000);
   for (const entry of restarted) {
     record("suite", "server-pid", `pid ${entry.pid}`);
   }
@@ -610,4 +631,26 @@ async function run() {
   record("suite", "summary", JSON.stringify(summary));
 }
 
-module.exports = {run};
+/**
+ * Runs the suite and records the terminal line, whatever the outcome.
+ *
+ * The suite's end and the window's end are two events, and VS Code closes the
+ * window once `run` settles. `run.mjs` therefore cannot treat the window's exit
+ * as proof that the suite finished: an extension host torn down mid-wait exits
+ * without the suite reaching its last line. This wrapper writes the terminal
+ * record as the suite's own last act, from its own process, before the promise
+ * settles — so a capture with no terminal record is a suite that never finished
+ * (and its `waiting` record names what it was waiting for), while a capture
+ * with one carries the outcome and the reason in the same file.
+ */
+async function runAndRecordTerminal() {
+  try {
+    await run();
+    record("suite", terminalLevel, "PASS the suite reached its last check");
+  } catch (error) {
+    record("suite", terminalLevel, `FAIL the suite stopped early: ${messageOf(error)}`);
+    throw error;
+  }
+}
+
+module.exports = {run: runAndRecordTerminal};
