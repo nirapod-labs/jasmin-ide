@@ -1,2 +1,5 @@
 dist/
 .vscode-test/
+# The staged server directory: `scripts/package-vsix.mjs` writes it, hands it
+# to `vsce` and removes it again. It is never part of the source tree.
+server/

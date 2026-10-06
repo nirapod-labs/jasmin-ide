@@ -123,6 +123,57 @@ VS Code gets a printed skip only when the caller allows that skip by name
 step fails, so a gate log cannot claim the editor half was measured when it was
 not.
 
+## Packaging
+
+Two kinds of package are built from this directory.
+
+A **platform package** bundles the language server, so a user installs the
+extension and has everything. It is built with the server executable for that
+platform:
+
+```sh
+node scripts/package-vsix.mjs darwin-arm64 ../../_build/default/lsp-server/native/main.exe
+pnpm run package:vsix linux-x64 /path/to/jasmin-lsp-linux-x86_64
+```
+
+The platforms are `darwin-arm64`, `linux-x64`, `linux-arm64`, `alpine-x64` and
+`alpine-arm64`. The script copies the binary into the extension directory as
+`server/jasmin-lsp` with mode 0755, writes `server/SHA256SUMS` with its digest,
+runs the extension's own server lookup against the directory it is about to
+package, and then runs `vsce package --no-dependencies --target <platform>`. It
+prints the `.vsix` path, its SHA-256 and its size, and it removes the staged
+`server/` again. It refuses a platform it does not build for, a binary that is
+not there, a binary without an execute bit, and a `server/` left behind by an
+earlier run.
+
+A **universal package** carries no server. It is for every platform, and it
+finds `jasmin-lsp` on `PATH`, which is what a user who installed the server
+through opam or from a release asset has:
+
+```sh
+node scripts/package-vsix.mjs universal
+pnpm run test:package
+```
+
+`pnpm run test:package` builds the universal package and reads the archive back
+to check that it holds the four files the extension needs and no `server/`
+directory. It prints why it skipped and passes on a host without `vsce`.
+
+`pnpm run package:check` is part of `validate`. It lists the files `vsce` would
+ship and rejects a package that carries a source map, a source, a test, a
+packaging script, `node_modules` or `.vscode-test`; it then builds the
+universal package and checks that the archive has no `server/` and declares no
+target platform. Any platform package already in `.artifacts/` is read back
+too: the server has to be at `server/jasmin-lsp` with mode 0755, and
+`server/SHA256SUMS` has to name it and record the digest of the bytes in the
+archive.
+
+`pnpm run bundle` writes `dist/extension.js` as a CommonJS bundle with `vscode`
+left external, because the editor provides it. `pnpm run compile` type-checks
+the sources without emitting anything. `src/package.json` marks the TypeScript
+sources as ES modules so that the plain Node test runner can import the server
+lookup module directly; the bundle itself stays CommonJS for the editor.
+
 ## Licence
 
 MIT. The grammar is derived from `dsprenkels/vscode-jasmin`, copyright Daan
