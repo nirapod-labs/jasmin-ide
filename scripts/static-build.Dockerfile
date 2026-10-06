@@ -20,10 +20,17 @@
 
 FROM alpine:3.21
 
+# gmp-dev is the archive the release links: on Alpine 3.21 it installs
+# /usr/lib/libgmp.a as well as the shared library and the headers, which is
+# what `-static` needs to resolve zarith's `-lgmp`. (`gmp-static` is not a
+# package on either alpine 3.21/x86_64 or 3.21/aarch64 — `apk add gmp-static`
+# fails with "no such package", measured on 2026-11-12 — so naming it would
+# stop the image at its second layer.) `musl-dev` and `build-base` supply the
+# C toolchain and musl's own headers, which is what makes `-ccopt -static`
+# produce a musl binary rather than a glibc one.
 RUN apk add --no-cache \
 	build-base \
 	musl-dev \
-	gmp-static \
 	gmp-dev \
 	ocaml \
 	ocaml-findlib \
@@ -42,9 +49,21 @@ ENV OPAMROOT=/opt/opam \
 # step never installs anything (it has no network: the script mounts the tree
 # read-only and the container is started without a network policy of its own,
 # but nothing in the build needs one).
+#
+# menhir, menhirLib, angstrom and batteries are the vendored library's own
+# build requirements (vendor/requirements.opam): the tree's dune files ask for
+# the parser generator and for `angstrom` and `batteries.unthreaded`, so a
+# switch without them fails to build the release binary at all.
+#
+# `--no-depexts` is deliberate: the system packages are the `apk add` layer
+# above, and opam's depext check does not see them on alpine 3.21 — it stops
+# on conf-gmp with "Package conf-gmp depends on the unavailable system package
+# 'gmp-dev'" (measured on 2026-11-12, aarch64) even though gmp-dev is installed
+# and /usr/lib/libgmp.a is there. Nothing is installed by the check that the
+# layer has not already installed.
 RUN opam init --bare --disable-sandboxing --no-setup && \
 	opam switch create jasmin-ide ocaml-system && \
-	opam install --switch jasmin-ide --yes \
+	opam install --switch jasmin-ide --yes --no-depexts \
 	dune \
 	ocamlfind \
 	conf-gmp \
@@ -54,10 +73,19 @@ RUN opam init --bare --disable-sandboxing --no-setup && \
 	yojson \
 	cmdliner \
 	crowbar \
-	qcheck-core && \
+	qcheck-core \
+	menhir \
+	menhirLib \
+	angstrom \
+	batteries && \
 	opam exec --switch jasmin-ide -- dune --version
 
-RUN printf '%s\n' \
+# /opt/static does not exist in the base image: making it is part of writing the
+# wrapper. (Without the mkdir the layer that follows the 155 s opam install
+# fails with "/bin/sh: can't create /opt/static/run-dune: nonexistent
+# directory", measured on 2026-11-12.)
+RUN mkdir -p /opt/static && \
+	printf '%s\n' \
 	'#!/bin/sh' \
 	'set -eu' \
 	'exec opam exec --switch jasmin-ide -- dune "$@"' \
