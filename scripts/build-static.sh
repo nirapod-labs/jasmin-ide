@@ -187,14 +187,14 @@ build_linux() {
 	if ! "$runtime" run --rm \
 		--platform "linux/$([ "$want_arch" = x86_64 ] && printf amd64 || printf arm64)" \
 		-v "$here:/src:ro" \
-		-v "$stage/dune-workspace:/src/dune-workspace:ro" \
+		-v "$stage/dune-workspace:/dune-workspace:ro" \
 		-v "$stage/out:/out" \
 		-w /src \
 		-e "SOURCE_DATE_EPOCH=$epoch" \
 		"$image" sh -c '
 			set -eu
 			/opt/static/run-dune build --root /src --profile release \
-				--build-dir /tmp/build --workspace /src/dune-workspace \
+				--build-dir /tmp/build --workspace /dune-workspace \
 				-j '"$jobs"' lsp-server/native/main.exe
 			cp /tmp/build/default/lsp-server/native/main.exe /out/server
 		'; then
