@@ -186,19 +186,29 @@ let name_of_answer (answer : R.answer) =
   | R.Include_path -> "an include path"
   | R.Unresolved -> "nothing"
 
+let reading_name (reading : string) =
+  if String.equal reading "" then "the top level" else "namespace " ^ reading
+
 type answer = {
   accepted : bool;  (** the check reported no error for the file *)
   diagnostics : int;  (** how many error diagnostics it reported *)
   first_diagnostic : string option;
       (** the first of them, [line:column message], for the run's output *)
   uses : int;  (** the typed variable occurrences of the checked file *)
-  measured : int;  (** the ones the source writes, which the gate counts *)
+  measured : int;
+      (** the uses the gate counts: same, elsewhere, unresolved, other-name and
+          misplaced *)
   same : int;
-      (** the ones the resolver resolves to the compiler's declaration *)
+      (** the ones the resolver answers with the compiler's declaration *)
   elsewhere : string list;
   unresolved : string list;
   other_name : string list;
-  unlocated : string list;  (** the uses the source does not write *)
+  misplaced : string list;
+      (** the span is wrong, and the name is in the file *)
+  excluded_flag : string list;
+      (** excluded: a compiler flag the source never writes *)
+  excluded_temporary : string list;
+      (** excluded: a compiler temporary the source never writes *)
   unchecked : int;  (** the uses of a file the check refused *)
 }
 (** What one file's comparison found. *)
@@ -214,7 +224,9 @@ let empty_answer =
     elsewhere = [];
     unresolved = [];
     other_name = [];
-    unlocated = [];
+    misplaced = [];
+    excluded_flag = [];
+    excluded_temporary = [];
     unchecked = 0;
   }
 
@@ -227,10 +239,6 @@ let message_of_diagnostic index (diagnostic : Jide_lang.Diagnostic.t) =
   Printf.sprintf "%s %s"
     (where index diagnostic.Jide_lang.Diagnostic.span.S.start_byte)
     diagnostic.Jide_lang.Diagnostic.message
-
-(* A use the compiler placed in a file the resolution reached, with the byte
-   its name starts at, once the source is known to spell it there. *)
-type placed = { use : F.use; file : string; byte : int }
 
 (* The text of a file the resolution reached, when it reached it. *)
 let text_of (resolve : R.t) (file : string) : string option =
@@ -252,132 +260,101 @@ let describe (lines_of : string -> LI.t option) (file : string) (byte : int) =
   | Some lines -> Printf.sprintf "%s:%s" file (where lines byte)
   | None -> Printf.sprintf "%s:byte %d" file byte
 
-(** [answer_of_facts ~resolve facts] is every typed use of [facts] against the
-    resolver [resolve], with the counts. *)
+(** [answer_of_facts ~resolve facts] is every typed use of [facts] against [resolve],
+    each in the reading it was typed in, with the classes counted. *)
 let answer_of_facts ~(resolve : R.t) (facts : F.t) : answer =
-  let uses = facts.F.uses in
-  let total = List.length uses in
   let lines_of = line_indexes resolve in
-  let unlocated = ref [] in
-  let unresolved = ref [] in
-  let elsewhere = ref [] in
-  let other_name = ref [] in
-  let same = ref 0 in
-  let measured = ref 0 in
-  (* Pass one: where each use is, when the source writes its name there. A use
-     in a file the resolution never reached is measured, and it fails: nothing
-     can say what its name names. *)
-  let placed_uses =
-    List.filter_map
-      (fun (use : F.use) ->
-        let file = I.normalise use.F.u_file in
-        let start = use.F.u_span.S.start_byte in
-        match text_of resolve file with
-        | None ->
-            incr measured;
-            unresolved :=
-              Printf.sprintf "%d (%s) %s: the resolution never reached the file"
-                start file use.F.u_name
-              :: !unresolved;
-            None
-        | Some text -> (
-            let stop = use.F.u_span.S.end_byte in
-            match spelled_in text ~start ~stop (last_segment use.F.u_name) with
-            | None ->
-                unlocated :=
-                  Printf.sprintf
-                    "%s %s: no identifier of that name lies in the compiler's \
-                     span; the compiler placed the use on the instruction"
-                    (describe lines_of file start)
-                    use.F.u_name
-                  :: !unlocated;
-                None
-            | Some byte -> Some { use; file; byte }))
-      uses
-  in
-  (* Pass two: one question per byte, answered by every reading of the file
-     there, and the uses at that byte matched one to one with the readings. *)
-  let groups : (string * int, placed list) Hashtbl.t = Hashtbl.create 64 in
-  let order = ref [] in
+  let measured = ref 0 and same = ref 0 in
+  let elsewhere = ref [] and unresolved = ref [] and other_name = ref [] in
+  let misplaced = ref [] and excluded_flag = ref [] in
+  let excluded_temporary = ref [] in
+  let add cell message = cell := message :: !cell in
+  (* Pass one: each use is measured, misplaced, excluded, or waits for its reading. *)
+  let waiting = ref [] in
   List.iter
-    (fun (placed : placed) ->
-      let key = (placed.file, placed.byte) in
-      match Hashtbl.find_opt groups key with
-      | Some group -> Hashtbl.replace groups key (placed :: group)
+    (fun (use : F.use) ->
+      let file = I.normalise use.F.u_file in
+      let start = use.F.u_span.S.start_byte in
+      let stop = use.F.u_span.S.end_byte in
+      let name = last_segment use.F.u_name in
+      match text_of resolve file with
       | None ->
-          order := key :: !order;
-          Hashtbl.add groups key [ placed ])
-    placed_uses;
+          incr measured;
+          add unresolved
+            (Printf.sprintf "%s %s: the resolution never reached the file"
+               (describe lines_of file start)
+               use.F.u_name)
+      | Some text -> (
+          match find_token text ~from:start ~until:stop name with
+          | Some byte -> waiting := (use, file, byte) :: !waiting
+          | None -> (
+              match
+                find_token text ~from:0 ~until:(String.length text) name
+              with
+              | Some written_at ->
+                  incr measured;
+                  add misplaced
+                    (Printf.sprintf
+                       "%s %s: the compiler's span holds no identifier of the \
+                        name, but the file writes it at %s"
+                       (describe lines_of file start)
+                       use.F.u_name
+                       (describe lines_of file written_at))
+              | None ->
+                  let shown =
+                    Printf.sprintf "%s %s"
+                      (describe lines_of file start)
+                      use.F.u_name
+                  in
+                  if is_flag_name name then add excluded_flag shown
+                  else add excluded_temporary shown)))
+    facts.F.uses;
+  (* Pass two: each measured use against the answer of its own reading. *)
   List.iter
-    (fun ((file, byte) as key) ->
-      let group = List.rev (Hashtbl.find groups key) in
-      measured := !measured + List.length group;
-      let occurrence, readings = R.visit_answers resolve ~file ~byte in
+    (fun ((use : F.use), file, byte) ->
+      incr measured;
       let shown = describe lines_of file byte in
-      match occurrence with
-      | None ->
-          List.iter
-            (fun (placed : placed) ->
-              unresolved :=
-                Printf.sprintf "%s %s: no occurrence at that byte" shown
-                  placed.use.F.u_name
-                :: !unresolved)
-            group
-      | Some occurrence ->
-          List.iter
-            (fun (placed : placed) ->
-              let use = placed.use in
-              if
-                not
-                  (String.equal
-                     (last_segment occurrence.I.name)
-                     (last_segment use.F.u_name))
-              then
-                other_name :=
-                  Printf.sprintf "%s %s: the occurrence at that byte is %s"
-                    shown use.F.u_name occurrence.I.name
-                  :: !other_name
-              else if
-                List.exists
-                  (function
-                    | R.Resolved declaration -> same_declaration use declaration
-                    | _ -> false)
-                  readings
-              then incr same
-              else
-                match
-                  List.find_map
-                    (function
-                      | R.Resolved declaration -> Some declaration | _ -> None)
-                    readings
-                with
-                | Some declaration ->
-                    let at_compiler =
-                      describe lines_of use.F.u_dfile use.F.u_decl.S.start_byte
-                    in
-                    let at_resolver =
-                      describe lines_of declaration.I.file
-                        declaration.I.name_span.S.start_byte
-                    in
-                    elsewhere :=
-                      Printf.sprintf
-                        "%s %s: the compiler declares it at %s, the resolver \
-                         answers %s"
-                        shown use.F.u_name at_compiler at_resolver
-                      :: !elsewhere
-                | None ->
-                    let why =
-                      match readings with
-                      | [] -> "the resolver has no reading of this file"
-                      | answer :: _ ->
-                          "the resolver answers " ^ name_of_answer answer
-                    in
-                    unresolved :=
-                      Printf.sprintf "%s %s: %s" shown use.F.u_name why
-                      :: !unresolved)
-            group)
-    (List.rev !order);
-  let counted_unlocated = List.rev !unlocated in
+      let reading = use.F.u_reading in
+      if not (List.mem reading (R.readings resolve file)) then
+        add unresolved
+          (Printf.sprintf "%s %s: the resolver never walked the file in %s"
+             shown use.F.u_name (reading_name reading))
+      else
+        match R.reading_answer resolve ~file ~byte ~reading with
+        | None ->
+            add unresolved
+              (Printf.sprintf "%s %s: no occurrence at that byte" shown
+                 use.F.u_name)
+        | Some (occurrence, answer) -> (
+            if
+              not
+                (String.equal
+                   (last_segment occurrence.I.name)
+                   (last_segment use.F.u_name))
+            then
+              add other_name
+                (Printf.sprintf "%s %s: the occurrence at that byte is %s" shown
+                   use.F.u_name occurrence.I.name)
+            else
+              match answer with
+              | R.Resolved declaration when same_declaration use declaration ->
+                  incr same
+              | R.Resolved declaration ->
+                  add elsewhere
+                    (Printf.sprintf
+                       "%s %s in %s: the compiler declares it at %s, the \
+                        resolver answers %s"
+                       shown use.F.u_name (reading_name reading)
+                       (describe lines_of use.F.u_dfile
+                          use.F.u_decl.S.start_byte)
+                       (describe lines_of declaration.I.file
+                          declaration.I.name_span.S.start_byte))
+              | other ->
+                  add unresolved
+                    (Printf.sprintf "%s %s in %s: the resolver answers %s" shown
+                       use.F.u_name (reading_name reading)
+                       (name_of_answer other))))
+    (List.rev !waiting);
   {
     empty_answer with
     uses = total;
