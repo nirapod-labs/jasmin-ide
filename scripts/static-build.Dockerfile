@@ -55,6 +55,12 @@ ENV OPAMROOT=/opt/opam \
 # the parser generator and for `angstrom` and `batteries.unthreaded`, so a
 # switch without them fails to build the release binary at all.
 #
+# The libraries the server links are pinned to the versions the repository
+# pins (jasmin-lsp.opam.locked and vendor/requirements.opam), so the Linux
+# binaries are built from the same sources as the macOS one. Left unpinned,
+# `lsp` and `jsonrpc` resolve to 1.28.1, whose `Client_notification.Initialized`
+# takes an argument, and controller/server.ml does not compile against it.
+#
 # `--no-depexts` is deliberate: the system packages are the `apk add` layer
 # above, and opam's depext check does not see them on alpine 3.21 — it stops
 # on conf-gmp with "Package conf-gmp depends on the unavailable system package
@@ -64,20 +70,20 @@ ENV OPAMROOT=/opt/opam \
 RUN opam init --bare --disable-sandboxing --no-setup && \
 	opam switch create jasmin-ide ocaml-system && \
 	opam install --switch jasmin-ide --yes --no-depexts \
-	dune \
-	ocamlfind \
+	dune.3.24.2 \
+	ocamlfind.1.9.8 \
 	conf-gmp \
-	zarith \
-	lsp \
-	jsonrpc \
-	yojson \
+	zarith.1.14 \
+	lsp.1.27.0 \
+	jsonrpc.1.27.0 \
+	yojson.3.0.0 \
 	cmdliner \
 	crowbar \
 	qcheck-core \
-	menhir \
-	menhirLib \
-	angstrom \
-	batteries && \
+	menhir.20260209 \
+	menhirLib.20260209 \
+	angstrom.0.16.1 \
+	batteries.3.11.0 && \
 	opam exec --switch jasmin-ide -- dune --version
 
 # /opt/static does not exist in the base image: making it is part of writing the
