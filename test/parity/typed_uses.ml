@@ -357,19 +357,49 @@ let answer_of_facts ~(resolve : R.t) (facts : F.t) : answer =
     (List.rev !waiting);
   {
     empty_answer with
-    uses = total;
+    uses = List.length facts.F.uses;
     measured = !measured;
     same = !same;
     elsewhere = List.rev !elsewhere;
     unresolved = List.rev !unresolved;
     other_name = List.rev !other_name;
-    unlocated = counted_unlocated;
+    misplaced = List.rev !misplaced;
+    excluded_flag = List.rev !excluded_flag;
+    excluded_temporary = List.rev !excluded_temporary;
   }
 
-(** [compare_text ?plant ~arch ~file text] is the whole comparison for one
-    text: the check, the resolver over the same bytes, and every typed use.
-    With [plant] the first use's compiler-side declaration is moved to byte 0
-    first, the negative control of the run (see the usage above). *)
+(* [with_decl ~byte use] is [use] with its compiler-side declaration moved to [byte]:
+   a fact the compiler would not produce, used to prove the comparison answers a
+   difference. *)
+let with_decl ~(byte : int) (use : F.use) : F.use =
+  { use with F.u_decl = S.make ~start_byte:byte ~end_byte:(byte + 1) }
+
+(* [plant_first_measured ~file ~body facts] moves the declaration of the first use the
+   source writes in [file] to byte 0: the negative control. A planted use the
+   comparison does not measure would not show the control working. *)
+let plant_first_measured ~(file : string) ~(body : string) (facts : F.t) : F.t =
+  let measured (use : F.use) =
+    String.equal (I.normalise use.F.u_file) file
+    && find_token body ~from:use.F.u_span.S.start_byte
+         ~until:use.F.u_span.S.end_byte
+         (last_segment use.F.u_name)
+       <> None
+  in
+  let planted = ref false in
+  let uses =
+    List.map
+      (fun (use : F.use) ->
+        if (not !planted) && measured use then (
+          planted := true;
+          with_decl ~byte:0 use)
+        else use)
+      facts.F.uses
+  in
+  { facts with F.uses }
+
+(** [compare_text ?plant ~arch ~file text] is the whole comparison for one text: the
+    check, the resolver over the same bytes, and every typed use. With [plant] the
+    negative control is applied first. *)
 let compare_text ?(plant = false) ~(arch : A.arch) ~(file : string)
     (text : string) : answer =
   let file = I.normalise file in
