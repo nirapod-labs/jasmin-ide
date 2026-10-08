@@ -210,6 +210,12 @@ type answer = {
   excluded_temporary : string list;
       (** excluded: a compiler temporary the source never writes *)
   unchecked : int;  (** the uses of a file the check refused *)
+  ledger : string list;
+      (** one tab-separated line per typed use, in the order of the facts: the
+          class, whether the use is the document's own or a required file's, its
+          file, its byte, its namespace reading, its occurrence index among the
+          uses at the same key, and its name. The uses script takes the distinct
+          uses of an architecture from these lines. *)
 }
 (** What one file's comparison found. *)
 
@@ -228,6 +234,7 @@ let empty_answer =
     excluded_flag = [];
     excluded_temporary = [];
     unchecked = 0;
+    ledger = [];
   }
 
 let is_error (diagnostic : Jide_lang.Diagnostic.t) =
@@ -260,112 +267,147 @@ let describe (lines_of : string -> LI.t option) (file : string) (byte : int) =
   | Some lines -> Printf.sprintf "%s:%s" file (where lines byte)
   | None -> Printf.sprintf "%s:byte %d" file byte
 
-(** [answer_of_facts ~resolve facts] is every typed use of [facts] against [resolve],
-    each in the reading it was typed in, with the classes counted. *)
-let answer_of_facts ~(resolve : R.t) (facts : F.t) : answer =
-  let lines_of = line_indexes resolve in
-  let measured = ref 0 and same = ref 0 in
-  let elsewhere = ref [] and unresolved = ref [] and other_name = ref [] in
-  let misplaced = ref [] and excluded_flag = ref [] in
-  let excluded_temporary = ref [] in
-  let add cell message = cell := message :: !cell in
-  (* Pass one: each use is measured, misplaced, excluded, or waits for its reading. *)
-  let waiting = ref [] in
-  List.iter
-    (fun (use : F.use) ->
+(* The class of one typed use. [Excluded] carries the class name and the message. *)
+type outcome =
+  | Same
+  | Elsewhere of string
+  | Unresolved of string
+  | Other_name of string
+  | Misplaced of string
+  | Excluded of string * string
+
+let class_of (outcome : outcome) =
+  match outcome with
+  | Same -> "same"
+  | Elsewhere _ -> "elsewhere"
+  | Unresolved _ -> "unresolved"
+  | Other_name _ -> "other-name"
+  | Misplaced _ -> "misplaced"
+  | Excluded (cls, _) -> cls
+
+(** [classify ~lines_of ~resolve use] is the class of one typed use: what the resolver
+    answers for its name in the namespace the compiler typed it in, or why the use is
+    misplaced or excluded. *)
+let classify ~(lines_of : string -> LI.t option) ~(resolve : R.t) (use : F.use) :
+    outcome =
+  let file = I.normalise use.F.u_file in
+  let start = use.F.u_span.S.start_byte in
+  let stop = use.F.u_span.S.end_byte in
+  let name = last_segment use.F.u_name in
+  match text_of resolve file with
+  | None ->
+      Unresolved
+        (Printf.sprintf "%s %s: the resolution never reached the file"
+           (describe lines_of file start)
+           use.F.u_name)
+  | Some text -> (
+      match find_token text ~from:start ~until:stop name with
+      | None -> (
+          let shown =
+            Printf.sprintf "%s %s" (describe lines_of file start) use.F.u_name
+          in
+          match find_token text ~from:0 ~until:(String.length text) name with
+          | Some written_at ->
+              Misplaced
+                (Printf.sprintf
+                   "%s: the compiler's span holds no identifier of the name, \
+                    but the file writes it at %s"
+                   shown
+                   (describe lines_of file written_at))
+          | None ->
+              Excluded
+                ( (if is_flag_name name then "excluded-flag"
+                   else "excluded-temporary"),
+                  shown ))
+      | Some byte -> (
+          let shown = describe lines_of file byte in
+          let reading = use.F.u_reading in
+          let message =
+            Printf.sprintf "%s %s in %s" shown use.F.u_name (reading_name reading)
+          in
+          if not (List.mem reading (R.readings resolve file)) then
+            Unresolved
+              (Printf.sprintf "%s: the resolver never walked the file in that namespace"
+                 message)
+          else
+            match R.reading_answer resolve ~file ~byte ~reading with
+            | None -> Unresolved (Printf.sprintf "%s: no occurrence at that byte" message)
+            | Some (occurrence, answer) -> (
+                if
+                  not
+                    (String.equal (last_segment occurrence.I.name) name)
+                then
+                  Other_name
+                    (Printf.sprintf "%s: the occurrence at that byte is %s" message
+                       occurrence.I.name)
+                else
+                  match answer with
+                  | R.Resolved declaration when same_declaration use declaration ->
+                      Same
+                  | R.Resolved declaration ->
+                      Elsewhere
+                        (Printf.sprintf
+                           "%s: the compiler declares it at %s, the resolver answers %s"
+                           message
+                           (describe lines_of use.F.u_dfile use.F.u_decl.S.start_byte)
+                           (describe lines_of declaration.I.file
+                              declaration.I.name_span.S.start_byte))
+                  | other ->
+                      Unresolved
+                        (Printf.sprintf "%s: the resolver answers %s" message
+                           (name_of_answer other)))))
+
+(** [ledger_of ~document classes] is one ledger line per use, in order. A use's key
+    is its file, byte and reading; the occurrence index separates the uses that share
+    a key, such as the two typed uses of [s += e] at one byte. *)
+let ledger_of ~(document : string) (classes : (F.use * string) list) : string list =
+  let occurrences = Hashtbl.create 64 in
+  List.map
+    (fun ((use : F.use), cls) ->
       let file = I.normalise use.F.u_file in
       let start = use.F.u_span.S.start_byte in
-      let stop = use.F.u_span.S.end_byte in
-      let name = last_segment use.F.u_name in
-      match text_of resolve file with
-      | None ->
-          incr measured;
-          add unresolved
-            (Printf.sprintf "%s %s: the resolution never reached the file"
-               (describe lines_of file start)
-               use.F.u_name)
-      | Some text -> (
-          match find_token text ~from:start ~until:stop name with
-          | Some byte -> waiting := (use, file, byte) :: !waiting
-          | None -> (
-              match
-                find_token text ~from:0 ~until:(String.length text) name
-              with
-              | Some written_at ->
-                  incr measured;
-                  add misplaced
-                    (Printf.sprintf
-                       "%s %s: the compiler's span holds no identifier of the \
-                        name, but the file writes it at %s"
-                       (describe lines_of file start)
-                       use.F.u_name
-                       (describe lines_of file written_at))
-              | None ->
-                  let shown =
-                    Printf.sprintf "%s %s"
-                      (describe lines_of file start)
-                      use.F.u_name
-                  in
-                  if is_flag_name name then add excluded_flag shown
-                  else add excluded_temporary shown)))
-    facts.F.uses;
-  (* Pass two: each measured use against the answer of its own reading. *)
-  List.iter
-    (fun ((use : F.use), file, byte) ->
-      incr measured;
-      let shown = describe lines_of file byte in
-      let reading = use.F.u_reading in
-      if not (List.mem reading (R.readings resolve file)) then
-        add unresolved
-          (Printf.sprintf "%s %s: the resolver never walked the file in %s"
-             shown use.F.u_name (reading_name reading))
-      else
-        match R.reading_answer resolve ~file ~byte ~reading with
-        | None ->
-            add unresolved
-              (Printf.sprintf "%s %s: no occurrence at that byte" shown
-                 use.F.u_name)
-        | Some (occurrence, answer) -> (
-            if
-              not
-                (String.equal
-                   (last_segment occurrence.I.name)
-                   (last_segment use.F.u_name))
-            then
-              add other_name
-                (Printf.sprintf "%s %s: the occurrence at that byte is %s" shown
-                   use.F.u_name occurrence.I.name)
-            else
-              match answer with
-              | R.Resolved declaration when same_declaration use declaration ->
-                  incr same
-              | R.Resolved declaration ->
-                  add elsewhere
-                    (Printf.sprintf
-                       "%s %s in %s: the compiler declares it at %s, the \
-                        resolver answers %s"
-                       shown use.F.u_name (reading_name reading)
-                       (describe lines_of use.F.u_dfile
-                          use.F.u_decl.S.start_byte)
-                       (describe lines_of declaration.I.file
-                          declaration.I.name_span.S.start_byte))
-              | other ->
-                  add unresolved
-                    (Printf.sprintf "%s %s in %s: the resolver answers %s" shown
-                       use.F.u_name (reading_name reading)
-                       (name_of_answer other))))
-    (List.rev !waiting);
+      let key = (file, start, use.F.u_reading) in
+      let index = Option.value ~default:0 (Hashtbl.find_opt occurrences key) in
+      Hashtbl.replace occurrences key (index + 1);
+      let origin = if String.equal file document then "own" else "required" in
+      Printf.sprintf "%s\t%s\t%s\t%d\t%s\t%d\t%s" cls origin file start
+        use.F.u_reading index use.F.u_name)
+    classes
+
+(** [answer_of_facts ~document ~resolve facts] is every typed use of [facts] against
+    [resolve], each in its own namespace, with the classes counted. *)
+let answer_of_facts ~(document : string) ~(resolve : R.t) (facts : F.t) : answer =
+  let lines_of = line_indexes resolve in
+  let outcomes =
+    List.map (fun (use : F.use) -> (use, classify ~lines_of ~resolve use)) facts.F.uses
+  in
+  let collect pick = List.filter_map (fun (_, outcome) -> pick outcome) outcomes in
+  let count predicate =
+    List.length (List.filter (fun (_, outcome) -> predicate outcome) outcomes)
+  in
   {
     empty_answer with
     uses = List.length facts.F.uses;
-    measured = !measured;
-    same = !same;
-    elsewhere = List.rev !elsewhere;
-    unresolved = List.rev !unresolved;
-    other_name = List.rev !other_name;
-    misplaced = List.rev !misplaced;
-    excluded_flag = List.rev !excluded_flag;
-    excluded_temporary = List.rev !excluded_temporary;
+    measured =
+      count (function
+        | Same | Elsewhere _ | Unresolved _ | Other_name _ | Misplaced _ -> true
+        | Excluded _ -> false);
+    same = count (function Same -> true | _ -> false);
+    elsewhere = collect (function Elsewhere message -> Some message | _ -> None);
+    unresolved = collect (function Unresolved message -> Some message | _ -> None);
+    other_name = collect (function Other_name message -> Some message | _ -> None);
+    misplaced = collect (function Misplaced message -> Some message | _ -> None);
+    excluded_flag =
+      collect (function
+        | Excluded ("excluded-flag", message) -> Some message
+        | _ -> None);
+    excluded_temporary =
+      collect (function
+        | Excluded ("excluded-temporary", message) -> Some message
+        | _ -> None);
+    ledger =
+      ledger_of ~document
+        (List.map (fun (use, outcome) -> (use, class_of outcome)) outcomes);
   }
 
 (* [with_decl ~byte use] is [use] with its compiler-side declaration moved to [byte]:
@@ -405,30 +447,6 @@ let compare_text ?(plant = false) ~(arch : A.arch) ~(file : string)
   let file = I.normalise file in
   let _bom, body = strip_bom text in
   let checked = A.check arch Arch.Linux ~file ~text:body ~idirs:[] in
-  let facts =
-    if not plant then checked.A.facts
-    else
-      (* The first use the source writes in this file: a planted use the
-         comparison does not measure would not show the control working. *)
-      let measured (use : F.use) =
-        String.equal (I.normalise use.F.u_file) file
-        && spelled_in body ~start:use.F.u_span.S.start_byte
-             ~stop:use.F.u_span.S.end_byte
-             (last_segment use.F.u_name)
-           <> None
-      in
-      let planted = ref false in
-      let uses =
-        List.map
-          (fun (use : F.use) ->
-            if (not !planted) && measured use then (
-              planted := true;
-              with_decl ~byte:0 use)
-            else use)
-          checked.A.facts.F.uses
-      in
-      { checked.A.facts with F.uses }
-  in
   let errors = List.filter is_error checked.A.diagnostics in
   let index = LI.create body in
   let uses = List.length checked.A.facts.F.uses in
@@ -444,10 +462,21 @@ let compare_text ?(plant = false) ~(arch : A.arch) ~(file : string)
       uses;
     }
   in
-  if not base.accepted then { base with unchecked = uses }
+  if not base.accepted then
+    {
+      base with
+      unchecked = uses;
+      ledger =
+        ledger_of ~document:file
+          (List.map (fun use -> (use, "unchecked")) checked.A.facts.F.uses);
+    }
   else
+    let facts =
+      if plant then plant_first_measured ~file ~body checked.A.facts
+      else checked.A.facts
+    in
     let resolve = R.of_text ~idirs:[] ~read ~file body in
-    { (answer_of_facts ~resolve facts) with accepted = true }
+    { (answer_of_facts ~document:file ~resolve facts) with accepted = true }
 
 let compare_file ~(arch : A.arch) (path : string) =
   match read path with
@@ -460,7 +489,7 @@ let compare_file ~(arch : A.arch) (path : string) =
 let status (answer : answer) =
   if
     answer.accepted && answer.elsewhere = [] && answer.unresolved = []
-    && answer.other_name = [] && answer.unchecked = 0
+    && answer.other_name = [] && answer.misplaced = [] && answer.unchecked = 0
   then 0
   else 1
 
@@ -471,12 +500,17 @@ let say_answer (answer : answer) =
   | None -> ()
   | Some message -> Printf.eprintf "first-error: %s\n" message);
   Printf.eprintf "typed-uses: %d\n" answer.uses;
-  Printf.eprintf "source-written: %d\n" answer.measured;
+  Printf.eprintf "measured: %d\n" answer.measured;
   Printf.eprintf "same-declaration: %d\n" answer.same;
   Printf.eprintf "elsewhere: %d\n" (List.length answer.elsewhere);
   Printf.eprintf "unresolved: %d\n" (List.length answer.unresolved);
   Printf.eprintf "other-name: %d\n" (List.length answer.other_name);
-  Printf.eprintf "unlocated: %d\n" (List.length answer.unlocated);
+  Printf.eprintf "misplaced: %d\n" (List.length answer.misplaced);
+  Printf.eprintf "excluded: %d\n"
+    (List.length answer.excluded_flag + List.length answer.excluded_temporary);
+  Printf.eprintf "excluded-flag: %d\n" (List.length answer.excluded_flag);
+  Printf.eprintf "excluded-temporary: %d\n"
+    (List.length answer.excluded_temporary);
   Printf.eprintf "unchecked: %d\n" answer.unchecked;
   flush stderr
 
@@ -489,7 +523,9 @@ let say_differences (answer : answer) =
   line "elsewhere" answer.elsewhere;
   line "unresolved" answer.unresolved;
   line "other-name" answer.other_name;
-  line "unlocated" answer.unlocated;
+  line "misplaced" answer.misplaced;
+  line "excluded-flag" answer.excluded_flag;
+  line "excluded-temporary" answer.excluded_temporary;
   flush stderr
 
 (* ------------------------------------------------------------------ *)
@@ -508,9 +544,8 @@ let valid =
       "";
     ]
 
-(* One local declares the same name as another, in a nested block: the two
-   declarations are different declarations, which is what makes a resolver
-   that answers the outer one on an inner use show up as a difference. *)
+(* One local declares the same name as another, in a nested block: a resolver that
+   answers the outer one on an inner use shows up as a difference. *)
 let shadowed =
   String.concat "\n"
     [
@@ -527,15 +562,13 @@ let shadowed =
       "";
     ]
 
-(* A use the compiler cannot type: the check reports an error, so the file is
-   not accepted and its uses are not measured. *)
+(* A use the compiler cannot type: the check reports an error, so the file is not
+   accepted and its uses are unchecked. *)
 let untyped =
   String.concat "\n"
     [ "export fn main() -> reg u64 {"; "  y = 1;"; "  return y;"; "}"; "" ]
 
-(* A global declared in a required file and used in the document: the
-   compiler's declaration is in the other file, so the file half of the
-   identity is exercised. *)
+(* A global declared in a required file and used in the document. *)
 let requirer =
   String.concat "\n"
     [
@@ -551,8 +584,8 @@ let requirer =
 
 let library = String.concat "\n" [ "param int n = 3;"; "" ]
 
-(* A qualified use: the compiler keeps [A::x] for it while the source writes
-   the last segment at the byte, so the comparison is by the segment. *)
+(* A qualified use: the compiler keeps [A::x] while the source writes the last segment
+   at the byte, so the comparison is by the segment. *)
 let qualified =
   String.concat "\n"
     [
@@ -568,9 +601,8 @@ let qualified =
       "";
     ]
 
-(* A required file brought in by a namespace: the compiler types its body as
-   part of the document's item and records its uses with the required file's
-   offsets, so the file of each use is the required file's. *)
+(* A required file brought in by a namespace: its uses carry the required file's
+   offsets, and the namespace they were typed in. *)
 let namespaced_requirer =
   String.concat "\n"
     [
@@ -597,10 +629,8 @@ let body =
       "";
     ]
 
-(* The flag groups of a multi-result instruction: [?{cf}] names the variable
-   that receives the flag, and [CF=cf] names the flag and the variable. The
-   resolver answered both as annotations before the flag groups were read as
-   variable uses. *)
+(* The flag groups of a multi-result instruction: [?{cf}] names the variable that
+   receives the flag, and [CF=cf] names the flag and the variable. *)
 let flags =
   String.concat "\n"
     [
@@ -617,8 +647,7 @@ let flags =
       "";
     ]
 
-(* A required file read into two namespaces: the file's own [N] is the
-   namespace's, so the two readings of one byte name different declarations. *)
+(* A required file read into two namespaces: its [N] is the namespace's own. *)
 let sum =
   String.concat "\n"
     [
@@ -665,8 +694,7 @@ let namespaces_twice =
       "";
     ]
 
-(* A required file named twice, once bare and once with a [./]: one file, read
-   once per namespace, as the compiler reads it. *)
+(* A required file named twice, once bare and once with a [./]. *)
 let twice_named =
   String.concat "\n"
     [
@@ -676,6 +704,32 @@ let twice_named =
       "export fn main() -> reg u64 {";
       "  reg u64 r;";
       "  r = n;";
+      "  return r;";
+      "}";
+      "";
+    ]
+
+(* A top-level required file with a body: its uses are typed as part of the document,
+   and they belong to the required file and the top-level namespace. *)
+let required_body =
+  String.concat "\n"
+    [
+      "fn g(reg u64 a) -> reg u64 {";
+      "  reg u64 t;";
+      "  t = a;";
+      "  return t;";
+      "}";
+      "";
+    ]
+
+let requirer_of_body =
+  String.concat "\n"
+    [
+      "require \"lib2.jinc\"";
+      "";
+      "export fn main(reg u64 p) -> reg u64 {";
+      "  reg u64 r;";
+      "  r = g(p);";
       "  return r;";
       "}";
       "";
@@ -695,51 +749,96 @@ let check_selftest () =
   check "valid: every use is measured" (good.measured = good.uses);
   check "valid: every use is the compiler's declaration"
     (good.same = good.measured && good.elsewhere = [] && good.unresolved = []
-   && good.other_name = []);
+   && good.other_name = [] && good.misplaced = []);
+  check "valid: no use is excluded"
+    (good.excluded_flag = [] && good.excluded_temporary = []);
   check "valid: the exit status is the passing one" (status good = 0);
-  (* The comparison is a comparison and not a constant: moving one use's
-     compiler-side declaration to another byte makes it a difference. *)
-  let one_use_moved =
-    let checked =
-      A.check arch Arch.Linux ~file:"valid.jazz" ~text:valid ~idirs:[]
-    in
-    match checked.A.facts.F.uses with
+  let valid_facts =
+    (A.check arch Arch.Linux ~file:"valid.jazz" ~text:valid ~idirs:[]).A.facts
+  in
+  let resolve_valid = R.of_text ~idirs:[] ~read ~file:"valid.jazz" valid in
+  let valid_document = I.normalise "valid.jazz" in
+  (* A moved declaration is a difference, and fails the run. *)
+  let moved =
+    match valid_facts.F.uses with
     | [] -> empty_answer
     | first :: rest ->
-        let facts =
-          {
-            F.items = checked.A.facts.F.items;
-            uses = with_decl ~byte:1 first :: rest;
-          }
-        in
-        let resolve = R.of_text ~idirs:[] ~read ~file:"valid.jazz" valid in
-        answer_of_facts ~resolve facts
+        answer_of_facts ~document:valid_document ~resolve:resolve_valid
+          { valid_facts with F.uses = with_decl ~byte:1 first :: rest }
   in
   check "a moved declaration is a difference"
-    (one_use_moved.elsewhere <> [] || one_use_moved.unresolved <> []);
+    (moved.elsewhere <> [] || moved.unresolved <> []);
   check "a moved declaration fails the run"
-    (status { one_use_moved with accepted = true } = 1);
-  (* A use the compiler made up itself: its span is an instruction's and the
-     bytes spell no such name, so it is not measured and never fails a run. *)
-  let made_up =
-    let checked =
-      A.check arch Arch.Linux ~file:"valid.jazz" ~text:valid ~idirs:[]
-    in
-    match checked.A.facts.F.uses with
+    (status { moved with accepted = true } = 1);
+  (* A flag the file never writes is excluded, not measured, and never fails a run. *)
+  let flag_use =
+    match valid_facts.F.uses with
     | [] -> empty_answer
     | first :: _ ->
-        let use = { first with F.u_name = "_zf_" } in
-        let resolve = R.of_text ~idirs:[] ~read ~file:"valid.jazz" valid in
-        answer_of_facts ~resolve { F.items = []; uses = [ use ] }
+        answer_of_facts ~document:valid_document ~resolve:resolve_valid
+          {
+            F.items = [];
+            uses = [ { first with F.u_name = "_zf_" } ];
+            calls = [];
+          }
   in
-  check "a made-up use is not measured" (made_up.measured = 0);
-  check "a made-up use is listed as unlocated"
-    (List.length made_up.unlocated = 1);
-  check "a made-up use is not a difference"
-    (made_up.unresolved = [] && made_up.elsewhere = []
-   && made_up.other_name = []);
-  check "a made-up use does not fail the run"
-    (status { made_up with accepted = true } = 0);
+  check "a made-up flag is excluded as a flag"
+    (List.length flag_use.excluded_flag = 1
+    && flag_use.excluded_temporary = []
+    && flag_use.measured = 0);
+  check "a made-up flag does not fail the run"
+    (status { flag_use with accepted = true } = 0);
+  (* A temporary the file never writes is excluded as a temporary. *)
+  let temporary_use =
+    match valid_facts.F.uses with
+    | [] -> empty_answer
+    | first :: _ ->
+        answer_of_facts ~document:valid_document ~resolve:resolve_valid
+          {
+            F.items = [];
+            uses = [ { first with F.u_name = "bytes" } ];
+            calls = [];
+          }
+  in
+  check "a made-up temporary is excluded as a temporary"
+    (List.length temporary_use.excluded_temporary = 1
+    && temporary_use.excluded_flag = []
+    && temporary_use.measured = 0);
+  check "a made-up temporary does not fail the run"
+    (status { temporary_use with accepted = true } = 0);
+  (* A real identifier whose span is off is a failure, not an exclusion: the name is
+     in the file, so the compiler's span cannot be the whole story. *)
+  let misplaced =
+    match (valid_facts.F.uses, find_sub valid "return r;") with
+    | first :: _, Some start ->
+        answer_of_facts ~document:valid_document ~resolve:resolve_valid
+          {
+            F.items = [];
+            uses =
+              [
+                {
+                  first with
+                  F.u_name = "s";
+                  F.u_span = S.make ~start_byte:start ~end_byte:(start + 9);
+                };
+              ];
+            calls = [];
+          }
+    | _ -> empty_answer
+  in
+  check "a real identifier excluded by span is misplaced"
+    (List.length misplaced.misplaced = 1
+    && misplaced.excluded_flag = []
+    && misplaced.excluded_temporary = []);
+  check "a misplaced use fails the run"
+    (status { misplaced with accepted = true } = 1);
+  let flagged = compare_text ~arch ~file:"flags.jazz" flags in
+  check "flags: the check accepts it" flagged.accepted;
+  check "flags: it holds typed uses" (flagged.measured > 0);
+  check "flags: every flag group's variable is the compiler's declaration"
+    (flagged.same = flagged.measured
+    && flagged.elsewhere = [] && flagged.unresolved = []
+    && flagged.other_name = [] && flagged.misplaced = []);
   let qualification = compare_text ~arch ~file:"qualified.jazz" qualified in
   check "qualified: the check accepts it" qualification.accepted;
   check "qualified: every use is the compiler's declaration"
@@ -763,17 +862,8 @@ let check_selftest () =
   check "a marked file holds the same typed uses" (marked.uses = good.uses);
   check "a marked file resolves every use the same way"
     (marked.same = marked.measured && marked.accepted);
-  let flagged = compare_text ~arch ~file:"flags.jazz" flags in
-  check "flags: the check accepts it" flagged.accepted;
-  check "flags: it holds typed uses" (flagged.measured > 0);
-  check "flags: every flag group's variable is the compiler's declaration"
-    (flagged.same = flagged.measured
-    && flagged.elsewhere = [] && flagged.unresolved = []
-    && flagged.other_name = []);
-  (* The files a directory holds: the requirer and its library, the body a
-     namespace requires, the namespaces that read one file twice, and a file
-     named twice. The compiler's answer is the same whether the test runs
-     alone or among the rest. *)
+  (* The files a directory holds: the requirer and its library, the body a namespace
+     requires, the namespaces that read one file twice, and a file named twice. *)
   let directory =
     let path = Filename.temp_file "typed-use-parity" ".dir" in
     Sys.remove path;
@@ -807,7 +897,7 @@ let check_selftest () =
           check "required: every use is the compiler's declaration"
             (required.same = required.measured
             && required.elsewhere = [] && required.unresolved = []
-            && required.other_name = [] && required.unlocated = []);
+            && required.other_name = [] && required.misplaced = []);
           check "required: the exit status is the passing one"
             (status required = 0));
       let path = Filename.concat directory "namespaced.jazz" in
@@ -819,59 +909,112 @@ let check_selftest () =
           check "namespaced: every use is the compiler's declaration"
             (namespaced.same = namespaced.measured
             && namespaced.elsewhere = [] && namespaced.unresolved = []
-            && namespaced.other_name = []);
+            && namespaced.other_name = [] && namespaced.misplaced = []);
           check "namespaced: the exit status is the passing one"
             (status namespaced = 0));
-      (* A file read into two namespaces: every reading of each byte of
-         sum.jinc is compared with the compiler's use of that reading, so the
-         two declarations of [N] are each the right answer for their reading. *)
-      let path = Filename.concat directory "twice.jazz" in
-      (match compare_file ~arch path with
+      (* A file read into two namespaces: every use is paired with the reading it was
+         typed in, so each declaration of [N] is the right answer for its reading. *)
+      let twice_path = Filename.concat directory "twice.jazz" in
+      (match compare_file ~arch twice_path with
       | Error message -> check ("twice: it runs (" ^ message ^ ")") false
       | Ok twice ->
           check "twice: the check accepts it" twice.accepted;
           check "twice: every reading agrees with the compiler"
             (twice.same = twice.measured
             && twice.elsewhere = [] && twice.unresolved = []
-            && twice.other_name = []);
+            && twice.other_name = [] && twice.misplaced = []);
           check "twice: the file's uses are measured in both readings"
-            (twice.measured > 0);
-          let resolve =
-            R.of_text ~idirs:[] ~read ~file:(I.normalise path)
-              (Option.get (read path))
-          in
-          let sum_path = I.normalise (Filename.concat directory "sum.jinc") in
-          let sum_text = Option.get (read sum_path) in
-          let byte =
-            let rec find index =
-              if index + 1 >= String.length sum_text then -1
-              else if String.sub sum_text index 1 = "N" then index
-              else find (index + 1)
-            in
-            find 0
-          in
-          let _occurrence, readings =
-            R.visit_answers resolve ~file:sum_path ~byte
-          in
-          check "twice: the file has one reading per namespace"
-            (List.length readings = 2);
-          check "twice: the readings name different declarations"
-            (match readings with
-            | [ R.Resolved first; R.Resolved second ] ->
-                first.I.name_span.S.start_byte
-                <> second.I.name_span.S.start_byte
-            | _ -> false));
-      (* Two requires of one file, spelled two ways: read once, as the
-         compiler reads it, so its functions are declared once. *)
-      let path = Filename.concat directory "named.jazz" in
-      match compare_file ~arch path with
+            (twice.measured > 0));
+      (* One reading right, one wrong, must fail. The compiler's use of [N] in the
+         Long reading is given the Short declaration, the one the Short reading
+         answers. The Short reading's use still agrees, so exactly one use must be
+         reported, and the run must fail. *)
+      let twice_text = Option.get (read twice_path) in
+      let twice_file = I.normalise twice_path in
+      let twice_facts =
+        (A.check arch Arch.Linux ~file:twice_file ~text:twice_text ~idirs:[])
+          .A.facts
+      in
+      let twice_resolve =
+        R.of_text ~idirs:[] ~read ~file:twice_file twice_text
+      in
+      let sum_file = I.normalise (Filename.concat directory "sum.jinc") in
+      let sum_text = Option.get (read sum_file) in
+      let n_byte =
+        match find_sub sum_text "to N" with Some at -> at + 3 | None -> -1
+      in
+      let short_byte =
+        match find_sub twice_text "param int N = 1;" with
+        | Some at -> at + 10
+        | None -> -1
+      in
+      let long_use (use : F.use) =
+        String.equal (I.normalise use.F.u_file) sum_file
+        && use.F.u_span.S.start_byte = n_byte
+        && String.equal use.F.u_reading "Long"
+      in
+      check "twice: the Long reading has a use of N in sum.jinc"
+        (List.exists long_use twice_facts.F.uses);
+      let wrong_facts =
+        {
+          twice_facts with
+          F.uses =
+            List.map
+              (fun (use : F.use) ->
+                if long_use use then
+                  {
+                    use with
+                    F.u_decl =
+                      S.make ~start_byte:short_byte ~end_byte:(short_byte + 1);
+                    F.u_dfile = twice_file;
+                  }
+                else use)
+              twice_facts.F.uses;
+        }
+      in
+      let wrong = answer_of_facts ~document:twice_file ~resolve:twice_resolve wrong_facts in
+      check "twice: exactly the wrong reading is reported"
+        (List.length wrong.elsewhere = 1);
+      check "twice: the report names the Long namespace"
+        (List.exists
+           (fun message ->
+             Option.is_some (find_sub message "in namespace Long"))
+           wrong.elsewhere);
+      check "twice: one reading wrong fails the run"
+        (status { wrong with accepted = true } = 1);
+      let right = answer_of_facts ~document:twice_file ~resolve:twice_resolve twice_facts in
+      check "twice: the unmodified facts agree in both readings"
+        (right.elsewhere = [] && right.unresolved = [] && right.misplaced = []);
+      (* A top-level required file's uses are in the facts, each in its own file and
+         reading, and the resolver agrees with each of them. *)
+      write "lib2.jinc" required_body;
+      write "req-body.jazz" requirer_of_body;
+      (match compare_file ~arch (Filename.concat directory "req-body.jazz") with
+      | Error message -> check ("required body: it runs (" ^ message ^ ")") false
+      | Ok body_run ->
+          let from_required line = Option.is_some (find_sub line "\trequired\t") in
+          let required_lines = List.filter from_required body_run.ledger in
+          check "required body: the check accepts it" body_run.accepted;
+          check "required body: the required file's uses are in the facts"
+            (List.length required_lines >= 2);
+          check "required body: the required uses name the required file"
+            (List.for_all
+               (fun line -> Option.is_some (find_sub line "lib2.jinc"))
+               required_lines);
+          check "required body: every use is the compiler's declaration in its reading"
+            (body_run.measured > 0
+            && body_run.same = body_run.measured
+            && body_run.elsewhere = [] && body_run.unresolved = []
+            && body_run.other_name = [] && body_run.misplaced = []));
+      let named = compare_file ~arch (Filename.concat directory "named.jazz") in
+      match named with
       | Error message -> check ("named: it runs (" ^ message ^ ")") false
       | Ok named ->
           check "named: the check accepts a file required twice" named.accepted;
           check "named: every use is the compiler's declaration"
             (named.same = named.measured
             && named.elsewhere = [] && named.unresolved = []
-            && named.other_name = []));
+            && named.other_name = [] && named.misplaced = []));
   if !failures = 0 then print_endline "typed_uses: selftest ok"
   else (
     Printf.eprintf "typed_uses: %d selftest check(s) failed\n" !failures;
@@ -909,6 +1052,7 @@ let main () =
               exit 2
           | Some text ->
               let answer = compare_text ~plant:negative ~arch ~file:path text in
+              List.iter print_endline answer.ledger;
               say_answer answer;
               say_differences answer;
               exit (status answer)))
