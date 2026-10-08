@@ -1,0 +1,12 @@
+; What the corpus harnesses share: the command line, the corpus walk, running
+; the compiler, parallel checks and the report.
+
+(library
+ (name jide_harness)
+ (modules harness)
+ (libraries unix))
+
+(test
+ (name test_harness)
+ (modules test_harness)
+ (libraries jide_harness unix))
