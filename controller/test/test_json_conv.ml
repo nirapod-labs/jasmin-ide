@@ -113,16 +113,48 @@ let test_delay_of_settings () =
   check "delay: the value alone" (of_string {|{"delay":80}|} = Some 80);
   check "delay: a settings object in a notification"
     (of_string {|{"settings":{"diagnostics":{"delay":400}}}|} = Some 400);
-  check "delay: a settings object in an initialize request"
-    (of_string {|{"initializationOptions":{"diagnostics":{"delay":500}}}|}
-    = Some 500);
+  check "delay: the configuration section in a notification"
+    (of_string {|{"settings":{"jasminIde":{"diagnostics":{"delay":450}}}}|}
+    = Some 450);
   check "delay: a number written as a float"
     (of_string {|{"diagnostics":{"delay":300.0}}|} = Some 300);
+  check "delay: the old flat name is not read"
+    (of_string {|{"diagnosticsDelay":500}|} = None);
   check "delay: absent" (of_string {|{"capabilities":{}}|} = None);
   check "delay: not a number"
     (of_string {|{"diagnostics":{"delay":"fast"}}|} = None);
   check "delay: not an object" (of_string {|[]|} = None);
   check "delay: a null section" (of_string {|{"diagnostics":null}|} = None)
+
+(* The initialize request has one shape and no second name. The two names a
+   reader could take as well are refused below, and so are the names it never
+   took; every case has to stay [None]. *)
+let test_delay_of_initialize () =
+  let delay = Jide_controller.Json_conv.delay_of_initialize in
+  let of_string text = delay (Yojson.Safe.from_string text) in
+  check "initialize: the documented shape"
+    (of_string
+       {|{"capabilities":{},"initializationOptions":{"diagnostics":{"delay":500}}}|}
+    = Some 500);
+  check "initialize: the options alone are enough"
+    (of_string {|{"initializationOptions":{"diagnostics":{"delay":320}}}|}
+    = Some 320);
+  check "initialize: a flat delay in the options is not read"
+    (of_string {|{"initializationOptions":{"delay":500}}|} = None);
+  check "initialize: the section's name around the setting is not read"
+    (of_string
+       {|{"initializationOptions":{"jasminIde":{"diagnostics":{"delay":620}}}}|}
+    = None);
+  check "initialize: the old flat name is not read"
+    (of_string {|{"initializationOptions":{"diagnosticsDelay":500}}|} = None);
+  check "initialize: a delay beside the options is not read"
+    (of_string {|{"capabilities":{},"delay":500}|} = None);
+  check "initialize: a settings object is not an initialize request"
+    (of_string {|{"settings":{"diagnostics":{"delay":500}}}|} = None);
+  check "initialize: not a number"
+    (of_string {|{"initializationOptions":{"diagnostics":{"delay":"fast"}}}|}
+    = None);
+  check "initialize: absent" (of_string {|{"capabilities":{}}|} = None)
 
 let markdown value = { Jide_engine.Types.value }
 
@@ -240,6 +272,7 @@ let () =
   test_completion ();
   test_signature_help ();
   test_delay_of_settings ();
+  test_delay_of_initialize ();
   if !failures = 0 then print_endline "all conversion tests passed"
   else (
     Printf.printf "%d conversion test(s) failed\n" !failures;

@@ -819,6 +819,42 @@ let test_initialize_options_set_the_delay () =
     (Jide_controller.Server.delay server)
     320
 
+(* The request has one shape, so a request carrying one of the names the
+   reader used to take as well must leave the delay where it was. Each shape
+   gets its own server, because the second initialize of a session is
+   refused. *)
+let test_initialize_options_take_one_name () =
+  let delay_after options =
+    let server = create () in
+    let params =
+      `Assoc [ ("capabilities", `Assoc []); ("initializationOptions", options) ]
+    in
+    ignore (send server (request ~params 1 "initialize"));
+    Jide_controller.Server.delay server
+  in
+  check_int "a flat delay in the initialization options is not read"
+    (delay_after (`Assoc [ ("delay", `Int 500) ]))
+    250;
+  check_int "the configuration section's name in the options is not read"
+    (delay_after
+       (`Assoc
+         [
+           ( "jasminIde",
+             `Assoc [ ("diagnostics", `Assoc [ ("delay", `Int 620) ]) ] );
+         ]))
+    250;
+  check_int "the old flat name in the initialization options is not read"
+    (delay_after (`Assoc [ ("diagnosticsDelay", `Int 500) ]))
+    250;
+  check_int "an architecture and an include map alone change no delay"
+    (delay_after
+       (`Assoc
+         [
+           ("arch", `String "x86-64");
+           ("include", `Assoc [ ("SECP", `String "src/jasmin") ]);
+         ]))
+    250
+
 let test_configuration_sets_the_delay () =
   let server = create () in
   initialize server;
@@ -1544,6 +1580,7 @@ let () =
   test_delay_is_clamped ();
   test_settings_set_the_delay ();
   test_initialize_options_set_the_delay ();
+  test_initialize_options_take_one_name ();
   test_configuration_sets_the_delay ();
   test_nothing_is_published_after_shutdown ();
   test_definition_answer ();

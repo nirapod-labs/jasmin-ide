@@ -1,2 +1,2 @@
-let version = "0.0.0"
+let version = "0.1.0"
 let server_name = "jasmin-lsp"

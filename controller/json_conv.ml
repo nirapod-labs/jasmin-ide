@@ -334,11 +334,10 @@ let rec value_at path json =
 
 (* The shapes a client's settings object has been seen in. A section named
    "diagnostics.delay" can only mean the setting, so the dotted names come
-   first at their depth. The last groups are the packets that carry a
+   first at their depth. The last three name the packet that carries a
    settings object rather than being one: the parameters of a change
-   notification hold it under "settings" and the parameters of an initialize
-   request under "initializationOptions". *)
-let delay_paths =
+   notification hold it under "settings". *)
+let settings_delay_paths =
   [
     [ "jasminIde"; "diagnostics"; "delay" ];
     [ "diagnostics"; "delay" ];
@@ -347,17 +346,25 @@ let delay_paths =
     [ "settings"; "jasminIde"; "diagnostics"; "delay" ];
     [ "settings"; "diagnostics"; "delay" ];
     [ "settings"; "delay" ];
-    [ "initializationOptions"; "jasminIde"; "diagnostics"; "delay" ];
-    [ "initializationOptions"; "diagnostics"; "delay" ];
-    [ "initializationOptions"; "delay" ];
   ]
 
-let delay_of_settings settings =
-  let rec first = function
-    | [] -> None
-    | path :: rest -> (
-        match Option.bind (value_at path settings) int_of_json with
-        | Some delay -> Some delay
-        | None -> first rest)
-  in
-  first delay_paths
+(* An initialize request carries the setting in one shape and no other: the
+   request's options hold "diagnostics" which holds "delay". The two other
+   names a reader could take are second wire shapes for one setting, so this
+   list holds neither: a flat "delay" in the options, and the setting under
+   the configuration section's own name, "jasminIde". The section still sets
+   the delay in a change notification, which is a different packet and keeps
+   its rows above. *)
+let initialize_delay_paths =
+  [ [ "initializationOptions"; "diagnostics"; "delay" ] ]
+
+let rec value_at_first paths json =
+  match paths with
+  | [] -> None
+  | path :: rest -> (
+      match Option.bind (value_at path json) int_of_json with
+      | Some value -> Some value
+      | None -> value_at_first rest json)
+
+let delay_of_settings settings = value_at_first settings_delay_paths settings
+let delay_of_initialize params = value_at_first initialize_delay_paths params

@@ -28,7 +28,24 @@ block starts with, so a reader of the error learns the forms that do work.
   status 2
   $ cat err.txt
   jasmin-lsp: unknown option: --nonsense
-  usage: jasmin-lsp [--version | --help | check [options] <file>...]
+  usage: jasmin-lsp [--stdio] [--version | --help | check [options] <file>...]
+
+The one option that is accepted is `--stdio`, and accepting it widens
+nothing: it is dropped and the word after it is refused as unknown, with the
+same two lines. One dash is a different word, and only the spelling a
+language client passes is the accepted one.
+
+  $ ../../../lsp-server/native/main.exe --stdio --nonsense < /dev/null > out.txt 2> err.txt; echo "status $?"
+  status 2
+  $ wc -c < out.txt | tr -d ' '
+  0
+  $ cat err.txt
+  jasmin-lsp: unknown option: --nonsense
+  usage: jasmin-lsp [--stdio] [--version | --help | check [options] <file>...]
+  $ ../../../lsp-server/native/main.exe -stdio < /dev/null > out.txt 2> err.txt; echo "status $?"
+  status 2
+  $ head -n 1 err.txt
+  jasmin-lsp: unknown option: -stdio
 
 An argument that is not an option is refused too, rather than served: this
 program reads a file only in the check mode, where the mode has to come
@@ -42,7 +59,7 @@ first, so `jasmin-lsp foo.jazz` is a mistake and not a request to check
   $ cat err.txt
   jasmin-lsp: unexpected argument: foo.jazz
   to check a file, name the mode: jasmin-lsp check <file>...
-  usage: jasmin-lsp [--version | --help | check [options] <file>...]
+  usage: jasmin-lsp [--stdio] [--version | --help | check [options] <file>...]
 
 The refusal is not fatal to the binary and does not depend on it: no
 argument at all still serves, which is the mode an editor starts, and the

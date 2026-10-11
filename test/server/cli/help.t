@@ -4,24 +4,34 @@ the only two, so the test asks for both and for no third — a mode named in
 the help and not implemented would be a lie in the one place a reader looks,
 and a mode implemented and not named is the defect this card fixes.
 
-The options listed are `--version` and `--help` themselves; the check mode's
+The options listed are `--version`, `--help` and `--stdio`; the check mode's
 own options stay `jasmin-lsp check --help`, which the block says, and which
 is the checker's text rather than the server's.
+
+The transport is stated twice, because this block is where a reader looks
+when a client will not start: once in the prose, that standard input and
+output are the only transport the server has, and once in the options, that
+`--stdio` asks for exactly those two streams and is accepted for
+compatibility. The reference in `controller/cli.mli` says the same.
 
   $ ../../../lsp-server/native/main.exe --help > out.txt 2> err.txt; echo "status $?"
   status 0
   $ cat out.txt
-  usage: jasmin-lsp [check [options] <file>...]
+  usage: jasmin-lsp [--stdio] [--version | --help | check [options] <file>...]
   
   A language server for Jasmin. With no argument it serves the language
   server protocol on standard input and output, which is how an editor
-  starts it.
+  starts it. Those two streams are the only transport this server has,
+  so `--stdio`, which asks for them, is accepted and changes nothing.
   
   modes:
     (none)            serve the language server protocol on stdin/stdout
     check <file>...   parse and type each file and print a verdict for it
   
   options:
+    --stdio           serve on standard input and output, the only
+                      transport there is: accepted for compatibility,
+                      because a language client passes it
     -v, --version     print the server version, the Jasmin version and
                       the Jasmin source this build uses, then exit
     -h, --help        print this text, then exit
@@ -37,6 +47,16 @@ is the checker's text rather than the server's.
   1
   $ grep -c '^  check <file>\.\.\.' out.txt
   1
+
+The block starts with the same line a refusal ends with, so the program has
+one synopsis and not two.
+
+  $ ../../../lsp-server/native/main.exe --nonsense > /dev/null 2> err.txt; echo "status $?"
+  status 2
+  $ tail -n 1 err.txt > synopsis.txt
+  $ head -n 1 out.txt > first.txt
+  $ cmp -s synopsis.txt first.txt && echo "same synopsis"
+  same synopsis
 
 The two modes that exist are the two named, and the exit codes the block
 gives are the ones the binary returns: `check` on a file with no error is 0,

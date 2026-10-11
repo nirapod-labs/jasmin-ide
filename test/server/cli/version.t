@@ -13,7 +13,7 @@ hard-coded string would not pass.
   $ ../../../lsp-server/native/main.exe --version > out.txt 2> err.txt; echo "status $?"
   status 0
   $ cat out.txt
-  jasmin-lsp 0.0.0 (Jasmin Compiler 2026.09.0, built from vendored release 2026.09.0)
+  jasmin-lsp 0.1.0 (Jasmin Compiler 2026.09.0, built from vendored release 2026.09.0)
   $ wc -l < out.txt | tr -d ' '
   1
   $ wc -c < err.txt | tr -d ' '
@@ -21,7 +21,7 @@ hard-coded string would not pass.
   $ grep -cE '^jasmin-lsp [0-9]+\.[0-9]+\.[0-9]+ \(Jasmin Compiler [0-9]{4}\.[0-9]{2}\.[0-9]+, built from (vendored release [0-9]{4}\.[0-9]{2}\.[0-9]+|installed library)\)$' out.txt
   1
   $ sed -n 's/^let version = "\(.*\)"$/\1/p' ../../../controller/version.ml
-  0.0.0
+  0.1.0
   $ grep -c "^jasmin-lsp $(sed -n 's/^let version = "\(.*\)"$/\1/p' ../../../controller/version.ml) " out.txt
   1
   $ sed -n 's/^version = //p' ../../../vendor/jasmin.lock

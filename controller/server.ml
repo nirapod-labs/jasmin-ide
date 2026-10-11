@@ -301,6 +301,11 @@ let apply_settings t settings =
   | None -> ()
   | Some delay -> set_delay t delay
 
+let apply_initialize_options t params =
+  match Json_conv.delay_of_initialize params with
+  | None -> ()
+  | Some delay -> set_delay t delay
+
 let handle_initialize t (params : Lsp.Types.InitializeParams.t) =
   match t.state with
   | Uninitialized ->
@@ -737,8 +742,9 @@ let dispatch_request t (request : Jsonrpc.Request.t) =
         [ reply_error request.id (error_code `InvalidRequest) message ]
     | Ok (E (Lsp.Client_request.Initialize params)) -> (
         (* A client may send the debounce with its initialization options,
-           which the raw parameters carry as JSON. *)
-        apply_settings t (json_of_parameters request.params);
+           which the raw parameters carry as JSON. One shape is read:
+           initializationOptions.diagnostics.delay. *)
+        apply_initialize_options t (json_of_parameters request.params);
         match handle_initialize t params with
         | Some result -> [ reply_ok request.id result ]
         | None ->
