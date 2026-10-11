@@ -189,11 +189,16 @@ type snapshot = {
           typed, with their variables, signatures and annotations. It holds
           the items of this document only, which is the one file a signature
           help of its own calls needs. *)
+  arch : Jide_jasmin.Adapter.arch;
+      (** The architecture the document was analysed under: its project's, or
+          the default when its project names none. An intrinsic call is
+          answered from the table of this architecture. *)
 }
 (** What the last analysis of a document built from it, as one value. The
-    three fields are exactly the arguments {!Complete.completion} and
-    {!Complete.signature_help} take, so a caller reads this and answers
-    without touching the compiler, the parser or a file. *)
+    fields are the arguments {!Complete.completion} and
+    {!Complete.signature_help} take, with the architecture a completion or a
+    signature help answers under, so a caller reads this and answers without
+    touching the compiler, the parser or a file. *)
 
 type required = {
   uri : string;
@@ -259,8 +264,9 @@ val analysis : t -> uri:string -> analysis option
 (** The analysis stored for [uri], without doing any work. *)
 
 val snapshot : t -> uri:string -> snapshot option
-(** [snapshot t ~uri] is the index, the resolver and the typed facts the last
-    analysis of [uri] built, or [None] when no analysis is stored for it.
+(** [snapshot t ~uri] is the index, the resolver, the typed facts and the
+    architecture the last analysis of [uri] built, or [None] when no analysis
+    is stored for it.
 
     It reads what the last check left and does no work of its own: it does not
     parse, type, resolve or read a file, and it never calls the check, so a

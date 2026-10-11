@@ -338,16 +338,6 @@ awk -F'\t' -v root="$root" '
 accepted_checks=0
 measurable=0
 rejected=0
-typed_uses=0
-measured=0
-same=0
-elsewhere=0
-unresolved=0
-othername=0
-misplaced=0
-excluded_flag=0
-excluded_temporary=0
-unchecked=0
 noanswer=0
 broken=0
 detected=0
@@ -384,17 +374,7 @@ while IFS=$tab read -r ordinal relative arch status accepted t m s e u o p xf xt
 		printf '%s (%s): the check does not accept it: %s\n' \
 			"$relative" "$arch" "${first:-no error printed}" >>"$mismatches"
 	fi
-	typed_uses=$((typed_uses + t))
-	measured=$((measured + m))
-	same=$((same + s))
-	elsewhere=$((elsewhere + e))
-	unresolved=$((unresolved + u))
-	othername=$((othername + o))
-	misplaced=$((misplaced + p))
-	excluded_flag=$((excluded_flag + xf))
-	excluded_temporary=$((excluded_temporary + xt))
-	unchecked=$((unchecked + c))
-	# Every line the tool wrote about a use that is a difference or an exclusion,
+	# Each line the tool wrote about a use that is a difference or an exclusion,
 	# quoted with this check's coordinates.
 	sed -n 's/^use-\([a-z-]*\): /\1 /p' "$answer" |
 		while IFS= read -r line; do
@@ -411,63 +391,53 @@ while IFS=$tab read -r ordinal relative arch status accepted t m s e u o p xf xt
 		done
 done <"$results"
 
-files=$(awk -F'\t' '!seen[$2]++' "$results" | wc -l | tr -d ' ')
-groups=$work/groups.tsv
-awk -F'\t' '
-	function group(rel,   parts, n) {
-		n = split(rel, parts, "/")
-		if (n >= 2) return parts[2]
-		return rel
-	}
-	function num(value) { return value == "unknown" ? 0 : value }
-	{
-		g = group($2)
-		if (!(g in seen)) { seen[g] = 1; order[++count] = g }
-		files[g]++
-		if ($5 == "yes") accepted[g]++
-		typed[g] += num($6)
-		measured[g] += num($7)
-		same[g] += num($8)
-		elsewhere[g] += num($9)
-		unresolved[g] += num($10)
-		othername[g] += num($11)
-		misplaced[g] += num($12)
-		excluded[g] += num($13) + num($14)
-		unchecked[g] += num($15)
-	}
-	END {
-		for (i = 1; i <= count; i++) {
-			g = order[i]
-			printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", g, files[g],
-				accepted[g], typed[g], measured[g], same[g], elsewhere[g],
-				unresolved[g], othername[g], misplaced[g], excluded[g], unchecked[g]
-		}
-	}' "$results" >"$groups"
+# Each distinct message once: a use two checks reach is named once.
+awk '!seen[$0]++' "$mismatches" >"$mismatches.once" && mv "$mismatches.once" "$mismatches"
+awk '!seen[$0]++' "$excluded_list" >"$excluded_list.once" && mv "$excluded_list.once" "$excluded_list"
 
+# The distinct totals, read from the awk output.
+class_elsewhere=0
+class_unresolved=0
+class_other_name=0
+class_misplaced=0
+class_same=0
+class_excluded_flag=0
+class_excluded_temporary=0
+class_unchecked=0
+typed=0
+conflicts=0
+required_uses=0
+required_files=0
+required_only_files=0
+required_only_uses=0
+eval "$(grep '^[a-z_]*=[0-9]*$' "$work/distinct.txt")"
+measured=$((class_same + class_elsewhere + class_unresolved + class_other_name + class_misplaced))
+excluded=$((class_excluded_flag + class_excluded_temporary))
+sum=$((measured + excluded + class_unchecked))
+
+files=$(awk -F'\t' '!seen[$2]++' "$results" | wc -l | tr -d ' ')
 if [ -n "$checks" ]; then
 	say "the check list names $total checks"
 fi
 say "$files files, $index checks; the check accepts $accepted_checks, refuses $rejected"
-excluded=$((excluded_flag + excluded_temporary))
-say "typed variable uses: $typed_uses; measured: $measured; the compiler's declaration in its namespace: $same; elsewhere: $elsewhere; unresolved: $unresolved; other-name: $othername; misplaced: $misplaced; excluded: $excluded (flag $excluded_flag, temporary $excluded_temporary); unchecked: $unchecked"
-sum=$((same + elsewhere + unresolved + othername + misplaced + excluded + unchecked))
-if [ "$sum" -ne "$typed_uses" ]; then
-	die "the counts do not add up: $same + $elsewhere + $unresolved + $othername + $misplaced + $excluded + $unchecked = $sum, not $typed_uses"
+say "distinct typed variable uses per architecture: $typed; measured: $measured; the compiler's declaration in its namespace: $class_same; elsewhere: $class_elsewhere; unresolved: $class_unresolved; other-name: $class_other_name; misplaced: $class_misplaced; excluded: $excluded (flag $class_excluded_flag, temporary $class_excluded_temporary); unchecked: $class_unchecked"
+say "uses of files a top-level require reaches: $required_uses (in $required_files distinct files; $required_only_files of them are not checked directly, with $required_only_uses uses)"
+if [ "$sum" -ne "$typed" ]; then
+	die "the counts do not add up: $measured measured + $excluded excluded + $class_unchecked unchecked = $sum, not $typed"
 fi
-if [ "$measured" -ne $((same + elsewhere + unresolved + othername + misplaced)) ]; then
-	die "the measured count does not add up: $measured is not the sum of the measured classes"
+if [ "$conflicts" -gt 0 ]; then
+	die "$conflicts use(s) are judged differently by two checks of one architecture: the comparison is not consistent"
 fi
 if [ "$measured" -gt 0 ]; then
-	pct=$(awk -v a="$same" -v b="$measured" 'BEGIN { printf "%.4f", 100 * a / b }')
-	say "the gate's measure: $same of $measured measured uses are the compiler's declaration in their own namespace ($pct%)"
+	pct=$(awk -v a="$class_same" -v b="$measured" 'BEGIN { printf "%.4f", 100 * a / b }')
+	say "the gate's measure: $class_same of $measured measured uses are the compiler's declaration in their own namespace ($pct%)"
 fi
-if [ -s "$groups" ]; then
-	say "by folder: files, accepted, typed uses, measured, same, elsewhere, unresolved, other-name, misplaced, excluded, unchecked"
-	while IFS=$tab read -r group group_files group_accepted group_typed group_measured \
-		group_same group_elsewhere group_unresolved group_othername group_misplaced \
-		group_excluded group_unchecked; do
-		say "  $group: $group_files files, $group_accepted accepted, $group_typed typed, $group_measured measured, $group_same same, $group_elsewhere elsewhere, $group_unresolved unresolved, $group_othername other-name, $group_misplaced misplaced, $group_excluded excluded, $group_unchecked unchecked"
-	done <"$groups"
+if [ -s "$work/distinct.txt" ]; then
+	say "by folder: typed, measured, same, elsewhere, unresolved, other-name, misplaced, excluded, unchecked"
+	grep "^group$tab" "$work/distinct.txt" | sort | while IFS=$tab read -r kind group g_typed g_same g_elsewhere g_unresolved g_other g_misplaced g_excluded g_unchecked; do
+		g_measured=$((g_same + g_elsewhere + g_unresolved + g_other + g_misplaced))
+		say "  $group: $g_typed typed, $g_measured measured, $g_same same, $g_elsewhere elsewhere, $g_unresolved unresolved, $g_other other-name, $g_misplaced misplaced, $g_excluded excluded, $g_unchecked unchecked"
+	done
 fi
 
 if [ -s "$excluded_list" ]; then
@@ -489,7 +459,7 @@ if [ "$noanswer" -gt 0 ] || [ "$broken" -gt 0 ]; then
 	say "$noanswer check(s) answered nothing and $broken could not run: the comparison is not working"
 	exit 2
 fi
-if [ "$typed_uses" -eq 0 ] || [ "$measured" -eq 0 ]; then
+if [ "$typed" -eq 0 ] || [ "$measured" -eq 0 ]; then
 	say "the corpus holds no measured typed variable use: nothing was measured"
 	exit 2
 fi
@@ -505,8 +475,8 @@ if [ "$negative" = 1 ]; then
 	exit 1
 fi
 
-if [ "$rejected" -eq 0 ] && [ "$elsewhere" -eq 0 ] && [ "$unresolved" -eq 0 ] &&
-	[ "$othername" -eq 0 ] && [ "$misplaced" -eq 0 ] && [ "$unchecked" -eq 0 ]; then
+if [ "$rejected" -eq 0 ] && [ "$class_elsewhere" -eq 0 ] && [ "$class_unresolved" -eq 0 ] &&
+	[ "$class_other_name" -eq 0 ] && [ "$class_misplaced" -eq 0 ] && [ "$class_unchecked" -eq 0 ]; then
 	say "every measured typed use of every accepted file is the compiler's declaration in its own namespace"
 	exit 0
 fi
