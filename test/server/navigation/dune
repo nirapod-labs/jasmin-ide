@@ -9,6 +9,11 @@
 ; binary in place. A fixture a test reads that is not listed here would not
 ; invalidate its record, so a fixture added later belongs in this list too.
 ;
+; `fixtures/lib.jinc` is such a fixture: the four records that cross a
+; `require` open their document at `fixtures/entry.jazz` and pull this file
+; in, so the server reads it from disk and the declaration it answers with is
+; the one in this file.
+;
 ; The stanza must never be given `(files ...)`, `(applies_to ...)` or
 ; `(enabled_if false)`: each of those leaves a `.t` file in the tree with no
 ; record, which `scripts/runtest.sh` refuses.
@@ -16,4 +21,5 @@
 (cram
  (deps
   %{exe:../../client/jide_test_client.exe}
-  %{exe:../../../lsp-server/native/main.exe}))
+  %{exe:../../../lsp-server/native/main.exe}
+  fixtures/lib.jinc))
