@@ -69,7 +69,7 @@ val version_line : unit -> string
     linked library says about itself. [<route>] is one of two fixed phrases,
     never a guess: the build records which one applies ({!Build_route}),
     because nothing at run time can tell a vendored library from an installed
-    one — they carry the same module name, so `%{lib-available:jasmin}`
+    one. They carry the same module name, so `%{lib-available:jasmin.jasmin}`
     answers yes either way. *)
 
 val help : unit -> string

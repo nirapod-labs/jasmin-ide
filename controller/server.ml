@@ -1,15 +1,8 @@
 type state = Uninitialized | Running | Shutting_down | Exited
 
-type required = {
-  uri : string;
-  text : string;
-  diagnostics : Jide_lang.Diagnostic.t list;
-}
-
 type analysis = {
   check : uri:string -> unit;
   diagnostics : uri:string -> (int * Jide_lang.Diagnostic.t list) option;
-  required : uri:string -> required list;
   forget : uri:string -> unit;
 }
 (** What the server asks for when it analyses a document.
@@ -17,8 +10,6 @@ type analysis = {
     [check ~uri] analyses the document's current text and stores the result;
     [diagnostics ~uri] is that result, the version of the text it describes
     and its full set of diagnostics, or [None] when nothing is stored;
-    [required ~uri] are the files that result reached through a [require]
-    that hold an error, each with the uri it is published against;
     [forget ~uri] drops what a closed document left behind. The engine
     satisfies this, and so does the stand-in the executable wires today, so
     the server itself has no opinion about how a document is analysed. *)
@@ -67,9 +58,6 @@ type t = {
   mutable state : state;
   mutable exit_code : int;
   mutable shutdown_requested : bool;
-  published : (string, string list) Hashtbl.t;
-      (** The uris each document's last analysis published required-file
-          diagnostics for, so a file it no longer reports is cleared. *)
 }
 
 let default_delay = 250
@@ -97,7 +85,6 @@ let create ~log ?engine ?(features = Features.unavailable) ?analysis ?locate
     state = Uninitialized;
     exit_code = 1;
     shutdown_requested = false;
-    published = Hashtbl.create 16;
   }
 
 let delay t = t.delay
@@ -251,34 +238,12 @@ let publish t ~uri ~version ~lines ~diagnostics =
              ());
       ]
 
-(* Clear the sets a document's analysis published for files it required: an
-   empty set removes what the client shows. A file the client holds open is
-   left alone, because its own analysis publishes its own set and the two
-   would otherwise clear each other's answer. *)
-let clear_published t uris =
-  List.concat_map
-    (fun file_uri ->
-      match Jide_engine.Engine.document t.engine ~uri:file_uri with
-      | Some _ -> []
-      | None ->
-          publish t ~uri:file_uri ~version:None
-            ~lines:(Jide_lang.Line_index.create "")
-            ~diagnostics:[])
-    uris
-
-(* Analyse one document and return the packets that publish its result. A
+(* Analyse one document and return the packet that publishes its result. A
    result for a version the document no longer has is dropped, never sent,
    and the document waits again: the client must not see a set that describes
    text it has already replaced. Only the publish is dropped; a request that
    forced this check is still answered, because the protocol requires one
-   response to every request.
-
-   A file the document requires that holds an error is published too, against
-   its own uri and with the ranges the text its diagnostics index gives them,
-   which is where the compiler prints it. Its set has no version: the client
-   may hold no text for that file at all. The uris published for the document
-   last time and not this time are cleared, so a file that was fixed stops
-   showing the error. *)
+   response to every request. *)
 let analyse t ~uri =
   match t.analysis with
   | None -> []
@@ -286,13 +251,13 @@ let analyse t ~uri =
       match
         guarded (fun () ->
             analysis.check ~uri;
-            (analysis.diagnostics ~uri, analysis.required ~uri))
+            analysis.diagnostics ~uri)
       with
       | Error message ->
           t.log ("analysis failed: " ^ uri ^ ": " ^ message);
           []
-      | Ok (None, _) -> []
-      | Ok (Some (version, diagnostics), required) -> (
+      | Ok None -> []
+      | Ok (Some (version, diagnostics)) -> (
           match Jide_engine.Engine.document t.engine ~uri with
           | None -> []
           | Some document ->
@@ -300,33 +265,9 @@ let analyse t ~uri =
                 mark_stale t ~uri;
                 [])
               else
-                let published =
-                  List.map (fun (file : required) -> file.uri) required
-                in
-                let previous =
-                  match Hashtbl.find_opt t.published uri with
-                  | Some uris -> uris
-                  | None -> []
-                in
-                Hashtbl.replace t.published uri published;
-                let cleared =
-                  clear_published t
-                    (List.filter
-                       (fun previous -> not (List.mem previous published))
-                       previous)
-                in
-                let files =
-                  List.concat_map
-                    (fun (file : required) ->
-                      publish t ~uri:file.uri ~version:None
-                        ~lines:(Jide_lang.Line_index.create file.text)
-                        ~diagnostics:file.diagnostics)
-                    required
-                in
                 publish t ~uri ~version:(Some version)
                   ~lines:(Jide_engine.Document.lines document)
-                  ~diagnostics
-                @ cleared @ files))
+                  ~diagnostics))
 
 let analyse_due t =
   match t.state with
@@ -428,16 +369,6 @@ let dispatch_notification t ~parameters
       let closed = Jide_engine.Engine.document t.engine ~uri in
       Jide_engine.Engine.close_document t.engine ~uri;
       Debounce.clear t.debounce ~uri;
-      (* The files this document's analysis published for are cleared with it:
-         a closed document leaves no diagnostic behind, of its own or of a
-         file it required. *)
-      let cleared =
-        match Hashtbl.find_opt t.published uri with
-        | Some uris ->
-            Hashtbl.remove t.published uri;
-            clear_published t uris
-        | None -> []
-      in
       (match t.analysis with
       | None -> ()
       | Some analysis -> (
@@ -448,8 +379,6 @@ let dispatch_notification t ~parameters
       (* An empty set clears the file's diagnostics in the client. The
          version is the last one the document had, which is the text the
          client saw; a document the server never held is not published. *)
-      cleared
-      @
       match closed with
       | None -> []
       | Some document ->
