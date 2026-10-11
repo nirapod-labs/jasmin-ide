@@ -246,6 +246,72 @@ describe("numbers", () => {
   });
 });
 
+describe("constants", () => {
+  const booleanScope = "constant.language.boolean.jasmin.crypto";
+
+  test("true and false are boolean constants", () => {
+    const source = "if (a && true || false) { }";
+    assertScope(source, "true", booleanScope);
+    assertScope(source, "false", booleanScope);
+  });
+
+  test("a boolean constant is not a numeric constant and not an operator", () => {
+    const source = "x = true;";
+    refuteScope(source, "true", numericScope);
+    refuteScope(source, "true", operatorScope);
+  });
+
+  test("a word that ends in a boolean name is not a boolean constant", () => {
+    // The grammar anchors on word boundaries, so a name that merely ends in
+    // `true` stays plain. `untrue` shares a token with the whitespace around
+    // it, so the check is on the scope carried by any token that holds it.
+    const source = ["param int untrue = 1;", "x = untrue;"].join("\n");
+    const holding = tokensOf(source).filter((token) => token.text.includes("untrue"));
+    assert.equal(holding.length, 2, "Expected both mentions of `untrue` in tokens.");
+    for (const token of holding) {
+      assert.ok(
+        !token.scopes.includes(booleanScope),
+        `Expected ${JSON.stringify(token.text)} not to carry ${booleanScope}.`
+      );
+    }
+    assertScope(source, "param", modifierScope);
+  });
+});
+
+describe("strings", () => {
+  const stringScope = "string.quoted.double.jasmin.crypto";
+  const escapeScope = "constant.character.escape.jasmin.crypto";
+
+  test("an escaped quote is an escape constant and does not end the string", () => {
+    const source = 'x = "a\\"b";';
+    assertScope(source, '\\"', escapeScope);
+    assertScope(source, "b", stringScope);
+    assert.equal(
+      tokensWithText(source, '"').filter((token) => token.scopes.includes("punctuation.definition.string.end.jasmin.crypto"))
+        .length,
+      1,
+      "Expected exactly one end quote: the escaped one is not one."
+    );
+    assertNoOpenScopes(source);
+  });
+
+  test("an escape carries the string scope and the escape scope", () => {
+    const source = "x = \"tab\\there\";";
+    assertScope(source, "\\t", escapeScope);
+    assertScope(source, "\\t", stringScope);
+    assertScope(source, "tab", stringScope);
+    assertScope(source, "here", stringScope);
+    assertNoOpenScopes(source);
+  });
+
+  test("a bare backslash-free string has no escape", () => {
+    const source = 'x = "plain";';
+    assert.equal(tokensWithText(source, "plain").length, 1);
+    assertScope(source, "plain", stringScope);
+    refuteScope(source, "plain", escapeScope);
+  });
+});
+
 describe("operators", () => {
   test("the function arrow is an operator", () => {
     assertScope("export fn copy(reg u64 value) -> reg u64 {", "->", operatorScope);
