@@ -126,7 +126,7 @@ jobs:
           # With no compiler installed the harness compares every verdict with
           # the release's own record of what its compiler says, which is the
           # question that can be answered without an oracle.
-          sh test/parity/parity.sh "$RUNNER_TEMP/jasmin"
+          ./_build/default/test/parity/parity.exe --corpus "$RUNNER_TEMP/jasmin"
 
   editor-code:
     name: VS Code extension
