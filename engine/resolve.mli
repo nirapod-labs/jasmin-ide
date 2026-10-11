@@ -61,21 +61,31 @@ val answer_at :
 (** [answer_at t ~file ~byte] is the occurrence holding [byte] and what it
     names, when the resolution reached that file and an occurrence holds the
     byte. A file read into more than one namespace has one answer per
-    reading (see {!visit_answers}); this one is the first reading's. *)
+    reading (see {!reading_answer}); this one is the first reading's. *)
 
 val answers : t -> string -> (Index.occurrence * answer) list
 (** [answers t file] is every occurrence of [file] with its answer, in
     source order, the first reading's. An occurrence the resolver never
     reached is [Unresolved]. *)
 
-val visit_answers :
-  t -> file:string -> byte:int -> Index.occurrence option * answer list
-(** [visit_answers t ~file ~byte] is the occurrence holding [byte] in [file],
-    if one holds it, and what each reading of [file] names there: one answer
-    per time the resolution read the file, in the order it read it. A file
-    that a namespace reads is read once per namespace, and the namespaces may
-    hold different declarations, so the readings may disagree. The list is
-    empty when the resolution never reached the file. *)
+val readings : t -> string -> string list
+(** [readings t file] is the namespaces the resolution walked [file] in, in the
+    order the walk met them: the empty string for the top level, and a
+    namespace's path joined by [::] otherwise. A file read into two namespaces
+    has two readings. The list is empty when the resolution never reached the
+    file. *)
+
+val reading_answer :
+  t ->
+  file:string ->
+  byte:int ->
+  reading:string ->
+  (Index.occurrence * answer) option
+(** [reading_answer t ~file ~byte ~reading] is the occurrence holding [byte] in
+    [file], and what the reading of [file] in namespace [reading] names there.
+    A reading that recorded nothing at that occurrence answers [Unresolved].
+    [None] when no occurrence holds the byte or the resolution never reached
+    the file. *)
 
 val loaded : t -> (string * string) list
 (** The (namespace key, file) pairs the resolver read once each, for the

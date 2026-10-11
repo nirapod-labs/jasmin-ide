@@ -1,54 +1,66 @@
 #!/bin/sh
-# The typed-use half of the resolver parity gate: for every variable
-# occurrence the compiler typed in a corpus file, the declaration the resolver
-# answers with against the declaration the compiler's own `v_dloc` names.
+# The typed-use half of the resolver parity gate: for every variable occurrence
+# the compiler typed in a corpus file, the declaration the resolver answers in
+# the namespace the compiler typed the occurrence in, against the declaration the
+# compiler's own `v_dloc` names.
 #
 #   sh test/parity/uses.sh <corpus root> [<check list>]
 #
 # <corpus root> is a Jasmin release root, its `compiler` directory, or its
-# `tests` directory. Without a check list every `.jazz` file under
-# `success` is compared once per architecture its folder names, the rule
-# `parity.sh` uses: the deepest component named `x86-64`, `arm-m4`, `riscv`,
-# `risc-v` or `armv8a` picks the target, a file under none is checked on
-# x86-64, and a file under `common` on x86-64, arm-m4 and riscv. With a check
-# list the corpus is that list instead: one `<label> <path> <architecture>`
-# line per check, tab separated, paths relative to `<corpus root>` — the same
-# file `parity.sh` writes as PARITY_TSV and `tree.sh` takes as its second
-# argument, so the three halves of the gate can compare one set.
+# `tests` directory. Without a check list every `.jazz` file under `success` is
+# compared once per architecture its folder names, the rule `parity.sh` uses:
+# the deepest component named `x86-64`, `arm-m4`, `riscv`, `risc-v` or `armv8a`
+# picks the target, a file under none is checked on x86-64, and a file under
+# `common` on x86-64, arm-m4 and riscv. With a check list the corpus is that list
+# instead: one `<label> <path> <architecture>` line per check, tab separated,
+# paths relative to `<corpus root>`, the same file `parity.sh` writes as
+# PARITY_TSV and `tree.sh` takes as its second argument.
 #
-# The comparison itself is `test/parity/typed_uses.ml`: it runs the check, and
-# for every use the typed facts carry asks the resolver what that byte names.
-# The gate's question is one sentence — 100% of typed variable uses resolve to
-# the compiler's declaration — so this script passes only when every use of
-# every accepted file is that declaration. A use is one of three failures:
+# The comparison itself is `test/parity/typed_uses.ml`. Its facts hold the typed
+# uses of the checked file and of every file a top-level `require` reaches, so a
+# check reports one line per use. A use is one occurrence of an architecture: a
+# required file reached by several checks of one architecture is the same uses
+# each time, and it is counted once. Each use falls in exactly one class:
 #
-#   elsewhere     the resolver resolved it to another declaration;
-#   unresolved    the resolver answered no declaration at all;
-#   other-name    the byte the compiler typed a name at holds another name in
-#                 the index, so the two sides are not speaking about one name.
+#   same-declaration  the resolver answers the declaration the compiler bound,
+#                     in the namespace the compiler typed the use in;
+#   elsewhere         the resolver answers another declaration there;
+#   unresolved        the resolver answers no declaration there, or never read
+#                     the file in that namespace;
+#   other-name        the occurrence at the byte holds another name;
+#   misplaced         the compiler's span holds no identifier of the name, but
+#                     the file writes the name elsewhere: a failure;
+#   excluded          the name is not an identifier token anywhere in the file,
+#                     so the compiler made the use up on an instruction. Two
+#                     reasons: `excluded-flag` (a flag name such as `_zf_`) and
+#                     `excluded-temporary` (any other name, such as `bytes`);
+#   unchecked         the check refused the file, so its uses have no
+#                     compiler-side answer to compare with.
 #
-# A fourth kind the tool counts is not a failure and never fails a run: an
-# `unlocated` use is one the compiler placed where no file the resolution
-# reached writes its name (a flag it made up, an intrinsic's expansion), so
-# there is no occurrence to ask about. Those lines are listed apart, and the
-# run prints the five counts so they reconcile: typed uses = same + elsewhere
-# + unresolved + other-name + unlocated.
-#
-# A file the check does not accept is counted apart and fails the run: the
-# corpus is the release's positive folder, so a file it rejects has no
-# compiler-side answer to compare with, and counting its uses as agreement
-# would measure nothing.
+# The gate's clause is 100% of typed variable uses resolve to the compiler's
+# declaration. The percentage is over the measured uses: same-declaration,
+# elsewhere, unresolved, other-name and misplaced. The run checks that the
+# classes add up to the distinct typed uses, and that no two checks judge the
+# same use differently. The script passes only when no measured use is a
+# difference, no file was refused, and the checks agree.
 #
 # Environment:
-#   TYPED_USES  the comparison. Default: the `typed_uses` this tree builds.
-#   PARITY_JOBS how many files are checked at once, default 4.
-#   USES_TSV    a file to write one tab-separated line per check to.
-#   USES_KEEP   a directory to copy the raw answer of a failing check to.
+#   TYPED_USES              the comparison. Default: the one this tree builds.
+#   PARITY_JOBS             how many files are checked at once, default 4.
+#   USES_TSV                a file to write one tab-separated line per check to.
+#   USES_KEEP               a directory to copy the raw answer of every check to.
+#   USES_NEGATIVE_CONTROL   when 1, the comparison plants a wrong binding (the
+#                           declaration of the first measured use of the checked
+#                           file moved) in every accepted check that has one. The
+#                           run then passes only when every such check reports it.
 #
-# Exit status: 0 when every accepted file's every typed use is the compiler's
-# declaration and the run measured at least one use, 1 when one is not or a
-# file was not accepted, 2 when the script cannot run (bad arguments, no
-# corpus, no tool, or the tool answering nothing at all).
+# Exit status: 0 when every measured use is the compiler's declaration in its own
+# namespace, every file was accepted and the checks agree (negative-control mode:
+# when the planted binding was reported in every accepted check with a measured
+# use); 1 when a measured use is not, a file was refused, or the checks disagree
+# about a use (negative-control mode: when one planted binding went unreported);
+# 2 when the script cannot run (bad arguments, no corpus, no tool, the tool
+# answering nothing, or counts that do not add up).
 
 set -u
 
@@ -72,8 +84,8 @@ usage: sh test/parity/uses.sh <corpus root> [<check list>]
                   paths relative to <corpus root>
 
 environment: TYPED_USES (the comparison), PARITY_JOBS (default 4),
-USES_TSV (write the per-check lines here), USES_KEEP (copy a failing check's
-raw answer here)
+USES_TSV (write the per-check lines here), USES_KEEP (copy every check's
+raw answer here), USES_NEGATIVE_CONTROL=1 (plant a wrong binding)
 USAGE
 	exit 2
 }
@@ -97,6 +109,12 @@ if [ -n "$checks" ]; then
 	checks=$(cd -- "$(dirname -- "$checks")" && pwd)/$(basename -- "$checks")
 fi
 
+negative=${USES_NEGATIVE_CONTROL:-0}
+case $negative in
+0 | 1) ;;
+*) die "USES_NEGATIVE_CONTROL is not 0 or 1: $negative" ;;
+esac
+
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 tool=${TYPED_USES:-$here/../../_build/default/test/parity/typed_uses.exe}
 [ -x "$tool" ] || die "no comparison at $tool (build test/parity/typed_uses.exe, or set TYPED_USES)"
@@ -111,10 +129,10 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/uses.XXXXXX") || die "cannot make a work direc
 trap 'rm -rf "$work"' EXIT
 trap 'exit 2' HUP INT TERM
 
-# arches_for <relative path>: the architectures the folder names, one per
-# line. The deepest named component wins, and `common` is every architecture
-# the release checks. The rule is `parity.sh`'s, so the two halves of the gate
-# never disagree about what a folder means.
+# arches_for <relative path>: the architectures the folder names, one per line.
+# The deepest named component wins, and `common` is every architecture the
+# release checks. The rule is `parity.sh`'s, so the halves of the gate never
+# disagree about what a folder means.
 arches_for() {
 	old_ifs=$IFS
 	IFS=/
@@ -159,42 +177,50 @@ while IFS=$tab read -r label relative arch; do
 	[ -f "$root/$relative" ] || die "no such file under $root: $relative"
 done <"$list"
 
-# check_one <index> <label> <relative path> <architecture>
+# check_one <index> <relative path> <architecture>
 #
 # Writes one result line to $work/result.<index>:
 #
-#   index label relative arch tool-exit accepted uses same elsewhere unresolved
-#   other-name unlocated
+#   index relative arch tool-exit accepted typed measured same elsewhere
+#   unresolved other-name misplaced excluded-flag excluded-temporary unchecked
 #
-# `accepted` is `yes` or `no`; the five counts are the tool's own. The tool's
-# stderr is kept in $work/answer.<index> so a difference can be quoted with
-# the check's own name in front of it.
+# The counts are the tool's own for this check. Its ledger, one line per use,
+# goes to $work/ledger.<index> with the architecture in front, and its stderr to
+# $work/answer.<index>.
 check_one() {
 	index=$1
-	label=$2
-	relative=$3
-	arch=$4
+	relative=$2
+	arch=$3
 	answer=$work/answer.$index
-	"$tool" "$root/$relative" "$arch" >"$work/stdout.$index" 2>"$answer" </dev/null
+	if [ "$negative" = 1 ]; then
+		"$tool" --negative-control "$root/$relative" "$arch" >"$work/stdout.$index" 2>"$answer" </dev/null
+	else
+		"$tool" "$root/$relative" "$arch" >"$work/stdout.$index" 2>"$answer" </dev/null
+	fi
 	status=$?
-	accepted=$(sed -n 's/^accepted: //p' "$answer")
-	uses=$(sed -n 's/^typed-uses: //p' "$answer")
-	same=$(sed -n 's/^same-declaration: //p' "$answer")
-	elsewhere=$(sed -n 's/^elsewhere: //p' "$answer")
-	unresolved=$(sed -n 's/^unresolved: //p' "$answer")
-	othername=$(sed -n 's/^other-name: //p' "$answer")
-	unlocated=$(sed -n 's/^unlocated: //p' "$answer")
+	awk -v a="$arch" -F'\t' 'BEGIN { OFS = "\t" } NF > 0 { print a, $0 }' \
+		"$work/stdout.$index" >"$work/ledger.$index"
+	field() { sed -n "s/^$1: //p" "$answer" | head -n 1; }
+	accepted=$(field accepted)
+	typed=$(field typed-uses)
+	measured=$(field measured)
+	same=$(field same-declaration)
+	elsewhere=$(field elsewhere)
+	unresolved=$(field unresolved)
+	othername=$(field other-name)
+	misplaced=$(field misplaced)
+	xflag=$(field excluded-flag)
+	xtemp=$(field excluded-temporary)
+	unchecked=$(field unchecked)
 	[ -n "$accepted" ] || accepted=unknown
-	[ -n "$uses" ] || uses=unknown
-	[ -n "$same" ] || same=unknown
-	[ -n "$elsewhere" ] || elsewhere=unknown
-	[ -n "$unresolved" ] || unresolved=unknown
-	[ -n "$othername" ] || othername=unknown
-	[ -n "$unlocated" ] || unlocated=unknown
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-		"$index" "$label" "$relative" "$arch" "$status" "$accepted" \
-		"$uses" "$same" "$elsewhere" "$unresolved" "$othername" \
-		"$unlocated" >"$work/result.$index"
+	for value in typed measured same elsewhere unresolved othername misplaced xflag xtemp unchecked; do
+		eval "current=\${$value}"
+		[ -n "$current" ] || eval "$value=unknown"
+	done
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$index" "$relative" "$arch" "$status" "$accepted" \
+		"$typed" "$measured" "$same" "$elsewhere" "$unresolved" \
+		"$othername" "$misplaced" "$xflag" "$xtemp" "$unchecked" >"$work/result.$index"
 }
 
 index=0
@@ -202,7 +228,7 @@ running=0
 while IFS=$tab read -r label relative arch; do
 	[ -n "$relative" ] || continue
 	index=$((index + 1))
-	check_one "$index" "$label" "$relative" "${arch:-x86-64}" &
+	check_one "$index" "$relative" "${arch:-x86-64}" &
 	running=$((running + 1))
 	if [ "$running" -ge "$jobs" ]; then
 		wait
@@ -231,30 +257,108 @@ done >"$results"
 if [ -n "${USES_TSV:-}" ]; then
 	cp "$results" "$USES_TSV" || die "cannot write USES_TSV=$USES_TSV"
 fi
+if [ -n "${USES_KEEP:-}" ]; then
+	mkdir -p "$USES_KEEP" || die "cannot make USES_KEEP=$USES_KEEP"
+	i=1
+	while [ "$i" -le "$index" ]; do
+		cp "$work/answer.$i" "$USES_KEEP/answer.$i.txt" ||
+			die "cannot write USES_KEEP=$USES_KEEP"
+		i=$((i + 1))
+	done
+fi
 
-# The tally, and one line per check that is not clean. The first line of each
-# chain is the check's own coordinates, so a reader can find the file, the
-# target and the use without opening the raw answer.
+# The documents, one absolute path per check, and the ledger of every check.
+awk -F'\t' -v root="$root" '{ print root "/" $2 }' "$results" | sort -u >"$work/documents"
+i=1
+: >"$work/ledger.all"
+while [ "$i" -le "$index" ]; do
+	cat "$work/ledger.$i" >>"$work/ledger.all"
+	i=$((i + 1))
+done
+
+# The distinct uses: one per architecture, file, byte, namespace reading and
+# occurrence index. The first check to judge a use fixes its class, and another
+# check that judges it differently is a conflict: a fault of the harness. A file is
+# reached through a require when some check's ledger marks one of its uses
+# required, whichever check the file is checked in: the required file's own check
+# judges the same uses as its own, so the origin is read over every check.
+awk -F'\t' '$3 == "required" { print $4 }' "$work/ledger.all" | sort -u >"$work/required.txt"
+awk -F'\t' -v root="$root" '
+	FILENAME == ARGV[1] { document[$0] = 1; next }
+	FILENAME == ARGV[2] { reached[$0] = 1; next }
+	{
+		key = $1 SUBSEP $4 SUBSEP $5 SUBSEP $6 SUBSEP $7
+		if (key in cls) {
+			if (cls[key] != $2) conflicts++
+			next
+		}
+		cls[key] = $2
+		total++
+		count[$2]++
+		rel = substr($4, length(root) + 2)
+		split(rel, parts, "/")
+		group = parts[2]
+		groups[group] = 1
+		gcount[group, "typed"]++
+		gcount[group, $2]++
+		if ($4 in reached) {
+			required_uses++
+			if (!($4 in document)) {
+				only_uses++
+				only[$4] = 1
+			}
+		}
+	}
+	END {
+		for (c in count) {
+			name = c
+			gsub(/-/, "_", name)
+			printf "class_%s=%d\n", name, count[c]
+		}
+		printf "typed=%d\n", total
+		printf "conflicts=%d\n", conflicts + 0
+		printf "required_uses=%d\n", required_uses + 0
+		for (f in reached) files++
+		printf "required_files=%d\n", files + 0
+		for (f in only) only_files++
+		printf "required_only_files=%d\n", only_files + 0
+		printf "required_only_uses=%d\n", only_uses + 0
+		for (g in groups) {
+			printf "group\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", g, gcount[g, "typed"],
+				gcount[g, "same"] + 0, gcount[g, "elsewhere"] + 0,
+				gcount[g, "unresolved"] + 0, gcount[g, "other-name"] + 0,
+				gcount[g, "misplaced"] + 0,
+				gcount[g, "excluded-flag"] + gcount[g, "excluded-temporary"] + 0,
+				gcount[g, "unchecked"] + 0
+		}
+	}' "$work/documents" "$work/required.txt" "$work/ledger.all" >"$work/distinct.txt"
+
+# Per-check results: how many checks were accepted, measured, or detected a planted
+# binding, and which checks could not run.
 accepted_checks=0
+measurable=0
 rejected=0
 typed_uses=0
+measured=0
 same=0
 elsewhere=0
 unresolved=0
 othername=0
-unlocated=0
+misplaced=0
+excluded_flag=0
+excluded_temporary=0
+unchecked=0
 noanswer=0
 broken=0
+detected=0
 mismatches=$work/mismatches
-unlocated_list=$work/unlocated
+excluded_list=$work/excluded
 : >"$mismatches"
-: >"$unlocated_list"
-while IFS=$tab read -r ordinal label relative arch status accepted uses check_same \
-	check_elsewhere check_unresolved check_othername check_unlocated ||
-	[ -n "${relative:-}" ]; do
+: >"$excluded_list"
+while IFS=$tab read -r ordinal relative arch status accepted t m s e u o p xf xt c; do
 	[ -n "${relative:-}" ] || continue
 	answer=$work/answer.$ordinal
-	if [ "$uses" = unknown ] || [ "$check_same" = unknown ]; then
+	if [ "$t" = unknown ] || [ "$s" = unknown ]; then
 		noanswer=$((noanswer + 1))
 		printf '%s (%s): the comparison answered nothing (exit %s)\n' \
 			"$relative" "$arch" "$status" >>"$mismatches"
@@ -268,28 +372,36 @@ while IFS=$tab read -r ordinal label relative arch status accepted uses check_sa
 	fi
 	if [ "$accepted" = yes ]; then
 		accepted_checks=$((accepted_checks + 1))
+		if [ "$m" -gt 0 ]; then
+			measurable=$((measurable + 1))
+		fi
+		if [ $((e + u + o + p)) -gt 0 ]; then
+			detected=$((detected + 1))
+		fi
 	else
 		rejected=$((rejected + 1))
 		first=$(sed -n 's/^first-error: //p' "$answer")
 		printf '%s (%s): the check does not accept it: %s\n' \
 			"$relative" "$arch" "${first:-no error printed}" >>"$mismatches"
 	fi
-	typed_uses=$((typed_uses + uses))
-	same=$((same + check_same))
-	elsewhere=$((elsewhere + check_elsewhere))
-	unresolved=$((unresolved + check_unresolved))
-	othername=$((othername + check_othername))
-	unlocated=$((unlocated + check_unlocated))
-	# Every line the tool wrote about a use that is not the compiler's
-	# declaration, quoted with this check's coordinates. A use the compiler
-	# placed where no source writes its name is not a difference: it has no
-	# occurrence to compare, so it is listed apart.
+	typed_uses=$((typed_uses + t))
+	measured=$((measured + m))
+	same=$((same + s))
+	elsewhere=$((elsewhere + e))
+	unresolved=$((unresolved + u))
+	othername=$((othername + o))
+	misplaced=$((misplaced + p))
+	excluded_flag=$((excluded_flag + xf))
+	excluded_temporary=$((excluded_temporary + xt))
+	unchecked=$((unchecked + c))
+	# Every line the tool wrote about a use that is a difference or an exclusion,
+	# quoted with this check's coordinates.
 	sed -n 's/^use-\([a-z-]*\): /\1 /p' "$answer" |
 		while IFS= read -r line; do
 			case $line in
-			unlocated\ *)
+			excluded-*\ *)
 				printf '%s (%s) %s\n' "$relative" "$arch" "$line" \
-					>>"$unlocated_list"
+					>>"$excluded_list"
 				;;
 			*)
 				printf '%s (%s) %s\n' "$relative" "$arch" "$line" \
@@ -299,7 +411,7 @@ while IFS=$tab read -r ordinal label relative arch status accepted uses check_sa
 		done
 done <"$results"
 
-files=$(awk -F'\t' '!seen[$3]++' "$results" | wc -l | tr -d ' ')
+files=$(awk -F'\t' '!seen[$2]++' "$results" | wc -l | tr -d ' ')
 groups=$work/groups.tsv
 awk -F'\t' '
 	function group(rel,   parts, n) {
@@ -307,24 +419,28 @@ awk -F'\t' '
 		if (n >= 2) return parts[2]
 		return rel
 	}
+	function num(value) { return value == "unknown" ? 0 : value }
 	{
-		g = group($3)
+		g = group($2)
 		if (!(g in seen)) { seen[g] = 1; order[++count] = g }
 		files[g]++
-		if ($6 == "yes") accepted[g]++
-		uses[g] += ($7 == "unknown" ? 0 : $7)
-		same[g] += ($8 == "unknown" ? 0 : $8)
-		elsewhere[g] += ($9 == "unknown" ? 0 : $9)
-		unresolved[g] += ($10 == "unknown" ? 0 : $10)
-		othername[g] += ($11 == "unknown" ? 0 : $11)
-		unlocated[g] += ($12 == "unknown" ? 0 : $12)
+		if ($5 == "yes") accepted[g]++
+		typed[g] += num($6)
+		measured[g] += num($7)
+		same[g] += num($8)
+		elsewhere[g] += num($9)
+		unresolved[g] += num($10)
+		othername[g] += num($11)
+		misplaced[g] += num($12)
+		excluded[g] += num($13) + num($14)
+		unchecked[g] += num($15)
 	}
 	END {
 		for (i = 1; i <= count; i++) {
 			g = order[i]
-			printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", g, files[g],
-				accepted[g], uses[g], same[g], elsewhere[g], unresolved[g],
-				othername[g], unlocated[g]
+			printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", g, files[g],
+				accepted[g], typed[g], measured[g], same[g], elsewhere[g],
+				unresolved[g], othername[g], misplaced[g], excluded[g], unchecked[g]
 		}
 	}' "$results" >"$groups"
 
@@ -332,33 +448,36 @@ if [ -n "$checks" ]; then
 	say "the check list names $total checks"
 fi
 say "$files files, $index checks; the check accepts $accepted_checks, refuses $rejected"
-say "typed variable uses: $typed_uses; the compiler's declaration: $same; resolved elsewhere: $elsewhere; unresolved: $unresolved; other-name: $othername; unlocated: $unlocated"
-say "the counts reconcile: $same + $elsewhere + $unresolved + $othername + $unlocated = $((same + elsewhere + unresolved + othername + unlocated)) of $typed_uses"
+excluded=$((excluded_flag + excluded_temporary))
+say "typed variable uses: $typed_uses; measured: $measured; the compiler's declaration in its namespace: $same; elsewhere: $elsewhere; unresolved: $unresolved; other-name: $othername; misplaced: $misplaced; excluded: $excluded (flag $excluded_flag, temporary $excluded_temporary); unchecked: $unchecked"
+sum=$((same + elsewhere + unresolved + othername + misplaced + excluded + unchecked))
+if [ "$sum" -ne "$typed_uses" ]; then
+	die "the counts do not add up: $same + $elsewhere + $unresolved + $othername + $misplaced + $excluded + $unchecked = $sum, not $typed_uses"
+fi
+if [ "$measured" -ne $((same + elsewhere + unresolved + othername + misplaced)) ]; then
+	die "the measured count does not add up: $measured is not the sum of the measured classes"
+fi
+if [ "$measured" -gt 0 ]; then
+	pct=$(awk -v a="$same" -v b="$measured" 'BEGIN { printf "%.4f", 100 * a / b }')
+	say "the gate's measure: $same of $measured measured uses are the compiler's declaration in their own namespace ($pct%)"
+fi
 if [ -s "$groups" ]; then
-	say "by folder: files, accepted, typed uses, the compiler's declaration, elsewhere, unresolved, other-name, unlocated"
-	while IFS=$tab read -r group group_files group_accepted group_uses group_same \
-		group_elsewhere group_unresolved group_othername group_unlocated; do
-		say "  $group: $group_files files, $group_accepted accepted, $group_uses uses, $group_same same, $group_elsewhere elsewhere, $group_unresolved unresolved, $group_othername other-name, $group_unlocated unlocated"
+	say "by folder: files, accepted, typed uses, measured, same, elsewhere, unresolved, other-name, misplaced, excluded, unchecked"
+	while IFS=$tab read -r group group_files group_accepted group_typed group_measured \
+		group_same group_elsewhere group_unresolved group_othername group_misplaced \
+		group_excluded group_unchecked; do
+		say "  $group: $group_files files, $group_accepted accepted, $group_typed typed, $group_measured measured, $group_same same, $group_elsewhere elsewhere, $group_unresolved unresolved, $group_othername other-name, $group_misplaced misplaced, $group_excluded excluded, $group_unchecked unchecked"
 	done <"$groups"
 fi
 
-if [ -s "$unlocated_list" ]; then
-	say "unlocated uses: the compiler placed them where no file the resolution reached writes their name; they are listed, not counted as differences"
+if [ -s "$excluded_list" ]; then
+	say "excluded uses: the name is not an identifier token anywhere in the file, so the compiler made the use up; they are listed, not measured"
 	while IFS= read -r line; do
-		say "unlocated $line"
-	done <"$unlocated_list"
+		say "$line"
+	done <"$excluded_list"
 fi
 
-if [ -s "$mismatches" ]; then
-	if [ -n "${USES_KEEP:-}" ]; then
-		mkdir -p "$USES_KEEP" || die "cannot make USES_KEEP=$USES_KEEP"
-		i=1
-		while [ "$i" -le "$index" ]; do
-			cp "$work/answer.$i" "$USES_KEEP/answer.$i.txt" ||
-				die "cannot write USES_KEEP=$USES_KEEP"
-			i=$((i + 1))
-		done
-	fi
+if [ -s "$mismatches" ] && [ "$negative" != 1 ]; then
 	while IFS= read -r line; do
 		say "different $line"
 	done <"$mismatches"
@@ -367,16 +486,28 @@ fi
 # A run that measured nothing is not a pass, and it is not a corpus difference
 # either: it is the harness or the tool failing to run.
 if [ "$noanswer" -gt 0 ] || [ "$broken" -gt 0 ]; then
-	say "$noanswer check(s) answered nothing and $broken could not run: $tool is not a working comparison"
+	say "$noanswer check(s) answered nothing and $broken could not run: the comparison is not working"
 	exit 2
 fi
-if [ "$typed_uses" -eq 0 ]; then
-	say "the corpus holds no typed variable use in any file the check accepts: nothing was measured"
+if [ "$typed_uses" -eq 0 ] || [ "$measured" -eq 0 ]; then
+	say "the corpus holds no measured typed variable use: nothing was measured"
 	exit 2
 fi
+
+if [ "$negative" = 1 ]; then
+	# A check with no measured use has nothing to plant a wrong binding on, so the
+	# control expects one report from each check that has one.
+	if [ "$measurable" -gt 0 ] && [ "$detected" -eq "$measurable" ]; then
+		say "negative control: a wrong binding was planted in each of the $measurable accepted checks that have a measured use, and the comparison reported it in $detected"
+		exit 0
+	fi
+	say "negative control failed: the planted wrong binding was reported in $detected of $measurable accepted checks with a measured use"
+	exit 1
+fi
+
 if [ "$rejected" -eq 0 ] && [ "$elsewhere" -eq 0 ] && [ "$unresolved" -eq 0 ] &&
-	[ "$othername" -eq 0 ]; then
-	say "every typed use of every accepted file is the compiler's declaration"
+	[ "$othername" -eq 0 ] && [ "$misplaced" -eq 0 ] && [ "$unchecked" -eq 0 ]; then
+	say "every measured typed use of every accepted file is the compiler's declaration in its own namespace"
 	exit 0
 fi
 say "the corpus does not agree"

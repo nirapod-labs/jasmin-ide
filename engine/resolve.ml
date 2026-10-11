@@ -40,16 +40,16 @@ type env = {
   index : Index.t;
   dir : string;
   chain : string list;
-  visit : int; (* which reading of [file] this walk is *)
 }
 
 type t = {
   entry : string;
   indexes : (string, Index.t) Hashtbl.t;
-  answers : (string * int * int, answer) Hashtbl.t;
-      (* (file, byte where the name starts, visit) to what the name names *)
-  visits : (string, int list) Hashtbl.t;
-      (* The visits of each file, in the order the resolution met them. *)
+  answers : (string * int * string, answer) Hashtbl.t;
+      (* (file, byte where the name starts, reading) to what the name names *)
+  readings : (string, string list) Hashtbl.t;
+      (* The namespaces each file was walked in, in the order the walk met
+         them. *)
   order : Index.t list; (* entry first *)
   loaded : (string * string) list;
   snapshots : (string, (int * frame list) array) Hashtbl.t;
@@ -60,9 +60,8 @@ type session = {
   idirs : (string * string) list;
   read : string -> string option;
   indexes : (string, Index.t) Hashtbl.t;
-  answers : (string * int * int, answer) Hashtbl.t;
-  visits : (string, int list) Hashtbl.t; (* reversed *)
-  mutable visit_count : int;
+  answers : (string * int * string, answer) Hashtbl.t;
+  readings : (string, string list) Hashtbl.t; (* reversed *)
   snapshots : (string, (int * frame list) list) Hashtbl.t; (* reversed *)
   mutable order_rev : Index.t list;
   mutable loaded : (string * string) list;
@@ -197,22 +196,25 @@ let exit_namespace env =
 (* ------------------------------------------------------------------ *)
 (* Answers *)
 
-(* A file is read once per namespace that requires it, and each reading is a
-   visit with its own answers: a file a namespace reads twice names a byte
-   differently in the two visits when the namespaces hold different names. *)
-let fresh_visit session file =
-  let visit = session.visit_count in
-  session.visit_count <- visit + 1;
+(* A file is read once per namespace that requires it, and each reading is
+   kept apart: the namespaces may hold different names, so one byte of the file
+   names different declarations in two readings. A reading is the namespace
+   path the walk was in, joined by [::]; the top level is the empty string. *)
+let reading_of env = String.concat "::" env.namespace
+
+let note_reading session file reading =
   let previous =
-    Option.value ~default:[] (Hashtbl.find_opt session.visits file)
+    Option.value ~default:[] (Hashtbl.find_opt session.readings file)
   in
-  Hashtbl.replace session.visits file (visit :: previous);
-  visit
+  if not (List.mem reading previous) then
+    Hashtbl.replace session.readings file (reading :: previous)
 
 let record session env span answer =
-  let key = (env.file, span.Jide_lang.Span.start_byte, env.visit) in
-  if not (Hashtbl.mem session.answers key) then
-    Hashtbl.add session.answers key answer
+  let reading = reading_of env in
+  let key = (env.file, span.Jide_lang.Span.start_byte, reading) in
+  if not (Hashtbl.mem session.answers key) then (
+    Hashtbl.add session.answers key answer;
+    note_reading session env.file reading)
 
 let index_of session file text =
   match Hashtbl.find_opt session.indexes file with
@@ -594,7 +596,7 @@ and require_file session env ~from written =
     | None -> env
     | Some text ->
         let index = index_of session path text in
-        let visit = fresh_visit session path in
+        note_reading session path (reading_of env);
         let inner =
           {
             env with
@@ -602,12 +604,11 @@ and require_file session env ~from written =
             index;
             dir = Filename.dirname path;
             chain = path :: env.chain;
-            visit;
           }
         in
         (* A file read into a namespace holds that namespace's names: the
-           marks of this visit replace the ones an earlier visit left, so the
-           last visit is the one a scope question answers from. *)
+           marks of this reading replace the ones an earlier reading left, so the
+           last reading is the one a scope question answers from. *)
         Hashtbl.replace session.snapshots path [];
         let resolved = List.fold_left (item session) inner index.Index.items in
         (* The frames the included file built stay; the file it came from is
@@ -618,7 +619,6 @@ and require_file session env ~from written =
           index = env.index;
           dir = env.dir;
           chain = env.chain;
-          visit = env.visit;
         })
 
 (* ------------------------------------------------------------------ *)
@@ -630,8 +630,7 @@ let of_text ~idirs ~read ~file text : t =
       read;
       indexes = Hashtbl.create 16;
       answers = Hashtbl.create 256;
-      visits = Hashtbl.create 16;
-      visit_count = 0;
+      readings = Hashtbl.create 16;
       snapshots = Hashtbl.create 16;
       order_rev = [];
       loaded = [];
@@ -642,7 +641,7 @@ let of_text ~idirs ~read ~file text : t =
   (* The document itself is loaded in its own namespace, as the adapter's
      [enter_file] does before it types the first item. *)
   session.loaded <- [ ("", file) ];
-  let visit = fresh_visit session file in
+  note_reading session file "";
   let env =
     {
       frames = [ empty_frame ];
@@ -651,7 +650,6 @@ let of_text ~idirs ~read ~file text : t =
       index;
       dir = Filename.dirname file;
       chain = [ file ];
-      visit;
     }
   in
   Hashtbl.replace session.snapshots file [];
@@ -661,13 +659,13 @@ let of_text ~idirs ~read ~file text : t =
     entry = file;
     indexes = session.indexes;
     answers = session.answers;
-    visits =
+    readings =
       Hashtbl.fold
-        (fun file visits all ->
-          Hashtbl.add all file (List.rev visits);
+        (fun file readings all ->
+          Hashtbl.add all file (List.rev readings);
           all)
-        session.visits
-        (Hashtbl.create (Hashtbl.length session.visits));
+        session.readings
+        (Hashtbl.create (Hashtbl.length session.readings));
     order = List.rev session.order_rev;
     loaded = List.rev session.loaded;
     snapshots =
@@ -688,19 +686,27 @@ let entry (t : t) = t.entry
 let files (t : t) = t.order
 let file (t : t) path = Hashtbl.find_opt t.indexes (normalise path)
 
-(* What a visit of [file] names at the occurrence's start. A visit that
-   recorded nothing there names nothing. *)
-let answer_in_visit (t : t) ~file ~start visit =
-  match Hashtbl.find_opt t.answers (file, start, visit) with
+let readings (t : t) path =
+  Option.value ~default:[] (Hashtbl.find_opt t.readings (normalise path))
+
+(* What one reading of [file] names at [start]. A reading that recorded
+   nothing there names nothing. *)
+let answer_in_reading (t : t) ~file ~start reading =
+  match Hashtbl.find_opt t.answers (file, start, reading) with
   | Some answer -> answer
   | None -> Unresolved
 
-(* The first visit is the one the single answer of the editor queries reads:
-   the walk met it first. *)
+(* The first reading that recorded an answer there is the one the single
+   answer of the editor queries reads: the walk met it first. *)
 let first_answer (t : t) ~file ~start =
-  match Hashtbl.find_opt t.visits file with
-  | Some (visit :: _) -> answer_in_visit t ~file ~start visit
-  | Some [] | None -> Unresolved
+  let rec first = function
+    | [] -> Unresolved
+    | reading :: rest -> (
+        match Hashtbl.find_opt t.answers (file, start, reading) with
+        | Some answer -> answer
+        | None -> first rest)
+  in
+  first (readings t file)
 
 let answer_at (t : t) ~file ~byte =
   let file = normalise file in
@@ -724,17 +730,16 @@ let answers (t : t) path =
           (occurrence, first_answer t ~file ~start))
         index.Index.occurrences
 
-let visit_answers (t : t) ~file ~byte =
+let reading_answer (t : t) ~file ~byte ~reading =
   let file = normalise file in
-  let visits = Option.value ~default:[] (Hashtbl.find_opt t.visits file) in
   match Hashtbl.find_opt t.indexes file with
-  | None -> (None, [])
+  | None -> None
   | Some index -> (
       match Index.find_occurrence index ~byte with
-      | None -> (None, [])
+      | None -> None
       | Some occurrence ->
           let start = occurrence.Index.span.Jide_lang.Span.start_byte in
-          (Some occurrence, List.map (answer_in_visit t ~file ~start) visits))
+          Some (occurrence, answer_in_reading t ~file ~start reading))
 
 let loaded (t : t) = t.loaded
 
