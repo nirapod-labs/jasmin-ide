@@ -14,4 +14,8 @@ brackets = [
   { start = "\"", end = "\"", close = true, newline = false, not_in = ["string", "comment"] },
 ]
 
-scope_opt_in_language_servers = ["jasmin-lsp"]
+
+# Opt in to the server for this language. Zed keeps a language server that
+# names this key out of its automatic input-driven path unless the language
+# opts in, which is why completion never fired while highlights did.
+opt_into_language_servers = ["jasmin-lsp"]
