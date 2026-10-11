@@ -217,7 +217,7 @@ let temp_dir prefix =
 
 (* Both streams go to files rather than pipes, so a program that writes much
    to one while the other is read cannot block. *)
-let run ?cwd ?env program arguments =
+let run ?cwd ?env ?(merge = false) program arguments =
   let scratch = Filename.get_temp_dir_name () in
   let out_file = Filename.temp_file ~temp_dir:scratch "harness" ".out" in
   let err_file = Filename.temp_file ~temp_dir:scratch "harness" ".err" in
@@ -232,7 +232,7 @@ let run ?cwd ?env program arguments =
           let err = Unix.openfile err_file [ Unix.O_WRONLY; Unix.O_TRUNC ] 0 in
           Unix.dup2 null Unix.stdin;
           Unix.dup2 out Unix.stdout;
-          Unix.dup2 err Unix.stderr;
+          Unix.dup2 (if merge then out else err) Unix.stderr;
           match env with
           | Some env -> Unix.execvpe program argv env
           | None -> Unix.execvp program argv
@@ -250,7 +250,12 @@ let run ?cwd ?env program arguments =
 let executable ~what program =
   let found =
     if String.contains program '/' then
-      if Sys.file_exists program then Some (absolute program) else None
+      if Sys.file_exists program && not (is_directory program) then
+        Some
+          (Filename.concat
+             (directory (Filename.dirname program))
+             (Filename.basename program))
+      else None
     else
       List.find_map
         (fun dir ->
@@ -268,3 +273,81 @@ let executable ~what program =
       path
   | _ -> die "%s is not an executable program: %s" what program
 
+let compiler = function
+  | None | Some "" ->
+      die "no compiler: name the reference jasminc with --jasminc"
+  | Some program ->
+      let path = executable ~what:"the compiler" program in
+      let { status; out; _ } = run path [ "-version" ] in
+      let version = String.trim out in
+      if status <> 0 then die "%s -version failed (exit %d)" path status;
+      if version = "" then die "%s printed no version" path;
+      (path, String.concat " " (String.split_on_char '\n' version))
+
+let built relative =
+  let rec up dir =
+    if
+      Filename.basename dir = "default"
+      && Filename.basename (Filename.dirname dir) = "_build"
+    then Some dir
+    else
+      let parent = Filename.dirname dir in
+      if parent = dir then None else up parent
+  in
+  match up (Filename.dirname (absolute Sys.executable_name)) with
+  | Some dir when Sys.file_exists (Filename.concat dir relative) ->
+      Filename.concat dir relative
+  | _ -> die "no %s in this build: build the tree first" relative
+
+let parallel ~jobs f items =
+  let items = Array.of_list items in
+  let count = Array.length items in
+  let results = Array.make count (Error "not run") in
+  let scratch = temp_dir "parallel" in
+  let file index = Filename.concat scratch (string_of_int index) in
+  let running = Hashtbl.create jobs in
+  let finish () =
+    let pid, status = Unix.wait () in
+    match Hashtbl.find_opt running pid with
+    | None -> ()
+    | Some index ->
+        Hashtbl.remove running pid;
+        results.(index) <-
+          (match status with
+          | Unix.WEXITED 0 -> (
+              match
+                In_channel.with_open_bin (file index) Marshal.from_channel
+              with
+              | result -> result
+              | exception _ -> Error "the process left no result")
+          | Unix.WEXITED code ->
+              Error (Printf.sprintf "the process exited %d" code)
+          | Unix.WSIGNALED signal | Unix.WSTOPPED signal ->
+              Error
+                (Printf.sprintf "the process was killed by signal %d" signal))
+  in
+  Array.iteri
+    (fun index item ->
+      while Hashtbl.length running >= jobs do
+        finish ()
+      done;
+      flush_all ();
+      match Unix.fork () with
+      | 0 ->
+          let result =
+            match f item with
+            | value -> Ok value
+            | exception exn -> Error ("raised " ^ Printexc.to_string exn)
+          in
+          (try
+             Out_channel.with_open_bin (file index) (fun channel ->
+                 Marshal.to_channel channel (result : (_, string) result) [])
+           with _ -> Unix._exit 3);
+          flush_all ();
+          Unix._exit 0
+      | pid -> Hashtbl.replace running pid index)
+    items;
+  while Hashtbl.length running > 0 do
+    finish ()
+  done;
+  Array.to_list results
