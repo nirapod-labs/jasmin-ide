@@ -114,7 +114,7 @@ jobs:
       - name: Test
         run: make test
 
-      - name: Corpus parity
+      - name: Corpus smoke
         run: |
           # The corpus is not in this repository and is never copied into it:
           # it comes from the release the lock file names, so the library, the
@@ -123,10 +123,10 @@ jobs:
           release=$(sed -n 's/^version *= *//p' vendor/jasmin.lock)
           git clone --quiet --depth 1 --branch "v$release" \
             https://github.com/jasmin-lang/jasmin.git "$RUNNER_TEMP/jasmin"
-          # With no compiler installed the harness compares every verdict with
-          # the release's own record of what its compiler says, which is the
-          # question that can be answered without an oracle.
-          sh test/parity/parity.sh "$RUNNER_TEMP/jasmin"
+          # No compiler is installed here, so this is the smoke test: every
+          # file gets a verdict and nothing is internal. Parity against the
+          # compiler is `make parity` with JASMINC.
+          sh scripts/corpus-smoke.sh _build/default/lsp-server/native/main.exe "$RUNNER_TEMP/jasmin"
 
   editor-code:
     name: VS Code extension
