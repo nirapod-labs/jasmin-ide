@@ -54,12 +54,28 @@
 
 type state = Uninitialized | Running | Shutting_down | Exited
 
+type required = {
+  uri : string;
+      (** The uri the file is published against, which is the client's own
+          spelling when it holds the file open. *)
+  text : string;  (** The bytes [diagnostics] index. *)
+  diagnostics : Jide_lang.Diagnostic.t list;
+      (** The errors the check reported in the file itself. *)
+}
+(** A file reached through a [require] that holds an error. It is published
+    against its own uri, with the ranges [text] gives its diagnostics, so the
+    client shows the error where the compiler reports it instead of on the
+    document that required the file. *)
+
 type analysis = {
   check : uri:string -> unit;
       (** Analyse the document's current text and store the result. *)
   diagnostics : uri:string -> (int * Jide_lang.Diagnostic.t list) option;
       (** The stored result: the version of the text it describes and the
           full set of its diagnostics, or [None] when nothing is stored. *)
+  required : uri:string -> required list;
+      (** The files the stored result reached through a [require] that hold an
+          error, or [] when nothing is stored or every file it reads is fine. *)
   forget : uri:string -> unit;  (** Drop what a closed document left behind. *)
 }
 (** How a document is analysed. The engine satisfies this interface; a
