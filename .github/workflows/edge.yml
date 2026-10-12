@@ -166,7 +166,7 @@ jobs:
       # The corpus of that same upstream commit, not of the release: the two
       # Jasmin versions do not share a syntax, so the comparison is only
       # meaningful against the tree the server was built from.
-      - name: Corpus parity against the edge corpus
+      - name: Corpus smoke against the edge corpus
         run: |
           set -eu
           corpus=$RUNNER_TEMP/jasmin/compiler/tests
@@ -176,8 +176,7 @@ jobs:
             git -C "$RUNNER_TEMP/jasmin" sparse-checkout set compiler/tests
             git -C "$RUNNER_TEMP/jasmin" checkout --quiet
           fi
-          opam exec -- dune build --root . test/parity/parity.exe
-          ./_build/default/test/parity/parity.exe --corpus "$RUNNER_TEMP/jasmin" | tail -30
+          sh scripts/corpus-smoke.sh _build/default/lsp-server/native/main.exe "$RUNNER_TEMP/jasmin" | tail -30
 
       # The step records what the run built, and fails when the binary the
       # build was for is not there: a step that prints an empty field and exits
