@@ -76,3 +76,60 @@ extension claims `.jazz` and nothing is highlighted, add:
 "files.associations": { "*.jazz": "jasmin-crypto" }
 ```
 
+## Zed
+
+The extension `jasmin-ide` registers the tree-sitter grammar `jasmin` and the
+language server `jasmin-lsp`. Its highlight, bracket, outline, indent and
+text-object queries ship with it. This build can't download a server, so name
+yours:
+
+```json
+{
+  "lsp": {
+    "jasmin-lsp": {
+      "binary": { "path": "/home/you/.opam/jasmin-ide/bin/jasmin-lsp" },
+      "initialization_options": { "diagnostics": { "delay": 250 } }
+    }
+  }
+}
+```
+
+`binary.arguments` and `binary.env` are passed as given. Of the
+initialization options only `diagnostics.delay` has an effect today; `arch`
+and `include` are sent and not used. The server starts with your shell's
+environment, so an opam switch or `JASMINPATH` set there is visible to it.
+
+## The project file
+
+A file named `jasmin.project` describes a project. For each document the
+server uses the nearest one above it, so one workspace can hold several
+projects. It's an INI file; every key is optional:
+
+```ini
+[jasmin]
+# The target, as jasminc -arch names it.
+arch = x86-64
+call_conv = linux
+include = LIB = src/lib
+include = ARCH = src/lib/x86_64
+entry = src/main.jazz
+```
+
+- `arch` is `x86-64` (the default), `arm-m4`, `armv8a` or `riscv`.
+- `call_conv` is `linux` (the default) or `windows`.
+- `include` binds one name for `from NAME require`, written `NAME = PATH`.
+  Repeat it for each name.
+- `entry` names the project's entry file. Without it every `.jazz` file under
+  the project file's directory is an entry.
+
+Paths are relative to the project file's directory. Comments are whole lines
+starting with `#` or `;`. A bad key or value is left at its default and the
+rest of the file is still read; these problems aren't shown in the editor yet.
+The names in the `JASMINPATH` environment variable (`NAME=PATH`, separated by
+`:`) are bound after the project's own, as the compiler binds them after its
+`-I` options.
+
+`jasmin-lsp check` doesn't read these keys. It uses `--arch`, `--call-conv`
+and `-I`, and the project file's directory only as the place to look for
+entries.
+
