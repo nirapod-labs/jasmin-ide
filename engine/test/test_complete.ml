@@ -66,8 +66,10 @@ let function_fact text ~within ~name ~fs_in ~fs_out =
 
 let facts_of items = { Jide_jasmin.Facts.items; uses = []; calls = [] }
 
-let complete_at ?trigger (resolved, index) ~byte =
-  Jide_engine.Complete.completion ?trigger ~index ~resolve:resolved ~byte ()
+let complete_at ?trigger ?(arch = Jide_jasmin.Arch.X86_64) (resolved, index)
+    ~byte =
+  Jide_engine.Complete.completion ?trigger ~arch ~index ~resolve:resolved ~byte
+    ()
 
 let complete_in (resolved, index) ~text ~within ~name =
   match byte_of_in text ~within ~name with
@@ -98,7 +100,8 @@ let detail_of completion label =
       item.detail)
 
 let signature_at ?facts (resolved, index) ~byte =
-  Jide_engine.Complete.signature_help ?facts ~index ~resolve:resolved ~byte ()
+  Jide_engine.Complete.signature_help ~arch:Jide_jasmin.Arch.X86_64 ?facts
+    ~index ~resolve:resolved ~byte ()
 
 (* ------------------------------------------------------------------ *)
 (* One small program: a global, an alias, three functions and a block *)
@@ -253,6 +256,84 @@ let test_annotation_keys () =
            (complete_at ~trigger:Jide_engine.Complete.Colon (resolved, index)
               ~byte:(String.length basic))
            "fn")
+
+(* ------------------------------------------------------------------ *)
+(* Intrinsics after a hash *)
+
+(* A primitive call's name starts after a hash, here with no name written
+   yet, and the same with a prefix already typed. *)
+let hashed =
+  {|fn f(reg u64 x) -> reg u64 {
+  reg u64 y;
+  y = #
+  return y;
+}
+|}
+
+let prefixed =
+  {|fn f(reg u64 x) -> reg u64 {
+  reg u64 y;
+  y = #AES
+  return y;
+}
+|}
+
+let test_intrinsics_after_a_hash () =
+  let file = "/work/hashed.jazz" in
+  let resolved = resolve file hashed in
+  let index = index_of resolved file in
+  (match byte_after hashed ~within:"y = #" ~name:"#" with
+  | None -> check "intrinsics: the position exists" false
+  | Some byte ->
+      let x86 =
+        complete_at ~arch:Jide_jasmin.Arch.X86_64 (resolved, index) ~byte
+      in
+      let arm =
+        complete_at ~arch:Jide_jasmin.Arch.Arm_m4 (resolved, index) ~byte
+      in
+      check "intrinsics: the x86-64 list is the compiler's 167 names"
+        (List.length (labels x86) = 167);
+      check "intrinsics: the arm-m4 list is the compiler's 72 names"
+        (List.length (labels arm) = 72);
+      check "intrinsics: AESDEC is an x86-64 intrinsic" (has_label x86 "AESDEC");
+      check "intrinsics: AESDEC is not an arm-m4 intrinsic"
+        (no_label arm "AESDEC");
+      check "intrinsics: CLZ is an arm-m4 intrinsic" (has_label arm "CLZ");
+      check "intrinsics: CLZ is not an x86-64 intrinsic" (no_label x86 "CLZ");
+      check "intrinsics: the architecture decides the list"
+        (labels x86 <> labels arm);
+      check "intrinsics: an intrinsic has the intrinsic kind"
+        (kind_of x86 "AESDEC" = Some Jide_engine.Complete.Intrinsic);
+      check "intrinsics: no keyword is offered after a hash"
+        (no_label x86 "fn" && no_label x86 "reg");
+      check "intrinsics: no name in scope is offered after a hash"
+        (no_label x86 "x" && no_label x86 "y");
+      check "intrinsics: no annotation key is offered after a hash"
+        (no_label x86 "stacksize");
+      check "intrinsics: the hash trigger asks for the same list"
+        (labels
+           (complete_at ~trigger:Jide_engine.Complete.Hash
+              ~arch:Jide_jasmin.Arch.X86_64 (resolved, index) ~byte)
+        = labels x86));
+  let resolved = resolve file prefixed in
+  let index = index_of resolved file in
+  match byte_after prefixed ~within:"y = #AES" ~name:"#AES" with
+  | None -> check "intrinsics: the prefixed position exists" false
+  | Some byte ->
+      let completion =
+        complete_at ~arch:Jide_jasmin.Arch.X86_64 (resolved, index) ~byte
+      in
+      check "intrinsics: the prefix is the name typed after the hash"
+        (String.equal completion.prefix "AES");
+      check "intrinsics: every item matches the prefix"
+        (List.for_all
+           (fun (item : Jide_engine.Complete.item) ->
+             String.starts_with ~prefix:"AES" item.label)
+           completion.items);
+      check "intrinsics: AESDEC is offered for the prefix"
+        (has_label completion "AESDEC");
+      check "intrinsics: ADD is dropped by the prefix"
+        (no_label completion "ADD")
 
 let test_the_fixed_tables () =
   let keywords = Jide_engine.Complete.keywords in
@@ -513,8 +594,8 @@ let test_a_required_file_and_a_partial_call () =
           check "require: the label is that file's signature"
             (String.equal signature.label "other(reg u64 a) -> reg u64")));
   match
-    Jide_engine.Complete.signature_help ~facts:entry_facts ~index:partial_index
-      ~resolve:resolved
+    Jide_engine.Complete.signature_help ~arch:Jide_jasmin.Arch.X86_64
+      ~facts:entry_facts ~index:partial_index ~resolve:resolved
       ~byte:(String.length partial_entry)
       ()
   with
@@ -531,6 +612,7 @@ let test_a_required_file_and_a_partial_call () =
         (signature.active = 1)
 
 let () =
+  test_intrinsics_after_a_hash ();
   test_completion_in_a_function_body ();
   test_block_scope ();
   test_completion_at_the_top_level ();

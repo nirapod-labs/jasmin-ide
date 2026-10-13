@@ -1,56 +1,75 @@
-(** The completion measurement: the names completion offers
-    against the resolver's own scope, at deterministically sampled bytes of a
-    corpus.
+(** The completion measurement: the names completion offers against the
+    resolver's own scope, and what completion offers after a [#] against the
+    compiler's own intrinsic list, for every architecture.
 
-    The requirement is that the names in scope at sampled positions equal the
-    resolver's scope. The two sides of that equality are read here from the
-    two places the feature reads them, and never from a second derivation:
-    the offered names are {!Jide_engine.Complete.completion}'s items minus
-    the lexer's keywords, and the scope is {!Jide_engine.Resolve.scope_at} at
-    the same byte of the same file. Completion's own prefix is applied to the
+    The name requirement is that the names in scope at sampled positions equal
+    the resolver's scope. The two sides of that equality are read here from the
+    two places the feature reads them, and never from a second derivation: the
+    offered names are {!Jide_engine.Complete.completion}'s items minus the
+    lexer's keywords, and the scope is {!Jide_engine.Resolve.scope_at} at the
+    same byte of the same file. Completion's own prefix is applied to the
     scope's names, because that is the answer a client sees: at a byte in the
-    middle of a word the resolver still holds every name, and completion
-    shows the ones the word being typed can still become.
+    middle of a word the resolver still holds every name, and completion shows
+    the ones the word being typed can still become.
 
-    A position where the byte follows a [#] is not a name position: completion
-    answers that trigger with the annotation keys, and those are not names in
-    scope. The run counts those apart instead of asking the question there.
-    A position outside every function the file declares is not asked either,
-    because the requirement covers positions inside expressions; it is counted
-    apart too. A position the resolver never reached has no scope to compare
-    with: it is counted apart and fails the run, because both sides would then
-    be empty and agree by default.
+    The intrinsic requirement is that, after a [#], completion offers exactly
+    the intrinsic names of the document's architecture, which is the list
+    [jasminc -arch <arch> -help-intrinsics] prints. The compiler's list is read
+    by running the command named by [--compiler] once per architecture, never
+    from the linked library, and every answer is compared with it. Every byte
+    just after a [#] in a corpus file is asked, sampled or not, because a
+    primitive call can be written anywhere in a body. The prefix is the word
+    being typed after that [#], as completion reads it.
 
-    The sample is fixed by three numbers, all printed by the run: [step] is
-    the distance between sampled bytes, [seed] is a constant folded into the
-    file's own hash to move the first sampled byte inside one step, and
-    [limit] bounds the whole run. Nothing here draws a random number, so the
-    same corpus, step, seed and limit name the same bytes on every host.
+    A position where the byte follows a [#] and an opening bracket is not a name
+    position: completion answers that with the annotation keys, which are not
+    names in scope. The run counts those apart instead of asking the question
+    there. A position outside every function the file declares is not asked
+    either, because the requirement covers positions inside expressions; it is
+    counted apart too. A position the resolver never reached has no scope to
+    compare with: it is counted apart and fails the run, because both sides
+    would then be empty and agree by default.
+
+    The sample is fixed by three numbers, all printed by the run: [step] is the
+    distance between sampled bytes, [seed] is a constant folded into the file's
+    own hash to move the first sampled byte inside one step, and [limit] bounds
+    the number of name positions compared. Nothing here draws a random number,
+    so the same corpus, step, seed and limit name the same bytes on every host.
+
+    A negative control runs on a document whose answer is known. Each
+    architecture must answer with its own list, and none may answer with another
+    architecture's list, or the comparison could not tell the architectures
+    apart.
 
     Usage:
 
     {v
-      completion_scope --corpus <dir> [--corpus <dir>]...
+      completion_scope --compiler <command> --corpus <dir> [--corpus <dir>]...
                        [--step <n>] [--seed <n>] [--limit <n>] [--quiet]
       completion_scope --selftest
     v}
 
-    Exit status: 0 when every position compared is equal and none is
-    unreached, 1 when one is not or one is unreached, 2 when the run cannot be
-    made (no corpus, no file, a bad argument). *)
+    Exit status: 0 when every name position compared is equal, none is
+    unreached, every intrinsic answer is equal and the negative control holds;
+    1 when one of those does not hold; 2 when the run cannot be made (no corpus,
+    no file, no compiler, a compiler whose list the program does not understand,
+    a bad argument). *)
 
 open Jide_engine
 
 let usage =
   String.concat "\n"
     [
-      "usage: completion_scope --corpus <dir> [--corpus <dir>]...";
+      "usage: completion_scope --compiler <command> --corpus <dir> [--corpus \
+       <dir>]...";
       "                       [--step <n>] [--seed <n>] [--limit <n>] [--quiet]";
       "       completion_scope --selftest";
       "";
       "For deterministically sampled bytes inside the functions of every";
       ".jazz and .jinc file under <dir>, compare the names completion offers";
-      "with the names the resolver's scope holds at that byte.";
+      "with the names the resolver's scope holds at that byte. After every hash";
+      "in those files, compare what completion offers with the compiler's own";
+      "intrinsic list (-arch <arch> -help-intrinsics) for every architecture.";
     ]
 
 (* ------------------------------------------------------------------ *)
@@ -97,6 +116,16 @@ let sample ~(step : int) ~(seed : int) ~(length : int) ~(file : string) =
     in
     walk [] first
 
+(* The byte just after each hash of the text. Every one is asked, because a
+   primitive call's name starts there, whether or not the sample reaches it. *)
+let after_hash_bytes (text : string) =
+  let rec collect acc index =
+    match String.index_from_opt text index '#' with
+    | None -> List.rev acc
+    | Some hash -> collect ((hash + 1) :: acc) (hash + 1)
+  in
+  collect [] 0
+
 (* The spans of the file's own functions, the ones a byte must be inside for
    the clause's "inside expressions" to hold. A namespace nests them, so the
    walk goes through every item's children. *)
@@ -139,10 +168,45 @@ let offered_names (completion : Complete.completion) =
     completion.Complete.items
   |> List.sort_uniq String.compare
 
+(* Every label a completion offers, sorted. After a hash every candidate is an
+   intrinsic, so no kind is filtered out. *)
+let offered_labels (completion : Complete.completion) =
+  List.map
+    (fun (item : Complete.item) -> item.Complete.label)
+    completion.Complete.items
+  |> List.sort_uniq String.compare
+
+(* The names of a compiler's list that a completion with [prefix] keeps. *)
+let expected_intrinsics ~(prefix : string) (names : string list) =
+  List.filter (String.starts_with ~prefix) names
+  |> List.sort_uniq String.compare
+
+(* The architecture a name of the lists stands for. The lists are read for
+   [Jide_jasmin.Intrinsics.arch_names], which are the names the library's own
+   architecture table parses. *)
+let arch_of_name (name : string) =
+  match Jide_jasmin.Arch.of_string name with
+  | Some arch -> arch
+  | None -> invalid_arg ("completion_scope: unknown architecture " ^ name)
+
+(* The architecture name completion is asked under when the question is about
+   names alone: the engine's default, which the names do not depend on. *)
+let names_arch = Jide_jasmin.Arch.X86_64
+
+type answer = {
+  arch : string;  (** the architecture the answer is for *)
+  offered : string list;  (** what completion showed, sorted *)
+  expected : string list;
+      (** the compiler's list, filtered by the same prefix *)
+  agrees : bool;
+}
+
 type outcome =
   | Annotation
-      (** the byte follows a [#]: the annotation keys, not a clause-1
-          position *)
+      (** the byte follows a hash and an opening bracket: the annotation keys,
+          not a name position *)
+  | Intrinsic of { prefix : string; answers : answer list }
+      (** the byte follows a hash: one answer per architecture *)
   | Outside  (** the byte is not inside any function the file declares *)
   | Unreached  (** the resolver never reached the file: there is no scope *)
   | Compared of {
@@ -152,31 +216,71 @@ type outcome =
       equal : bool;
     }
 
-(* [examine ~index ~resolve ~file ~spans ~byte] is the answer at one byte. It
-   is the whole of the comparison, so the self-test can ask it the same
-   question the run asks and look at the answer. *)
+(* [examine ~index ~resolve ~file ~spans ~lists ~byte] is the answer at one
+   byte. [lists] pairs each architecture with the compiler's list for it. It is
+   the whole of the comparison, so the self-test can ask it the same question
+   the run asks and look at the answer. *)
 let examine ~(index : Index.t) ~(resolve : Resolve.t) ~(file : string)
-    ~(spans : Jide_lang.Span.t list) ~(byte : int) =
+    ~(spans : Jide_lang.Span.t list) ~(lists : (string * string list) list)
+    ~(byte : int) =
   let text = index.Index.text in
-  if not (inside spans byte) then Outside
+  let completion =
+    Complete.completion ~arch:names_arch ~index ~resolve ~byte ()
+  in
+  let start = completion.Complete.span.Jide_lang.Span.start_byte in
+  let prefix = completion.Complete.prefix in
+  if start >= 1 && text.[start - 1] = '#' then
+    Intrinsic
+      {
+        prefix;
+        answers =
+          List.map
+            (fun (arch, names) ->
+              let offered =
+                offered_labels
+                  (Complete.completion ~arch:(arch_of_name arch) ~index ~resolve
+                     ~byte ())
+              in
+              let expected = expected_intrinsics ~prefix names in
+              { arch; offered; expected; agrees = offered = expected })
+            lists;
+      }
+  else if start >= 2 && text.[start - 1] = '[' && text.[start - 2] = '#' then
+    Annotation
+  else if not (inside spans byte) then Outside
   else
-    let completion = Complete.completion ~index ~resolve ~byte () in
-    let start = completion.Complete.span.Jide_lang.Span.start_byte in
-    let annotation =
-      (start >= 1 && text.[start - 1] = '#')
-      || (start >= 2 && text.[start - 1] = '[' && text.[start - 2] = '#')
-    in
-    if annotation then Annotation
-    else
-      let offered = offered_names completion in
-      let prefix = completion.Complete.prefix in
-      match Resolve.scope_at resolve ~file ~byte with
-      | None -> Unreached
-      | Some scope ->
-          let expected =
-            List.filter (String.starts_with ~prefix) (scope_names scope)
-          in
-          Compared { prefix; offered; expected; equal = offered = expected }
+    match Resolve.scope_at resolve ~file ~byte with
+    | None -> Unreached
+    | Some scope ->
+        let offered = offered_names completion in
+        let expected =
+          List.filter (String.starts_with ~prefix) (scope_names scope)
+        in
+        Compared { prefix; offered; expected; equal = offered = expected }
+
+(* The negative control of the intrinsic comparison, on a document whose answer
+   is known: a hash at the end of a body, with no prefix. Each architecture must
+   answer with its own list (the positive half), and no other architecture may
+   answer with the list of one that differs from it (the negative half). The
+   second half is what stops the comparison passing for every architecture at
+   once when completion ignores the architecture. *)
+let intrinsic_control (lists : (string * string list) list) =
+  let text = "fn f() {\n  reg u64 x;\n  x = #" in
+  let file = "/control.jazz" in
+  let index, _diagnostics = Index.of_text ~file text in
+  let resolve = Resolve.of_text ~idirs:[] ~read:(fun _ -> None) ~file text in
+  let byte = String.length text in
+  let answer arch =
+    offered_labels
+      (Complete.completion ~arch:(arch_of_name arch) ~index ~resolve ~byte ())
+  in
+  let own (arch, names) = answer arch = expected_intrinsics ~prefix:"" names in
+  let differs (arch, _) (other, names) =
+    String.equal arch other
+    || answer arch <> expected_intrinsics ~prefix:"" names
+  in
+  lists <> [] && List.for_all own lists
+  && List.for_all (fun left -> List.for_all (differs left) lists) lists
 
 (* ------------------------------------------------------------------ *)
 (* Finding the corpus *)
@@ -218,17 +322,30 @@ type tally = {
   mutable outside : int;
   mutable unreached : int;
   mutable nonempty : int;
+  mutable intrinsic_positions : int;
+  mutable intrinsic_equal : int;
+  mutable intrinsic_different : int;
 }
 
 let print_set names = "[" ^ String.concat ";" names ^ "]"
 
-let run ~(corpora : string list) ~(step : int) ~(seed : int) ~(limit : int)
-    ~(quiet : bool) =
+let run ~(compiler : string) ~(corpora : string list) ~(step : int)
+    ~(seed : int) ~(limit : int) ~(quiet : bool) =
   let files = List.concat_map corpus_files corpora in
   if files = [] then (
     Printf.eprintf "completion_scope: no .jazz or .jinc file under %s\n%!"
       (String.concat " " corpora);
     exit 2);
+  let lists =
+    try
+      List.map
+        (fun arch -> (arch, Compiler_help.names_of ~compiler ~arch))
+        Jide_jasmin.Intrinsics.arch_names
+    with Compiler_help.Unparsable message ->
+      Printf.eprintf "completion_scope: %s\n%!" message;
+      exit 2
+  in
+  let control = intrinsic_control lists in
   let tally =
     {
       files = 0;
@@ -240,95 +357,124 @@ let run ~(corpora : string list) ~(step : int) ~(seed : int) ~(limit : int)
       outside = 0;
       unreached = 0;
       nonempty = 0;
+      intrinsic_positions = 0;
+      intrinsic_equal = 0;
+      intrinsic_different = 0;
     }
   in
   let read path = try Some (read_file path) with Sys_error _ -> None in
-  let exception Stop of string in
-  (try
-     List.iter
-       (fun path ->
-         if tally.positions >= limit then raise (Stop "the limit was reached");
-         let file = Index.normalise path in
-         match read file with
-         | None -> ()
-         | Some text ->
-             tally.files <- tally.files + 1;
-             let resolve = Resolve.of_text ~idirs:[] ~read ~file text in
-             let index =
-               match Resolve.file resolve file with
-               | Some index -> index
-               | None -> fst (Index.of_text ~file text)
-             in
-             if index.Index.occurrences = [] then
-               tally.no_index <- tally.no_index + 1;
-             let spans = function_spans index in
-             let bytes =
-               sample ~step ~seed ~length:(String.length text) ~file
-             in
-             List.iter
-               (fun byte ->
-                 if tally.positions >= limit then ()
-                 else
-                   match examine ~index ~resolve ~file ~spans ~byte with
-                   | Annotation -> tally.annotation <- tally.annotation + 1
-                   | Outside -> tally.outside <- tally.outside + 1
-                   | Unreached ->
-                       tally.unreached <- tally.unreached + 1;
-                       Printf.printf
-                         "unreached %s:%d (the resolver never reached this file)\n\
-                          %!"
-                         file byte
-                   | Compared { prefix; offered; expected; equal } ->
-                       tally.positions <- tally.positions + 1;
-                       if expected <> [] then
-                         tally.nonempty <- tally.nonempty + 1;
-                       if equal then tally.equal <- tally.equal + 1
-                       else (
-                         tally.different <- tally.different + 1;
-                         Printf.printf
-                           "different %s:%d prefix=%S offered=%s expected=%s\n\
-                            %!"
-                           file byte prefix (print_set offered)
-                           (print_set expected)))
-               bytes)
-       files
-   with
-  | Stop _ -> ()
-  | exn ->
-      Printf.eprintf "completion_scope: the run raised: %s\n%!"
-        (Printexc.to_string exn);
-      exit 2);
+  List.iter
+    (fun path ->
+      let file = Index.normalise path in
+      match read file with
+      | None -> ()
+      | Some text ->
+          tally.files <- tally.files + 1;
+          let resolve = Resolve.of_text ~idirs:[] ~read ~file text in
+          let index =
+            match Resolve.file resolve file with
+            | Some index -> index
+            | None -> fst (Index.of_text ~file text)
+          in
+          if index.Index.occurrences = [] then
+            tally.no_index <- tally.no_index + 1;
+          let spans = function_spans index in
+          let bytes =
+            List.sort_uniq Int.compare
+              (sample ~step ~seed ~length:(String.length text) ~file
+              @ after_hash_bytes text)
+          in
+          List.iter
+            (fun byte ->
+              match examine ~index ~resolve ~file ~spans ~lists ~byte with
+              | Annotation -> tally.annotation <- tally.annotation + 1
+              | Outside -> tally.outside <- tally.outside + 1
+              | Unreached ->
+                  tally.unreached <- tally.unreached + 1;
+                  Printf.printf
+                    "unreached %s:%d (the resolver never reached this file)\n%!"
+                    file byte
+              | Intrinsic { prefix; answers } ->
+                  tally.intrinsic_positions <- tally.intrinsic_positions + 1;
+                  List.iter
+                    (fun answer ->
+                      if answer.agrees then
+                        tally.intrinsic_equal <- tally.intrinsic_equal + 1
+                      else (
+                        tally.intrinsic_different <-
+                          tally.intrinsic_different + 1;
+                        Printf.printf
+                          "different-intrinsic %s:%d arch=%s prefix=%S \
+                           offered=%s expected=%s\n\
+                           %!"
+                          file byte answer.arch prefix
+                          (print_set answer.offered)
+                          (print_set answer.expected)))
+                    answers
+              | Compared { prefix; offered; expected; equal } ->
+                  if tally.positions < limit then (
+                    tally.positions <- tally.positions + 1;
+                    if expected <> [] then tally.nonempty <- tally.nonempty + 1;
+                    if equal then tally.equal <- tally.equal + 1
+                    else (
+                      tally.different <- tally.different + 1;
+                      Printf.printf
+                        "different %s:%d prefix=%S offered=%s expected=%s\n%!"
+                        file byte prefix (print_set offered)
+                        (print_set expected))))
+            bytes)
+    files;
+  let clean =
+    tally.different = 0 && tally.unreached = 0
+    && tally.intrinsic_positions > 0
+    && tally.intrinsic_different = 0
+    && control
+  in
   if not quiet then (
     Printf.printf
       "completion_scope: %d files (%d with no index), %d positions compared, \
        %d equal, %d different, %d unreached; %d of the compared have a \
-       non-empty scope; %d skipped after #, %d outside a function; step %d, \
+       non-empty scope; %d skipped after #[, %d outside a function; step %d, \
        seed %d, limit %d\n\
        %!"
       tally.files tally.no_index tally.positions tally.equal tally.different
       tally.unreached tally.nonempty tally.annotation tally.outside step seed
       limit;
-    if tally.different = 0 && tally.unreached = 0 then
+    Printf.printf
+      "completion_scope: %d positions after #, each answered for %d \
+       architectures: %d answers equal, %d different\n\
+       %!"
+      tally.intrinsic_positions (List.length lists) tally.intrinsic_equal
+      tally.intrinsic_different;
+    Printf.printf
+      "completion_scope: negative control (each architecture answers its own \
+       list and no other's): %s\n\
+       %!"
+      (if control then "holds" else "FAILS");
+    if clean then
       Printf.printf
         "completion_scope: the names completion offers are the resolver's \
-         scope at every sampled byte\n\
+         scope at every sampled byte, and after # it offers the compiler's \
+         list for every architecture\n\
          %!"
     else
       Printf.printf
         "completion_scope: %d sampled byte(s) disagree with the resolver's \
-         scope and %d are unreached\n\
+         scope, %d are unreached, %d intrinsic answer(s) disagree with the \
+         compiler\n\
          %!"
-        tally.different tally.unreached);
-  if tally.different = 0 && tally.unreached = 0 then 0 else 1
+        tally.different tally.unreached tally.intrinsic_different);
+  if clean then 0 else 1
 
 (* ------------------------------------------------------------------ *)
 (* The self-test *)
 
 (* The self-test is the plumbing check `dune runtest` can make without a
-   corpus: the sample is deterministic, the comparison answers what it should
-   on a program whose scope is known, and the branch that reports a
-   difference is reached when the two sides do differ. It cannot prove the
-   equality over a corpus; only a run does. *)
+   corpus or a compiler: the sample is deterministic, the comparison answers
+   what it should on a program whose scope is known, the branch that reports
+   a difference is reached when the two sides do differ, and the intrinsic
+   answer is compared with the list it is given. It cannot prove the equality
+   over a corpus; only a run does. *)
 
 let failures = ref 0
 
@@ -363,6 +509,8 @@ let selftest () =
   check "sample: the same question twice"
     (sample ~step:7 ~seed:3 ~length:100 ~file:"dir/b.jazz"
     = sample ~step:7 ~seed:3 ~length:100 ~file:"dir/b.jazz");
+  check "hash: every byte after a hash is listed"
+    (after_hash_bytes "a#b#" = [ 2; 4 ]);
 
   (* The document the comparison is asked about: a parameter, a local and a
      function declared after the body that uses it, so the scope changes
@@ -411,28 +559,28 @@ let selftest () =
      [twice] is not in scope inside its own body, because pretyping pushes a
      function after its body, which is the rule the resolver implements. *)
   let position = at "= v;" + 2 in
-  (match examine ~index ~resolve ~file ~spans ~byte:position with
+  (match examine ~index ~resolve ~file ~spans ~lists:[] ~byte:position with
   | Compared { offered; expected; equal; _ } ->
       check "selftest: the local and the parameter are offered"
         (List.mem "r" offered && List.mem "v" offered);
       check "selftest: a function is not in scope in its own body"
         (not (List.mem "twice" offered));
       check "selftest: completion equals the scope" (equal && offered = expected)
-  | Annotation | Outside | Unreached ->
+  | Annotation | Intrinsic _ | Outside | Unreached ->
       check "selftest: the position is compared" false);
   (* The branch that reports a difference: the same position, with one name
      taken from the offered side, must not be equal. This is also the
      negative control of the comparison itself. *)
-  (match examine ~index ~resolve ~file ~spans ~byte:position with
+  (match examine ~index ~resolve ~file ~spans ~lists:[] ~byte:position with
   | Compared { offered; expected; _ } ->
       check "selftest: a missing name is a difference"
         (not (List.filter (fun name -> name <> "r") offered = expected))
-  | Annotation | Outside | Unreached ->
+  | Annotation | Intrinsic _ | Outside | Unreached ->
       check "selftest: the position is compared" false);
   (* Inside a call's parentheses, in the second function, [twice] is in scope
      and [caller] is not. *)
   let call = at "= twice(x);" + 2 in
-  (match examine ~index ~resolve ~file ~spans ~byte:call with
+  (match examine ~index ~resolve ~file ~spans ~lists:[] ~byte:call with
   | Compared { offered; expected; equal; _ } ->
       check "selftest: a declared function is offered"
         (List.mem "twice" offered);
@@ -440,17 +588,17 @@ let selftest () =
         (not (List.mem "caller" offered));
       check "selftest: the call position equals the scope"
         (equal && offered = expected)
-  | Annotation | Outside | Unreached ->
+  | Annotation | Intrinsic _ | Outside | Unreached ->
       check "selftest: the call position is compared" false);
-  (* A byte after a [#] is an annotation position, counted apart. The text
-     need not be a valid annotation: completion's rule is the character, and
-     the comment keeps the program itself parseable. *)
+  (* A byte after a hash and an opening bracket is an annotation position,
+     counted apart. The text need not be a valid annotation: completion's rule
+     is the characters, and the comment keeps the program itself parseable. *)
   let annotated =
     String.concat "\n"
       [
         "fn f(reg u64 x) -> reg u64 {";
         "  reg u64 y;";
-        "  y = x; // #abc";
+        "  y = x; // #[ct]";
         "  return y;";
         "}";
         "";
@@ -462,18 +610,10 @@ let selftest () =
     Resolve.of_text ~idirs:[] ~read:(fun _ -> None) ~file annotated
   in
   let spans = function_spans index in
-  let after_hash =
-    match String.index_opt annotated '#' with
+  let after_bracket =
+    match String.index_opt annotated '[' with
     | None -> 0
-    | Some hash ->
-        let rec skip index =
-          if index >= String.length annotated then index
-          else
-            match annotated.[index] with
-            | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> skip (index + 1)
-            | _ -> index
-        in
-        skip (hash + 1)
+    | Some bracket -> bracket + 3
   in
   check "selftest: a byte after # is an annotation position"
     (match examine ~index ~resolve ~file ~spans ~byte:after_hash with

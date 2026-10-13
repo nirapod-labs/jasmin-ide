@@ -50,17 +50,25 @@
 #   USES_TSV                a file to write one tab-separated line per check to.
 #   USES_KEEP               a directory to copy the raw answer of every check to.
 #   USES_NEGATIVE_CONTROL   when 1, the comparison plants a wrong binding (the
-#                           declaration of the first measured use of the checked
-#                           file moved) in every accepted check that has one. The
-#                           run then passes only when every such check reports it.
+#                           declaration of the first measured use of each accepted
+#                           check moved, in the checked file or in a file it
+#                           requires). The planted uses are differences like any
+#                           other, so the run must fail: it exits 1 when every
+#                           accepted check with a measured use reported its
+#                           planted binding, and 2 when one went unreported, since
+#                           a comparison that misses a planted binding cannot be
+#                           trusted. A planted use of a file two checks reach is
+#                           judged differently by the two, so in this mode such a
+#                           conflict is counted and printed instead of stopping
+#                           the run.
 #
 # Exit status: 0 when every measured use is the compiler's declaration in its own
-# namespace, every file was accepted and the checks agree (negative-control mode:
-# when the planted binding was reported in every accepted check with a measured
-# use); 1 when a measured use is not, a file was refused, or the checks disagree
-# about a use (negative-control mode: when one planted binding went unreported);
-# 2 when the script cannot run (bad arguments, no corpus, no tool, the tool
-# answering nothing, or counts that do not add up).
+# namespace, every file was accepted and the checks agree; 1 when a measured use
+# is not, or a file was refused (negative-control mode: when every planted
+# binding was reported, which is the result the control must give); 2 when the
+# script cannot run (bad arguments, no corpus, no tool, the tool answering
+# nothing, counts that do not add up, two checks judging one use differently, or,
+# in negative-control mode, a planted binding that went unreported).
 
 set -u
 
@@ -183,6 +191,7 @@ done <"$list"
 #
 #   index relative arch tool-exit accepted typed measured same elsewhere
 #   unresolved other-name misplaced excluded-flag excluded-temporary unchecked
+#   planted
 #
 # The counts are the tool's own for this check. Its ledger, one line per use,
 # goes to $work/ledger.<index> with the architecture in front, and its stderr to
@@ -212,15 +221,18 @@ check_one() {
 	xflag=$(field excluded-flag)
 	xtemp=$(field excluded-temporary)
 	unchecked=$(field unchecked)
+	planted=$(field planted)
 	[ -n "$accepted" ] || accepted=unknown
+	[ -n "$planted" ] || planted=unknown
 	for value in typed measured same elsewhere unresolved othername misplaced xflag xtemp unchecked; do
 		eval "current=\${$value}"
 		[ -n "$current" ] || eval "$value=unknown"
 	done
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"$index" "$relative" "$arch" "$status" "$accepted" \
 		"$typed" "$measured" "$same" "$elsewhere" "$unresolved" \
-		"$othername" "$misplaced" "$xflag" "$xtemp" "$unchecked" >"$work/result.$index"
+		"$othername" "$misplaced" "$xflag" "$xtemp" "$unchecked" \
+		"$planted" >"$work/result.$index"
 }
 
 index=0
@@ -341,11 +353,14 @@ rejected=0
 noanswer=0
 broken=0
 detected=0
+undetected=0
 mismatches=$work/mismatches
+undetected_list=$work/undetected
 excluded_list=$work/excluded
 : >"$mismatches"
 : >"$excluded_list"
-while IFS=$tab read -r ordinal relative arch status accepted t m s e u o p xf xt c; do
+: >"$undetected_list"
+while IFS=$tab read -r ordinal relative arch status accepted t m s e u o p xf xt c planted; do
 	[ -n "${relative:-}" ] || continue
 	answer=$work/answer.$ordinal
 	if [ "$t" = unknown ] || [ "$s" = unknown ]; then
@@ -364,9 +379,15 @@ while IFS=$tab read -r ordinal relative arch status accepted t m s e u o p xf xt
 		accepted_checks=$((accepted_checks + 1))
 		if [ "$m" -gt 0 ]; then
 			measurable=$((measurable + 1))
-		fi
-		if [ $((e + u + o + p)) -gt 0 ]; then
-			detected=$((detected + 1))
+			# Under the control a check with a measured use must have a planted
+			# binding, and must report a difference for it.
+			if [ "$planted" = yes ] && [ $((e + u + o + p)) -gt 0 ]; then
+				detected=$((detected + 1))
+			else
+				undetected=$((undetected + 1))
+				printf '%s (%s): planted %s, %s difference(s) reported\n' \
+					"$relative" "$arch" "$planted" $((e + u + o + p)) >>"$undetected_list"
+			fi
 		fi
 	else
 		rejected=$((rejected + 1))
@@ -426,7 +447,11 @@ if [ "$sum" -ne "$typed" ]; then
 	die "the counts do not add up: $measured measured + $excluded excluded + $class_unchecked unchecked = $sum, not $typed"
 fi
 if [ "$conflicts" -gt 0 ]; then
-	die "$conflicts use(s) are judged differently by two checks of one architecture: the comparison is not consistent"
+	if [ "$negative" = 1 ]; then
+		say "negative control: $conflicts use(s) are judged differently by two checks of one architecture, since a planted use of a file is reached unplanted from another check"
+	else
+		die "$conflicts use(s) are judged differently by two checks of one architecture: the comparison is not consistent"
+	fi
 fi
 if [ "$measured" -gt 0 ]; then
 	pct=$(awk -v a="$class_same" -v b="$measured" 'BEGIN { printf "%.4f", 100 * a / b }')
@@ -466,13 +491,17 @@ fi
 
 if [ "$negative" = 1 ]; then
 	# A check with no measured use has nothing to plant a wrong binding on, so the
-	# control expects one report from each check that has one.
-	if [ "$measurable" -gt 0 ] && [ "$detected" -eq "$measurable" ]; then
-		say "negative control: a wrong binding was planted in each of the $measurable accepted checks that have a measured use, and the comparison reported it in $detected"
-		exit 0
+	# control expects one report from each check that has one. The planted uses
+	# are differences, so the run fails, as it must.
+	if [ "$measurable" -gt 0 ] && [ "$undetected" -eq 0 ]; then
+		say "negative control: a wrong binding was planted in each of the $measurable accepted checks that have a measured use, and the comparison reported it in $detected; the run fails, as it must"
+		exit 1
 	fi
-	say "negative control failed: the planted wrong binding was reported in $detected of $measurable accepted checks with a measured use"
-	exit 1
+	while IFS= read -r line; do
+		say "unreported $line"
+	done <"$undetected_list"
+	say "negative control broken: the planted wrong binding was reported in $detected of $measurable accepted checks with a measured use"
+	exit 2
 fi
 
 if [ "$rejected" -eq 0 ] && [ "$class_elsewhere" -eq 0 ] && [ "$class_unresolved" -eq 0 ] &&

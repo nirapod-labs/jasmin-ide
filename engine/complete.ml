@@ -15,6 +15,7 @@ type kind =
   | Global
   | Type_alias
   | Annotation_key
+  | Intrinsic
 
 type item = { label : string; kind : kind; detail : string option }
 
@@ -89,17 +90,23 @@ let word_start (text : string) (byte : int) =
 let starts_with ~(prefix : string) (label : string) =
   String.starts_with ~prefix label
 
-(* The annotation keys are what a [#] asks for, and what the design's [:]
-   trigger asks for. The [#] is read from the text when the client names no
-   trigger, which is what a request arriving after the character looks like
-   when the client sends no trigger kind. *)
-let annotation_context (text : string) ~(start : int) (trigger : trigger option)
-    =
+(* What the word being typed is completed as. A [#] written directly before
+   it asks for the intrinsics of the document's architecture, which is how a
+   primitive call is written. A [#] followed by an opening bracket asks for the
+   annotation keys, and so does the design's [:] trigger. The [#] is read from
+   the text when the client names no trigger, which is what a request arriving
+   after the character looks like when the client sends no trigger kind. *)
+type context = Names | Intrinsics | Annotation_keys
+
+let context_at (text : string) ~(start : int) (trigger : trigger option) =
+  let after_bracket =
+    start >= 2 && text.[start - 1] = '[' && text.[start - 2] = '#'
+  in
   match trigger with
-  | Some Hash | Some Colon -> true
-  | None ->
-      (start >= 1 && text.[start - 1] = '#')
-      || (start >= 2 && text.[start - 1] = '[' && text.[start - 2] = '#')
+  | Some Colon -> Annotation_keys
+  | _ when after_bracket -> Annotation_keys
+  | Some Hash -> Intrinsics
+  | None -> if start >= 1 && text.[start - 1] = '#' then Intrinsics else Names
 
 (* ------------------------------------------------------------------ *)
 (* Completion *)
@@ -122,7 +129,8 @@ let rank = function
   | Global -> 3
   | Type_alias -> 4
   | Annotation_key -> 5
-  | Keyword -> 6
+  | Intrinsic -> 6
+  | Keyword -> 7
 
 let compare_item left right =
   match String.compare left.label right.label with
@@ -144,27 +152,32 @@ let items_of_scope (scope : Resolve.scope) =
 
 let empty_scope = { Resolve.types = []; funs = []; vars = [] }
 
-let completion ?trigger ~(index : Index.t) ~(resolve : Resolve.t) ~(byte : int)
-    () =
+let completion ?trigger ~(arch : Jide_jasmin.Adapter.arch) ~(index : Index.t)
+    ~(resolve : Resolve.t) ~(byte : int) () =
   let text = index.Index.text in
   let byte = max 0 (min byte (String.length text)) in
   let start = word_start text byte in
   let prefix = String.sub text start (byte - start) in
   let candidates =
-    if annotation_context text ~start trigger then
-      List.map
-        (fun key -> { label = key; kind = Annotation_key; detail = None })
-        annotation_keys
-    else
-      let scope =
-        match Resolve.scope_at resolve ~file:index.Index.file ~byte with
-        | Some scope -> scope
-        | None -> empty_scope
-      in
-      List.map
-        (fun word -> { label = word; kind = Keyword; detail = None })
-        keywords
-      @ items_of_scope scope
+    match context_at text ~start trigger with
+    | Annotation_keys ->
+        List.map
+          (fun key -> { label = key; kind = Annotation_key; detail = None })
+          annotation_keys
+    | Intrinsics ->
+        List.map
+          (fun name -> { label = name; kind = Intrinsic; detail = None })
+          (Jide_jasmin.Intrinsics.names ~arch:(Jide_jasmin.Arch.to_string arch))
+    | Names ->
+        let scope =
+          match Resolve.scope_at resolve ~file:index.Index.file ~byte with
+          | Some scope -> scope
+          | None -> empty_scope
+        in
+        List.map
+          (fun word -> { label = word; kind = Keyword; detail = None })
+          keywords
+        @ items_of_scope scope
   in
   let items =
     candidates
@@ -362,12 +375,55 @@ let declaration_of_call (resolve : Resolve.t) ~(file : string) ~(start : int)
           |> Option.map (fun (binding : Resolve.binding) ->
                  binding.Resolve.declaration))
 
-let signature_help ?(facts = Facts.empty) ~(index : Index.t)
-    ~(resolve : Resolve.t) ~(byte : int) () =
+(* The parameter labels of an intrinsic. The compiler's description holds a
+   type per argument and no name, so the type is what the editor shows: the
+   spelling is Jasmin's own, [u64] for a word, [bool] and [int] for the two
+   sorts that have no width, and [u8[4]] for an array. *)
+let intrinsic_label (ty : Jide_jasmin.Intrinsics.ty) =
+  match ty with
+  | Jide_jasmin.Intrinsics.Bool -> "bool"
+  | Jide_jasmin.Intrinsics.Int -> "int"
+  | Jide_jasmin.Intrinsics.Word { signed; bits } ->
+      (if signed then "s" else "u") ^ string_of_int bits
+  | Jide_jasmin.Intrinsics.Array { bits; length } ->
+      Printf.sprintf "u%d[%s]" bits length
+
+(* An intrinsic call, answered from the compiler's own table for [arch]. The
+   name is resolved by the compiler's own function, so every spelling it
+   accepts (a size suffix, a vector suffix, an arm flag or condition) is
+   resolved the way a check would resolve it, and a name no table row holds
+   has no description and therefore no answer. *)
+let intrinsic_signature ~(arch : Jide_jasmin.Adapter.arch) ~(callee : string) =
+  match
+    Jide_jasmin.Intrinsics.resolve
+      ~arch:(Jide_jasmin.Arch.to_string arch)
+      callee
+  with
+  | None -> None
+  | Some description ->
+      let parameters =
+        List.map intrinsic_label description.Jide_jasmin.Intrinsics.arguments
+      in
+      let results =
+        List.map intrinsic_label description.Jide_jasmin.Intrinsics.results
+      in
+      Some
+        {
+          label = label callee parameters results;
+          parameters;
+          active = 0;
+          callee;
+        }
+
+let signature_help ~(arch : Jide_jasmin.Adapter.arch) ?(facts = Facts.empty)
+    ~(index : Index.t) ~(resolve : Resolve.t) ~(byte : int) () =
   match call_at index.Index.text byte with
   | None -> None
   | Some (callee, start, commas, intrinsic) -> (
-      if intrinsic then None
+      if intrinsic then
+        Option.map
+          (fun (signature : signature) -> { signature with active = commas })
+          (intrinsic_signature ~arch ~callee)
       else
         match
           declaration_of_call resolve ~file:index.Index.file ~start ~callee
