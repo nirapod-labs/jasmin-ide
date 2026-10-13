@@ -719,3 +719,11 @@ let main () =
         Printf.printf "result: %d comparisons differ\n" total;
         1)
 
+let () =
+  let code =
+    try main ()
+    with Run_failed message | Oracle.Failed message ->
+      prerr_endline ("arity: " ^ message);
+      2
+  in
+  exit code
