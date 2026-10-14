@@ -794,7 +794,8 @@ let test_snapshot_after_a_check () =
         match use_byte index ~name:"c" ~n:1 with Some byte -> byte | None -> 0
       in
       let completion =
-        Jide_engine.Complete.completion ~index ~resolve ~byte:at ()
+        Jide_engine.Complete.completion ~arch:Jide_jasmin.Arch.X86_64 ~index
+          ~resolve ~byte:at ()
       in
       check "snapshot: completion answers from it"
         (match completion.Jide_engine.Complete.items with
@@ -1194,6 +1195,7 @@ let check_reports_required_in file ~context:_ ~arch:_ ~call_conv:_ ~file:_
           Jide_jasmin.Adapter.file;
           text = required_text;
           diagnostics = [ required_diagnostic ];
+          site = Some 0;
         };
       ];
   }

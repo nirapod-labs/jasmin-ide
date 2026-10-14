@@ -615,10 +615,62 @@ let selftest () =
     | None -> 0
     | Some bracket -> bracket + 3
   in
-  check "selftest: a byte after # is an annotation position"
-    (match examine ~index ~resolve ~file ~spans ~byte:after_hash with
+  check "selftest: a byte after #[ is an annotation position"
+    (match
+       examine ~index ~resolve ~file ~spans ~lists:[] ~byte:after_bracket
+     with
     | Annotation -> true
     | _ -> false);
+  (* A byte right after a hash is an intrinsic position, whatever follows it: a
+     name written there is the prefix, and the answer is one per architecture. *)
+  let hashed_text = "fn f() {\n  reg u64 x;\n  x = #" in
+  let hashed_file = "/hashed.jazz" in
+  let hashed_index, _diagnostics =
+    Index.of_text ~file:hashed_file hashed_text
+  in
+  let hashed_resolve =
+    Resolve.of_text ~idirs:[]
+      ~read:(fun _ -> None)
+      ~file:hashed_file hashed_text
+  in
+  let hashed_spans = function_spans hashed_index in
+  let at_hash = String.length hashed_text in
+  let names = Jide_jasmin.Intrinsics.names ~arch:"x86-64" in
+  let answers lists =
+    match
+      examine ~index:hashed_index ~resolve:hashed_resolve ~file:hashed_file
+        ~spans:hashed_spans ~lists ~byte:at_hash
+    with
+    | Intrinsic { answers; _ } -> answers
+    | Annotation | Outside | Unreached | Compared _ -> []
+  in
+  (match answers [ ("x86-64", names) ] with
+  | [ answer ] ->
+      check "selftest: after # the answer is the architecture's list"
+        answer.agrees;
+      check "selftest: after # the offered names are the table's"
+        (answer.offered = List.sort_uniq String.compare names)
+  | _ -> check "selftest: after # the position is an intrinsic position" false);
+  (* The negative control of the comparison: a list with one name added is a
+     difference, and so is a list with one name taken away. *)
+  (match answers [ ("x86-64", "NOT_A_NAME" :: names) ] with
+  | [ answer ] ->
+      check "negative control: a list with a name added is a difference"
+        (not answer.agrees)
+  | _ -> check "negative control: the position is an intrinsic position" false);
+  (match answers [ ("x86-64", List.tl names) ] with
+  | [ answer ] ->
+      check "negative control: a list with a name taken away is a difference"
+        (not answer.agrees)
+  | _ -> check "negative control: the position is an intrinsic position" false);
+  check "selftest: the control holds for two architectures with their own lists"
+    (intrinsic_control
+       [
+         ("x86-64", names);
+         ("arm-m4", Jide_jasmin.Intrinsics.names ~arch:"arm-m4");
+       ]);
+  check "negative control: an answer that is another architecture's list fails"
+    (not (intrinsic_control [ ("x86-64", names); ("arm-m4", names) ]));
   (* A file the resolver never read has no scope. Its position must come back
      unreached and never compared, because an empty scope on both sides would
      agree by default. The position is the operand after the first [=] of the
@@ -628,7 +680,8 @@ let selftest () =
   in
   check "negative control: a file the resolver never read is unreached"
     (match
-       examine ~index ~resolve ~file:"/never-read.jazz" ~spans ~byte:operand
+       examine ~index ~resolve ~file:"/never-read.jazz" ~spans ~lists:[]
+         ~byte:operand
      with
     | Unreached -> true
     | _ -> false);
@@ -642,12 +695,17 @@ let selftest () =
 
 let () =
   let corpora = ref []
+  and compiler = ref None
   and step = ref 13
   and seed = ref 1
   and limit = ref 20000 in
   let quiet = ref false and selftest_requested = ref false in
   let spec =
     [
+      ( "--compiler",
+        Arg.String (fun command -> compiler := Some command),
+        "the compiler command; -arch <arch> -help-intrinsics gives its list \
+         (required for a corpus run)" );
       ( "--corpus",
         Arg.String (fun directory -> corpora := directory :: !corpora),
         "a corpus directory to sample" );
@@ -655,7 +713,7 @@ let () =
       ("--seed", Arg.Set_int seed, "the seed folded into the sample (default 1)");
       ( "--limit",
         Arg.Set_int limit,
-        "the most positions to compare (default 20000)" );
+        "the most name positions to compare (default 20000)" );
       ("--quiet", Arg.Set quiet, "print only the differences");
       ( "--selftest",
         Arg.Set selftest_requested,
@@ -672,4 +730,13 @@ let () =
     if corpora = [] then (
       prerr_endline usage;
       exit 2);
-    exit (run ~corpora ~step:!step ~seed:!seed ~limit:!limit ~quiet:!quiet)
+    match !compiler with
+    | None ->
+        prerr_endline
+          "completion_scope: a corpus run needs --compiler, the reference \
+           jasminc";
+        exit 2
+    | Some compiler ->
+        exit
+          (run ~compiler ~corpora ~step:!step ~seed:!seed ~limit:!limit
+             ~quiet:!quiet)

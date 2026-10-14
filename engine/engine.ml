@@ -160,10 +160,13 @@ let project_of t (document : Document.t) =
   | Some path -> project_above t (Filename.dirname path)
 
 (* The settings one document is checked under: the base first, then the
-   nearest project file above the document, which is the order the design's
-   section 7 gives for the two sources this module knows about. *)
+   nearest project file above the document. The named include paths of the
+   [JASMINPATH] environment variable come after the ones those give, as the
+   compiler binds them after its [-I] options, so the check, the context walk
+   and the resolver all read a [from NAME require] the same way. *)
 let settings_for t (document : Document.t) =
-  settings_of_project ~base:t.base (project_of t document)
+  let settings = settings_of_project ~base:t.base (project_of t document) in
+  { settings with idirs = Jide_jasmin.Adapter.with_jasmin_path settings.idirs }
 
 (* The settings a document with the root's own project above it would get, so
    a caller that is not looking at one document may ask what the workspace is
