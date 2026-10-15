@@ -361,3 +361,195 @@ let test_a_rename_from_a_call_rewrites_the_declaration () =
             }\n")
 
 (* A keyword is not a name: the lexer has a token for it, so no rename. *)
+let test_a_rename_is_refused_on_a_keyword () =
+  let file = "/work/variables.jazz" in
+  let result =
+    renamed ~file ~text:variables ~within:"reg u32 count;" ~name:"reg"
+      ~new_name:"other" ()
+  in
+  check
+    ("keyword: refused, saying " ^ refusal result)
+    (match result with
+    | Error reason ->
+        String.equal reason "a keyword is not a name a rename can change"
+    | Ok _ -> false);
+  check "keyword: prepareRename answers nothing at the keyword"
+    (let resolved = resolve file variables in
+     Jide_engine.Rename.prepare ~index:(index_of resolved file)
+       ~resolve:resolved
+       ~byte:(byte variables ~within:"reg u32 count;" ~name:"reg")
+     = None)
+
+(* A keyword is refused even as the new name, and the reason names it. *)
+let test_a_keyword_is_not_a_valid_new_name () =
+  let file = "/work/variables.jazz" in
+  match
+    renamed ~file ~text:variables ~within:"count = a;" ~name:"count"
+      ~new_name:"fn" ()
+  with
+  | Ok _ -> check "new name: a keyword is accepted as a name" false
+  | Error reason ->
+      check "new name: a keyword is refused, saying what it is"
+        (String.equal reason "fn is not a valid Jasmin identifier")
+
+(* An intrinsic is not a declaration: [#spill(x)] is a primitive of the
+   compiler, not a name the program introduces. *)
+let intrinsics = "fn f(reg u32 x) -> reg u32 {\n  #spill(x);\n  return x;\n}\n"
+
+let test_a_rename_is_refused_on_an_intrinsic () =
+  let file = "/work/intrinsics.jazz" in
+  let result =
+    renamed ~file ~text:intrinsics ~within:"#spill(x);" ~name:"spill"
+      ~new_name:"other" ()
+  in
+  check
+    ("intrinsic: refused, saying " ^ refusal result)
+    (match result with
+    | Error reason ->
+        String.equal reason
+          "an intrinsic is fixed by the compiler and cannot be renamed"
+    | Ok _ -> false);
+  check "intrinsic: prepareRename answers nothing"
+    (let resolved = resolve file intrinsics in
+     Jide_engine.Rename.prepare ~index:(index_of resolved file)
+       ~resolve:resolved
+       ~byte:(byte intrinsics ~within:"#spill(x);" ~name:"spill")
+     = None)
+
+(* The new name must lex as one identifier: not empty, not starting with a
+   digit, not holding a character the lexer has no rule for, not qualified. *)
+let test_an_invalid_identifier_is_refused () =
+  let file = "/work/variables.jazz" in
+  let refused_for name =
+    match
+      renamed ~file ~text:variables ~within:"count = a;" ~name:"count"
+        ~new_name:name ()
+    with
+    | Ok _ -> Printf.sprintf "accepted %S" name
+    | Error reason -> reason
+  in
+  check "invalid: an empty name is refused"
+    (match
+       renamed ~file ~text:variables ~within:"count = a;" ~name:"count"
+         ~new_name:"" ()
+     with
+    | Error reason -> String.equal reason " is not a valid Jasmin identifier"
+    | Ok _ -> false);
+  check "invalid: a name starting with a digit is refused"
+    (String.equal (refused_for "1count")
+       "1count is not a valid Jasmin identifier");
+  check "invalid: a name with a space is refused"
+    (String.equal (refused_for "two words")
+       "two words is not a valid Jasmin identifier");
+  check "invalid: a name with a hyphen is refused"
+    (String.equal (refused_for "two-words")
+       "two-words is not a valid Jasmin identifier");
+  check "invalid: a qualified name is refused"
+    (String.equal (refused_for "A::b") "A::b is not a valid Jasmin identifier");
+  check "invalid: a valid name is accepted"
+    (String.starts_with ~prefix:"accepted" (refused_for "total"))
+
+(* The rule that keeps a rename safe: a name that a different declaration
+   already holds where the rename would write it is refused. Here [count] is
+   renamed to [other], but [other] is a live declaration in the same block at
+   the byte where [count] is used. *)
+let collision =
+  "fn f(reg u32 a) -> reg u32 {\n\
+  \  reg u32 count;\n\
+  \  reg u32 other;\n\
+  \  count = a;\n\
+  \  other = a;\n\
+  \  return count;\n\
+   }\n"
+
+let test_a_collision_with_a_visible_declaration_is_refused () =
+  let file = "/work/collision.jazz" in
+  let result =
+    renamed ~file ~text:collision ~within:"count = a;" ~name:"count"
+      ~new_name:"other" ()
+  in
+  check
+    ("collision: refused, saying " ^ refusal result)
+    (match result with
+    | Error reason ->
+        String.starts_with ~prefix:"other already names a different declaration"
+          reason
+        && String.ends_with ~suffix:"/work/collision.jazz)" reason
+    | Ok _ -> false)
+
+(* A collision is not a collision when the other declaration is not in scope
+   where the renamed name would be written: [other] is declared in a block
+   that ends before [count] is used, so [count] may become [other]. *)
+let no_collision =
+  "fn f(reg u32 a) -> reg u32 {\n\
+  \  if (a < 1) {\n\
+  \    reg u32 other;\n\
+  \    other = a;\n\
+  \  }\n\
+  \  reg u32 count;\n\
+  \  count = a;\n\
+  \  return count;\n\
+   }\n"
+
+let test_a_name_out_of_scope_is_not_a_collision () =
+  let file = "/work/no-collision.jazz" in
+  match
+    renamed ~file ~text:no_collision ~within:"count = a;" ~name:"count"
+      ~new_name:"other" ()
+  with
+  | Error reason ->
+      check ("no collision: refused, though it is safe: " ^ reason) false
+  | Ok edits ->
+      check "no collision: the rename goes through"
+        (String.equal (apply no_collision edits)
+           "fn f(reg u32 a) -> reg u32 {\n\
+           \  if (a < 1) {\n\
+           \    reg u32 other;\n\
+           \    other = a;\n\
+           \  }\n\
+           \  reg u32 other;\n\
+           \  other = a;\n\
+           \  return other;\n\
+            }\n")
+
+(* Rename and rename back restore the text exactly. This is the text-level
+   statement the gate asks for: the two edits composed are the identity. *)
+let test_rename_and_rename_back_restores_the_text () =
+  let file = "/work/variables.jazz" in
+  match
+    renamed ~file ~text:variables ~within:"count = a;" ~name:"count"
+      ~new_name:"total" ()
+  with
+  | Error reason ->
+      check ("idempotence: the rename is refused: " ^ reason) false
+  | Ok forward -> (
+      let renamed_text = apply variables forward in
+      let resolved = resolve file renamed_text in
+      let back =
+        Jide_engine.Rename.rename ~files:[] ~index:(index_of resolved file)
+          ~resolve:resolved
+          ~byte:(byte renamed_text ~within:"total = a;" ~name:"total")
+          ~new_name:"count" ~broken:nothing_broken
+      in
+      match back with
+      | Error reason ->
+          check ("idempotence: renaming back is refused: " ^ reason) false
+      | Ok backward ->
+          check "idempotence: renaming back restores the text exactly"
+            (String.equal (apply renamed_text backward) variables))
+
+(* Two same-named declarations in different blocks are two symbols. A rename
+   of one leaves the other's occurrences as they are, and the same name in the
+   other block keeps its own name. *)
+let two_blocks =
+  "fn f(reg u32 a) -> reg u32 {\n\
+  \  reg u32 value;\n\
+  \  value = a;\n\
+  \  if (a < 1) {\n\
+  \    reg u32 value;\n\
+  \    value = a;\n\
+  \    a = value;\n\
+  \  }\n\
+  \  return value;\n\
+   }\n"
+
