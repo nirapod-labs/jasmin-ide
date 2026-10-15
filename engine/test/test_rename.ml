@@ -553,3 +553,326 @@ let two_blocks =
   \  return value;\n\
    }\n"
 
+let test_two_same_named_declarations_are_not_conflated () =
+  let file = "/work/two-blocks.jazz" in
+  (* The inner declaration: renaming it must not touch the outer one. *)
+  let inner =
+    match
+      renamed ~file ~text:two_blocks
+        ~within:"reg u32 value;\n    value = a;\n    a = value;" ~name:"value"
+        ~new_name:"inner" ()
+    with
+    | Error reason -> Error reason
+    | Ok edits -> Ok (apply two_blocks edits)
+  in
+  (match inner with
+  | Error reason ->
+      check ("two blocks: the inner rename is refused: " ^ reason) false
+  | Ok text ->
+      check "two blocks: the inner declaration and its uses are the inner one"
+        (String.equal text
+           "fn f(reg u32 a) -> reg u32 {\n\
+           \  reg u32 value;\n\
+           \  value = a;\n\
+           \  if (a < 1) {\n\
+           \    reg u32 inner;\n\
+           \    inner = a;\n\
+           \    a = inner;\n\
+           \  }\n\
+           \  return value;\n\
+            }\n"));
+  (* And the outer one, which must leave the inner block alone. *)
+  match
+    renamed ~file ~text:two_blocks ~within:"reg u32 value;\n  value = a;"
+      ~name:"value" ~new_name:"outer" ()
+  with
+  | Error reason ->
+      check ("two blocks: the outer rename is refused: " ^ reason) false
+  | Ok edits ->
+      check "two blocks: the outer rename leaves the inner block alone"
+        (String.equal (apply two_blocks edits)
+           "fn f(reg u32 a) -> reg u32 {\n\
+           \  reg u32 outer;\n\
+           \  outer = a;\n\
+           \  if (a < 1) {\n\
+           \    reg u32 value;\n\
+           \    value = a;\n\
+           \    a = value;\n\
+           \  }\n\
+           \  return outer;\n\
+            }\n")
+
+(* A function name and a variable name are different name spaces: renaming a
+   variable to a function's name is not a collision. *)
+let separate_spaces =
+  "fn helper(reg u32 a) -> reg u32 { return a; }\n\
+   fn f(reg u32 a) -> reg u32 {\n\
+  \  reg u32 x;\n\
+  \  x = helper(a);\n\
+  \  return x;\n\
+   }\n"
+
+let test_a_function_name_is_another_name_space () =
+  let file = "/work/spaces.jazz" in
+  match
+    renamed ~file ~text:separate_spaces ~within:"x = helper(a);" ~name:"x"
+      ~new_name:"helper" ()
+  with
+  | Error reason ->
+      check ("name spaces: a variable took a function's name: " ^ reason) false
+  | Ok edits ->
+      check "name spaces: a variable may take a function's name"
+        (String.equal
+           (apply separate_spaces edits)
+           "fn helper(reg u32 a) -> reg u32 { return a; }\n\
+            fn f(reg u32 a) -> reg u32 {\n\
+           \  reg u32 helper;\n\
+           \  helper = helper(a);\n\
+           \  return helper;\n\
+            }\n")
+
+(* The require closure rule from design section 10: while any file in the
+   document's require closure has recovered syntax errors, no rename. *)
+let requiring =
+  "require \"lib.jinc\"\n\
+   fn f(reg u32 a) -> reg u32 {\n\
+  \  reg u32 x;\n\
+  \  x = a;\n\
+  \  return x;\n\
+   }\n"
+
+let library = "fn lib_fn(reg u32 a) -> reg u32 { return a; }\n"
+
+let test_a_broken_file_in_the_require_closure_refuses () =
+  let file = "/work/main.jazz" in
+  let library_file = "/work/lib.jinc" in
+  let files = [ ("lib.jinc", library) ] in
+  let resolved = resolve ~files file requiring in
+  let index = index_of resolved file in
+  check "require: the resolution reached the required file"
+    (match Jide_engine.Resolve.file resolved library_file with
+    | Some _ -> true
+    | None -> false);
+  let result =
+    Jide_engine.Rename.rename ~files:[] ~index ~resolve:resolved
+      ~byte:(byte requiring ~within:"x = a;" ~name:"x") ~new_name:"y"
+      ~broken:(fun path ->
+        String.equal (Jide_engine.Index.normalise path) library_file)
+  in
+  check
+    ("require: refused while a required file is broken, saying "
+   ^ refusal result)
+    (match result with
+    | Error reason ->
+        String.starts_with
+          ~prefix:
+            "a file the document requires has recovered syntax errors, so no \
+             rename is offered:"
+          reason
+        && String.ends_with ~suffix:library_file reason
+    | Ok _ -> false);
+  (* The same rename is allowed once nothing is broken. *)
+  check "require: allowed once no required file is broken"
+    (match
+       Jide_engine.Rename.rename ~files:[] ~index ~resolve:resolved
+         ~byte:(byte requiring ~within:"x = a;" ~name:"x")
+         ~new_name:"y" ~broken:nothing_broken
+     with
+    | Ok edits -> edit_count edits = 3
+    | Error _ -> false)
+
+(* A rename follows the identity into the files the document requires: the
+   edits are grouped by file, and the required file's declaration is one of
+   them. *)
+let entry_calling_a_required =
+  "require \"lib.jinc\"\n\
+   fn use(reg u32 a) -> reg u32 {\n\
+  \  reg u32 r;\n\
+  \  r = lib_fn(a);\n\
+  \  return r;\n\
+   }\n"
+
+let library_with_one_function =
+  "fn lib_fn(reg u32 a) -> reg u32 { return a; }\n"
+
+let test_a_rename_reaches_a_required_file () =
+  let file = "/work/entry.jazz" in
+  let library = "/work/lib.jinc" in
+  let files = [ ("lib.jinc", library_with_one_function) ] in
+  match
+    renamed ~files ~file ~text:entry_calling_a_required ~within:"r = lib_fn(a);"
+      ~name:"lib_fn" ~new_name:"lib_call" ()
+  with
+  | Error reason -> check ("required: the rename is refused: " ^ reason) false
+  | Ok edits ->
+      check "required: the entry and the required file are both edited"
+        (List.map fst edits = [ file; library ]);
+      check "required: the call in the entry is rewritten"
+        (String.equal
+           (apply entry_calling_a_required [ (file, edits_in edits file) ])
+           "require \"lib.jinc\"\n\
+            fn use(reg u32 a) -> reg u32 {\n\
+           \  reg u32 r;\n\
+           \  r = lib_call(a);\n\
+           \  return r;\n\
+            }\n");
+      check "required: the declaration in the required file is rewritten"
+        (String.equal
+           (apply library_with_one_function
+              [ (library, edits_in edits library) ])
+           "fn lib_call(reg u32 a) -> reg u32 { return a; }\n");
+      check "required: two edits, one per file" (edit_count edits = 2)
+
+(* A project file the document does not itself reach is searched through the
+   caller's list of resolutions: a rename of a workspace symbol is not limited
+   to the files the open document read. *)
+let declaring_document = "fn shared(reg u32 a) -> reg u32 { return a; }\n"
+
+let calling_project_file =
+  "require \"doc.jazz\"\n\
+   fn call(reg u32 a) -> reg u32 {\n\
+  \  reg u32 r;\n\
+  \  r = shared(a);\n\
+  \  return r;\n\
+   }\n"
+
+let test_a_rename_reaches_a_project_file () =
+  let file = "/work/doc.jazz" in
+  let other = "/work/other.jazz" in
+  let files =
+    [ ("doc.jazz", declaring_document); ("other.jazz", calling_project_file) ]
+  in
+  match
+    renamed ~files
+      ~project:[ (other, calling_project_file) ]
+      ~file ~text:declaring_document ~within:"fn shared" ~name:"shared"
+      ~new_name:"common" ()
+  with
+  | Error reason -> check ("project: the rename is refused: " ^ reason) false
+  | Ok edits ->
+      check "project: the document and the project file are both edited"
+        (List.map fst edits = [ file; other ]);
+      check "project: the project file's call is rewritten"
+        (String.equal
+           (apply calling_project_file [ (other, edits_in edits other) ])
+           "require \"doc.jazz\"\n\
+            fn call(reg u32 a) -> reg u32 {\n\
+           \  reg u32 r;\n\
+           \  r = common(a);\n\
+           \  return r;\n\
+            }\n");
+      check "project: two edits, one per file" (edit_count edits = 2)
+
+(* Nothing to rename: a position on no name, a name with no declaration. *)
+let test_positions_that_hold_no_name_are_refused () =
+  let file = "/work/variables.jazz" in
+  let resolved = resolve file variables in
+  let index = index_of resolved file in
+  let at text ~within ~name =
+    Jide_engine.Rename.prepare ~index ~resolve:resolved
+      ~byte:(byte text ~within ~name)
+  in
+  check "no name: a byte inside the return keyword holds no name"
+    (at variables ~within:"return count;" ~name:"return" = None);
+  check "no name: a byte on a name with no declaration answers nothing"
+    (let unresolved = "fn f(reg u32 a) -> reg u32 {\n  return nothing;\n}\n" in
+     let resolved = resolve file unresolved in
+     let index = index_of resolved file in
+     Jide_engine.Rename.prepare ~index ~resolve:resolved
+       ~byte:(byte unresolved ~within:"return nothing;" ~name:"nothing")
+     = None);
+  check "no name: a name is prepared with its span and its kind"
+    (match at variables ~within:"reg u32 count;" ~name:"count" with
+    | Some (span, kind) ->
+        kind = Jide_engine.Index.Variable
+        && span.Jide_lang.Span.start_byte
+           = byte variables ~within:"reg u32 count;" ~name:"count"
+        && span.Jide_lang.Span.end_byte
+           = span.Jide_lang.Span.start_byte + String.length "count"
+    | None -> false)
+
+(* A rename to the name the symbol already has changes nothing: every
+   occurrence is replaced by itself. *)
+let test_a_rename_to_the_same_name_changes_nothing () =
+  let file = "/work/variables.jazz" in
+  match
+    renamed ~file ~text:variables ~within:"count = a;" ~name:"count"
+      ~new_name:"count" ()
+  with
+  | Error reason -> check ("same name: refused: " ^ reason) false
+  | Ok edits ->
+      check "same name: the text is unchanged"
+        (String.equal (apply variables edits) variables);
+      check "same name: every occurrence is still an edit" (edit_count edits = 5)
+
+(* The gate's statement, measured: the renamed program gets the same verdict.
+   Both texts are checked by the compiler, and the renamed one is as clean as
+   the one it came from. *)
+let verdict_program =
+  "fn add(reg u64 a, reg u64 b) -> reg u64 {\n\
+  \  reg u64 c;\n\
+  \  c = a + b;\n\
+  \  return c;\n\
+   }\n\
+   fn use(reg u64 x) -> reg u64 {\n\
+  \  reg u64 r;\n\
+  \  r = add(x, x);\n\
+  \  return r;\n\
+   }\n"
+
+let x86_64 = Option.get (Jide_jasmin.Adapter.arch_of_string "x86-64")
+let linux = Option.get (Jide_jasmin.Adapter.call_conv_of_string "linux")
+
+let errors_of text =
+  let result =
+    Jide_jasmin.Adapter.check x86_64 linux ~file:"/work/verdict.jazz" ~text
+      ~idirs:[]
+  in
+  List.filter
+    (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+      diagnostic.Jide_lang.Diagnostic.severity = Jide_lang.Diagnostic.Error)
+    result.Jide_jasmin.Adapter.diagnostics
+
+let test_the_renamed_program_keeps_its_verdict () =
+  let file = "/work/verdict.jazz" in
+  match
+    renamed ~file ~text:verdict_program ~within:"fn add" ~name:"add"
+      ~new_name:"plus" ()
+  with
+  | Error reason -> check ("verdict: the rename is refused: " ^ reason) false
+  | Ok edits ->
+      let renamed_text = apply verdict_program edits in
+      check "verdict: the program before the rename has no error"
+        (errors_of verdict_program = []);
+      check "verdict: the program after the rename has no error"
+        (errors_of renamed_text = [])
+
+let () =
+  test_a_variable_renamed_across_its_uses ();
+  test_a_function_renamed_with_its_call_sites ();
+  test_a_rename_from_a_call_rewrites_the_declaration ();
+  test_a_rename_is_refused_on_a_keyword ();
+  test_a_keyword_is_not_a_valid_new_name ();
+  test_a_rename_is_refused_on_an_intrinsic ();
+  test_an_annotation_label_is_refused ();
+  test_an_include_path_is_refused ();
+  test_a_qualified_name_renames_its_last_segment ();
+  test_a_namespace_name_is_refused ();
+  test_a_namespace_prefix_is_refused ();
+  test_a_spaced_qualified_name_is_refused ();
+  test_an_invalid_identifier_is_refused ();
+  test_a_collision_with_a_visible_declaration_is_refused ();
+  test_a_name_out_of_scope_is_not_a_collision ();
+  test_rename_and_rename_back_restores_the_text ();
+  test_two_same_named_declarations_are_not_conflated ();
+  test_a_function_name_is_another_name_space ();
+  test_a_broken_file_in_the_require_closure_refuses ();
+  test_a_rename_reaches_a_required_file ();
+  test_a_rename_reaches_a_project_file ();
+  test_positions_that_hold_no_name_are_refused ();
+  test_a_rename_to_the_same_name_changes_nothing ();
+  test_the_renamed_program_keeps_its_verdict ();
+  if !failures = 0 then print_endline "all rename tests passed"
+  else (
+    Printf.printf "%d rename test(s) failed\n" !failures;
+    exit 1)
