@@ -764,11 +764,14 @@ let measure_requests ~runs unit_ =
   let server =
     Jide_controller.Server.create
       ~log:(fun _ -> ())
-      ~engine ~analysis:(engine_analysis engine) ()
+      ~engine ~features:(engine_features engine)
+      ~analysis:(engine_analysis engine) ()
   in
-  ignore
-    (Jide_controller.Server.handle_packet server
-       (request 1 "initialize" (initialize_params_at directory)));
+  let initialized =
+    Jide_controller.Server.handle_packet server
+      (request 1 "initialize" (initialize_params_at directory))
+  in
+  let capabilities = advertised_capabilities initialized in
   (match Jide_controller.Server.state server with
   | Jide_controller.Server.Running -> ()
   | _ -> die (unit_.label ^ ": the server did not reach the running state"));
@@ -803,15 +806,7 @@ let measure_requests ~runs unit_ =
            (method_of_feature feature)
            (request_params feature ~uri ~position))
     in
-    match
-      List.find_map
-        (function
-          | Jsonrpc.Packet.Response response
-            when Jsonrpc.Id.equal response.Jsonrpc.Response.id (`Int id) ->
-              Some response
-          | _ -> None)
-        packets
-    with
+    match response_to ~id packets with
     | Some response -> response
     | None ->
         die
@@ -833,6 +828,11 @@ let measure_requests ~runs unit_ =
         sizes
   in
   let measure feature =
+    if not (advertises capabilities feature) then
+      (* Not sent: the server does not advertise the request, so there is
+         nothing to time and no project to open for it. *)
+      { feature; status = Not_advertised; samples = [] }
+    else
     match request_byte index feature with
     | None ->
         (* No declaration and no call: there is no position an editor would
@@ -864,12 +864,18 @@ let measure_requests ~runs unit_ =
 
 let request_state row =
   match row.status with
+  | Not_advertised ->
+      "not measured: the server does not advertise "
+      ^ capability_of_feature row.feature
   | Unavailable -> "unavailable"
   | No_position -> "unavailable (no declaration or call to ask at)"
   | Refused message -> "refused: " ^ message
   | Answered ->
       if percentile 0.95 row.samples <= budget_of_feature row.feature then "met"
       else "missed"
+
+let is_refused row =
+  match row.status with Refused _ -> true | _ -> false
 
 let print_request_samples results =
   List.iter
@@ -924,8 +930,62 @@ let print_request_tally results =
   let unavailable =
     count (fun row -> row.status = Unavailable || row.status = No_position)
   in
-  let refused =
-    count (function { status = Refused _; _ } -> true | _ -> false)
+  let not_measured = count (fun row -> row.status = Not_advertised) in
+  let refused = count is_refused in
+  Printf.printf
+    "request: %d rows, %d measured (%d met, %d missed), %d unavailable, %d not \
+     measured"
+    (List.length rows) measured met missed unavailable not_measured;
+  if refused > 0 then Printf.printf ", %d refused" refused;
+  print_newline ()
+
+(* -- the budgets ---------------------------------------------------------- *)
+
+(* Each budget of design section 15 that the requests decide, over every unit:
+   the worst median and the worst p95 of the rows measured, and a verdict. A
+   budget is met only when every one of its rows was measured and none missed.
+   A budget with a row not measured, or refused, is not met in full, and the
+   line names each such request with the state its row gives. *)
+let print_budgets results =
+  let rows = List.concat_map (fun result -> result.rows) results in
+  let budget label description budget_ms requests =
+    let mine = List.filter (fun row -> List.mem row.feature requests) rows in
+    let measured = List.filter (fun row -> row.status = Answered) mine in
+    let missed =
+      List.filter
+        (fun row -> String.equal (request_state row) "missed")
+        measured
+    in
+    let worst_median =
+      List.fold_left
+        (fun best row -> Float.max best (median row.samples))
+        0.0 measured
+    in
+    let worst_p95 =
+      List.fold_left
+        (fun best row -> Float.max best (percentile 0.95 row.samples))
+        0.0 measured
+    in
+    let verdict =
+      if missed <> [] then "missed"
+      else if measured <> [] && List.length measured = List.length mine then
+        "met"
+      else "not measured in full"
+    in
+    Printf.printf
+      "budget %s (%s, p95 at most %.1f ms): %d of %d rows measured, %d \
+       missed, worst median %.3f ms, worst p95 %.3f ms: %s\n"
+      label description budget_ms (List.length measured) (List.length mine)
+      (List.length missed) worst_median worst_p95 verdict;
+    List.iter
+      (fun request ->
+        let own = List.filter (fun row -> row.feature = request) mine in
+        match List.filter (fun row -> row.status <> Answered) own with
+        | [] -> ()
+        | first :: _ as gaps ->
+            Printf.printf "  %s on %d of %d units: %s\n" (feature_name request)
+              (List.length gaps) (List.length own) (request_state first))
+      requests
   in
   Printf.printf
     "request: %d rows, %d measured (%d met, %d missed), %d unavailable"
