@@ -1,8 +1,16 @@
-; The bench driver's contract: a number is printed only inside a timing
-; window, and a build beside it is refused before anything is measured. The
-; test runs the driver itself with the environment a caller would set, and
-; every case stops at a refusal before the driver looks for a corpus, so the
-; test measures nothing and needs no host of its own.
+; The bench driver's contract: a number is printed only inside a timing window,
+; and a build beside it is refused before anything is measured. The test runs
+; the driver itself, with `env -i` and only the variables a case names, so a
+; name the caller exported cannot decide what the case proves. Most cases stop
+; at a refusal before a measurement; the last three go past the window with the
+; explicit opt-out or with a window that is open, and stop at the next thing
+; the driver needs — a binary and a corpus — so the opt-out is proved to reach
+; the rest of the checks rather than only the window message. Those three
+; answer both halves of the driver's build check with something the test owns:
+; an empty slots directory it names and removes, and a `ps` of its own, because
+; the slot half reads a directory while the process half reads the host's whole
+; process table. None of them measures anything, so the test needs no corpus
+; and no build of its own.
 
 (cram
  (deps ../../bench/run.sh))

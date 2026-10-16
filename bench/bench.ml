@@ -735,6 +735,7 @@ let measure_requests ~runs unit_ =
 let request_state row =
   match row.status with
   | Unavailable -> "unavailable"
+  | No_position -> "unavailable (no declaration or call to ask at)"
   | Refused message -> "refused: " ^ message
   | Answered ->
       if percentile 0.95 row.samples <= budget_of_feature row.feature then "met"
@@ -790,7 +791,9 @@ let print_request_tally results =
   let measured = count (fun row -> row.status = Answered) in
   let met = count (fun row -> String.equal (request_state row) "met") in
   let missed = count (fun row -> String.equal (request_state row) "missed") in
-  let unavailable = count (fun row -> row.status = Unavailable) in
+  let unavailable =
+    count (fun row -> row.status = Unavailable || row.status = No_position)
+  in
   let refused =
     count (function { status = Refused _; _ } -> true | _ -> false)
   in
