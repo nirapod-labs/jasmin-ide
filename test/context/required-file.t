@@ -16,9 +16,17 @@ The last line counts the diagnostic lines the check placed in
 consts.jinc, those that begin `consts.jinc:<line>:`, and not the per-file
 summary `consts.jinc: <n> error`, which carries the file name too.
 
-  $ sh corpus.sh ../../lsp-server/native/main.exe "$JASMIN_CONTEXT_CORPUS" required
-  consts.jinc sha256 d45ddbcc45708a950c8443056bd28706bc783b5f34ba347401d4daea0bdbbb8b
+  $ unit=$JASMIN_CONTEXT_CORPUS/oldsrc-should-delete/crypto_kem/mlkem/mlkem768/amd64/avx2
+  $ lsp=$PWD/../../lsp-server/native/main.exe
+  $ digest() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | cut -d' ' -f1; }
+  $ mkdir required && cp $unit/consts.jinc required/
+  $ echo 'require "consts.jinc"' > required/entry.jazz
+  $ digest required/consts.jinc
+  d45ddbcc45708a950c8443056bd28706bc783b5f34ba347401d4daea0bdbbb8b
+  $ (cd required && $lsp check entry.jazz) > out.txt 2>&1; echo "status $?"
+  status 1
+  $ cat out.txt
   consts.jinc:73:18: typing: unknown variable: `MLKEM_Q'
   entry.jazz: ok
-  status 1
-  diagnostics in consts.jinc: 1
+  $ grep -c '^consts\.jinc:[0-9]' out.txt
+  1

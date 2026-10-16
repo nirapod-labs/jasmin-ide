@@ -15,9 +15,11 @@ two requires reach is entered once, as the compiler enters it once, so a
 diamond in the closure does not report its declarations as already
 declared.
 
-The corpus is not in this repository; docs/context-tests.md says which one
-the rows are written against and how to run them.
+The corpus is not in this repository; the rows are written against libjade; `make
+context CORPUS=<libjade checkout>` runs them.
 
-  $ sh corpus.sh ../../lsp-server/native/main.exe "$JASMIN_CONTEXT_CORPUS" entry
+  $ unit=$JASMIN_CONTEXT_CORPUS/oldsrc-should-delete/crypto_kem/mlkem/mlkem768/amd64/avx2
+  $ lsp=$PWD/../../lsp-server/native/main.exe
+  $ (cd $unit && $lsp check kem.jazz); echo "status $?"
   kem.jazz: ok
   status 0

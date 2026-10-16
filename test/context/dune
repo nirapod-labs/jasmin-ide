@@ -3,9 +3,8 @@
 ; and a diagnostic that belongs to a required file.
 ;
 ; The corpus is not part of this repository, so the stanza runs only when
-; JASMIN_CONTEXT_CORPUS names a checkout of it; docs/context-tests.md says
-; which one and what the rows expect. The guard is in the stanza rather
-; than in the tests: a test that printed a skip line would have to record
+; JASMIN_CONTEXT_CORPUS names a checkout of libjade. The guard is in the
+; stanza rather than in the tests: a test that printed a skip line would have to record
 ; that line as its expected output, and the run that has the corpus would
 ; then not match it.
 ;
@@ -22,6 +21,6 @@
    (echo %{env:JASMIN_CONTEXT_CORPUS=none}))))
 
 (cram
- (deps corpus-root.txt corpus.sh %{exe:../../lsp-server/native/main.exe})
+ (deps corpus-root.txt %{exe:../../lsp-server/native/main.exe})
  (enabled_if
   (<> %{env:JASMIN_CONTEXT_CORPUS=none} "none")))

@@ -1,6 +1,6 @@
 The same .jinc behind an entry that declares the parameters first.
 
-This is the context the rule of ARCHITECTURE.md section 8.4 builds,
+This is the context the engine builds for a .jinc an entry requires,
 supplied by hand: an entry written for the test requires params.jinc and
 then consts.jinc, the order poly.jinc puts them in inside kem.jazz, and
 then uses jdmontx16, the last array consts.jinc declares. consts.jinc is
@@ -25,12 +25,30 @@ failed because a file it requires did not type. The compiler reports the
 same place for the same bytes, an unknown variable at consts.jinc line 73,
 and reports nothing on entry.jazz, because it stops at the file's error.
 
-  $ sh corpus.sh ../../lsp-server/native/main.exe "$JASMIN_CONTEXT_CORPUS" scoped
-  consts.jinc sha256 d45ddbcc45708a950c8443056bd28706bc783b5f34ba347401d4daea0bdbbb8b
+  $ unit=$JASMIN_CONTEXT_CORPUS/oldsrc-should-delete/crypto_kem/mlkem/mlkem768/amd64/avx2
+  $ lsp=$PWD/../../lsp-server/native/main.exe
+  $ digest() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | cut -d' ' -f1; }
+  $ mkdir -p scoped/control
+  $ cp $unit/params.jinc $unit/consts.jinc scoped/
+  $ cat > scoped/entry.jazz <<'EOF'
+  > require "params.jinc"
+  > require "consts.jinc"
+  > fn probe() -> reg u16 {
+  >   reg u16 x;
+  >   x = jdmontx16[0];
+  >   return x;
+  > }
+  > EOF
+  $ cp scoped/params.jinc scoped/entry.jazz scoped/control/
+  $ sed '73s/MLKEM_Q/MLKEM_NOPE/' scoped/consts.jinc > scoped/control/consts.jinc
+  $ digest scoped/consts.jinc
+  d45ddbcc45708a950c8443056bd28706bc783b5f34ba347401d4daea0bdbbb8b
+  $ (cd scoped && $lsp check entry.jazz); echo "status $?"
   entry.jazz: ok
   status 0
-  control: consts.jinc:73:18 is MLKEM_NOPE, not MLKEM_Q
-  consts.jinc sha256 a1aa837a2f96fc52a29a9fe1f9f7f19be29f2c2ba5ddb62e57b193cc6713e315
+  $ digest scoped/control/consts.jinc
+  a1aa837a2f96fc52a29a9fe1f9f7f19be29f2c2ba5ddb62e57b193cc6713e315
+  $ (cd scoped/control && $lsp check entry.jazz); echo "status $?"
   consts.jinc:73:18: typing: unknown variable: `MLKEM_NOPE'
   entry.jazz: ok
   status 1
