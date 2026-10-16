@@ -697,7 +697,12 @@ let open_project ~skip server directory =
   walk directory;
   (!files, !bytes)
 
-type request_status = Answered | Unavailable | No_position | Refused of string
+type request_status =
+  | Answered
+  | Not_advertised
+  | Unavailable
+  | No_position
+  | Refused of string
 
 type feature_result = {
   feature : feature;
@@ -722,6 +727,34 @@ let answer_of_response (response : Jsonrpc.Response.t) =
       match error.Jsonrpc.Response.Error.code with
       | Jsonrpc.Response.Error.Code.MethodNotFound -> `Unavailable
       | _ -> `Refused error.message)
+
+(* The response to request [id] among the packets a server returned. *)
+let response_to ~id packets =
+  List.find_map
+    (function
+      | Jsonrpc.Packet.Response response
+        when Jsonrpc.Id.equal response.Jsonrpc.Response.id (`Int id) ->
+          Some response
+      | _ -> None)
+    packets
+
+(* The capabilities an initialize response advertises, or [`Null] when the
+   response is missing or an error: a server that answers nothing advertises
+   nothing, so every request is then not measured. *)
+let advertised_capabilities packets =
+  match response_to ~id:1 packets with
+  | Some { Jsonrpc.Response.result = Ok json; _ } -> (
+      match Yojson.Safe.Util.member "capabilities" json with
+      | `Assoc _ as capabilities -> capabilities
+      | _ -> `Null)
+  | Some { Jsonrpc.Response.result = Error _; _ } | None -> `Null
+
+let advertises capabilities feature =
+  match
+    Yojson.Safe.Util.member (capability_of_feature feature) capabilities
+  with
+  | `Null | `Bool false -> false
+  | _ -> true
 
 let measure_requests ~runs unit_ =
   let text = read_file unit_.file in
