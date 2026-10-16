@@ -205,3 +205,43 @@ done
 [ -n "$lock" ] || refuse "no slot in ${wait_seconds}s: the host's slots are busy, so this run held nothing"
 slot=${lock##*.}
 
+# The stand-in is the runner's own child, once the runner has started it.
+i=0
+while [ -z "$stand_in" ] && [ "$i" -lt 300 ]; do
+	stand_in=$(children "$wrapper" | head -n 1)
+	[ -n "$stand_in" ] || sleep 0.1
+	i=$((i + 1))
+done
+[ -n "$stand_in" ] || refuse "the runner took $lock but started no build in it"
+
+printf 'held-run: pid %s holds %s: %s\n' "$stand_in" "$lock" "$(ps -p "$stand_in" -o command=)"
+printf 'held-run: the driver beside it says:\n'
+
+# The driver's own refusal, against the lock directory that holds this slot.
+# The window only has to exist; the run stops at the build check.
+: >"$tmp/window.lock" || refuse "cannot write $tmp/window.lock"
+refusal=$(env -i PATH="$PATH" JASMIN_BENCH_WINDOW="$tmp/window.lock" \
+	JASMIN_BENCH_LOCKS="$locks" sh bench/run.sh 2>&1)
+refusal_status=$?
+printf '%s\n' "$refusal" | sed 's/^/  /'
+case $refusal in
+"bench: a build is running ("*) ;;
+*) refuse "the driver did not refuse a held slot: exit $refusal_status" ;;
+esac
+[ "$refusal_status" -eq 2 ] || refuse "the driver refused a held slot with exit $refusal_status, not 2"
+
+# The command runs in the slot the stand-in holds: JIDE_SLOT_HELD is the
+# runner's own word for "this process is already inside slot N", which is how
+# a nested call runs in its caller's slot instead of queueing behind it. It
+# runs in the background so a signal is answered at once rather than after the
+# step ends.
+if [ "$#" -eq 0 ]; then
+	set -- sh scripts/runtest.sh "$dune" runtest --root . --force -j 4
+fi
+JIDE_SLOT_HELD=$slot "$@" &
+command_pid=$!
+wait "$command_pid"
+status=$?
+command_pid=
+
+exit "$status"

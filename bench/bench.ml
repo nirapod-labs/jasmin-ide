@@ -71,7 +71,8 @@ let usage =
       "rename to 100 over the project, which is every Jasmin file under the";
       "entry's directory. A request the server does not answer is reported as";
       "unavailable, one row for each, so the table is complete before the";
-      "features are.";
+      "features are; so is a row with no position to ask at, on an entry that";
+      "declares nothing and calls nothing.";
       "";
       "The exit status is 0 when every unit ran, and 2 when the command line";
       "or an input is wrong.";
@@ -497,8 +498,10 @@ let request_params feature ~uri ~position =
 (* The byte a request is made at. The name of the first function the entry
    declares is a symbol every Jasmin file has; signature help asks at the
    first call instead, because a signature belongs to a call, and falls back
-   to the function's name when the file calls nothing. A file that declares
-   and calls nothing is asked at its first byte. *)
+   to the function's name when the file calls nothing. An entry that declares
+   nothing and calls nothing has no position to ask at, and then no request is
+   made: [None] is reported as an unavailable row rather than measured at byte
+   0, which would be a cheap answer taken at a place no editor asks from. *)
 let request_byte (index : Jide_engine.Index.t) feature =
   let declaration_byte =
     match
@@ -524,10 +527,10 @@ let request_byte (index : Jide_engine.Index.t) feature =
     | None -> None
   in
   match (feature, call_byte, declaration_byte) with
-  | Signature_help, Some byte, _ -> byte
-  | _, _, Some byte -> byte
-  | _, Some byte, None -> byte
-  | _, None, None -> 0
+  | Signature_help, Some byte, _ -> Some byte
+  | _, _, Some byte -> Some byte
+  | _, Some byte, None -> Some byte
+  | _, None, None -> None
 
 (* The analysis the server asks for, over its own engine: the same adapter the
    executable wires, so the snapshot a request reads is the one the server
@@ -597,7 +600,7 @@ let open_project ~skip server directory =
   walk directory;
   (!files, !bytes)
 
-type request_status = Answered | Unavailable | Refused of string
+type request_status = Answered | Unavailable | No_position | Refused of string
 
 type feature_result = {
   feature : feature;
@@ -612,13 +615,16 @@ type request_result = {
   project_bytes : int;
 }
 
+(* What the server said to a request. It is its own type so that [`Answered]
+   cannot be confused with a row's state: [No_position] is a fact about the
+   unit, never something a response says. *)
 let answer_of_response (response : Jsonrpc.Response.t) =
   match response.result with
-  | Ok _ -> Answered
+  | Ok _ -> `Answered
   | Error error -> (
       match error.Jsonrpc.Response.Error.code with
-      | Jsonrpc.Response.Error.Code.MethodNotFound -> Unavailable
-      | _ -> Refused error.message)
+      | Jsonrpc.Response.Error.Code.MethodNotFound -> `Unavailable
+      | _ -> `Refused error.message)
 
 let measure_requests ~runs unit_ =
   let text = read_file unit_.file in
@@ -658,13 +664,9 @@ let measure_requests ~runs unit_ =
   | Some _ -> ()
   | None -> die (unit_.label ^ ": the snapshot holds no analysis of the entry"));
   let next_id = ref 1 in
-  let ask feature =
+  let ask ~position feature =
     incr next_id;
     let id = !next_id in
-    let position =
-      Jide_engine.Document.position_of_byte document
-        (request_byte index feature)
-    in
     let packets =
       Jide_controller.Server.handle_packet server
         (request id
@@ -701,15 +703,28 @@ let measure_requests ~runs unit_ =
         sizes
   in
   let measure feature =
-    if over_project feature then ignore (open_the_project ());
-    match answer_of_response (ask feature) with
-    | Unavailable -> { feature; status = Unavailable; samples = [] }
-    | Refused message -> { feature; status = Refused message; samples = [] }
-    | Answered ->
-        let samples =
-          List.init runs (fun _ -> fst (time (fun () -> ignore (ask feature))))
-        in
-        { feature; status = Answered; samples }
+    match request_byte index feature with
+    | None ->
+        (* No declaration and no call: there is no position an editor would
+           ask from, so the row is unavailable rather than a measurement of
+           byte 0, and no request is made. A project row opens nothing either,
+           so [project_files] stays 0: a size printed beside no number would
+           describe a project request that never happened. The tally counts
+           the row with the unanswered rows. *)
+        { feature; status = No_position; samples = [] }
+    | Some byte -> (
+        if over_project feature then ignore (open_the_project ());
+        let position = Jide_engine.Document.position_of_byte document byte in
+        match answer_of_response (ask ~position feature) with
+        | `Unavailable -> { feature; status = Unavailable; samples = [] }
+        | `Refused message ->
+            { feature; status = Refused message; samples = [] }
+        | `Answered ->
+            let samples =
+              List.init runs (fun _ ->
+                  fst (time (fun () -> ignore (ask ~position feature))))
+            in
+            { feature; status = Answered; samples })
   in
   let rows = List.map measure features in
   let project_files, project_bytes =
@@ -856,8 +871,10 @@ let positive option value =
 let command_of_word = function
   | "whole" -> Whole
   | "keystroke" -> Keystroke
+  | "request" -> Request
   | "largest" -> Largest
-  | word -> die ("unknown command: " ^ word ^ " (whole, keystroke, largest)")
+  | word ->
+      die ("unknown command: " ^ word ^ " (whole, keystroke, request, largest)")
 
 let parse_options arguments =
   let rec loop options rest =
@@ -936,12 +953,12 @@ let units_of options =
 let main arguments =
   let options = parse_options arguments in
   match options.command with
-  | None -> die "no command: one of whole, keystroke, largest"
+  | None -> die "no command: one of whole, keystroke, request, largest"
   | Some Largest -> (
       match options.files with
       | [ directory ] -> largest ~count:options.count directory
       | _ -> die "largest takes one directory")
-  | Some ((Whole | Keystroke) as command) -> (
+  | Some ((Whole | Keystroke | Request) as command) -> (
       let units = units_of options in
       if units = [] then die "no unit to measure: name a file or pass --units";
       match command with
@@ -959,6 +976,15 @@ let main arguments =
           let results = List.map (measure_keystroke ~runs:options.runs) units in
           if options.samples then print_keystroke_samples results;
           print_keystroke_table results
+      | Request ->
+          Printf.printf
+            "editor requests from a warm snapshot, %d runs per unit, \
+             milliseconds against 20 (snapshot) and 100 (project)\n"
+            options.runs;
+          let results = List.map (measure_requests ~runs:options.runs) units in
+          if options.samples then print_request_samples results;
+          print_request_table results;
+          print_request_tally results
       | Largest -> ())
 
 let () = main (List.tl (Array.to_list Sys.argv))
