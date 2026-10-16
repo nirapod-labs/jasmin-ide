@@ -151,3 +151,103 @@ let sub_of text =
 
 type first = { line : int; column : int; kind : string; message : string }
 
+let nothing = { line = 0; column = 0; kind = ""; message = "" }
+
+(* The first error [jasmin-lsp check] prints, [path:line:column: kind:
+   message], with a zero-based column. Warnings are not errors. *)
+let checker_first out =
+  let located line =
+    let n = String.length line in
+    let rec scan i =
+      if i >= n then None
+      else if line.[i] = ':' then
+        match digits line (i + 1) with
+        | Some (l, j) when j < n && line.[j] = ':' -> (
+            match digits line (j + 1) with
+            | Some (c, k) when k + 1 < n && line.[k] = ':' && line.[k + 1] = ' '
+              ->
+                Some (l, c, drop (k + 2) line)
+            | _ -> scan (i + 1))
+        | _ -> scan (i + 1)
+      else scan (i + 1)
+    in
+    scan 0
+  in
+  let rec go = function
+    | [] -> nothing
+    | line :: rest -> (
+        match located line with
+        | None -> go rest
+        | Some (l, c, rest_text) ->
+            let kind =
+              match String.index_opt rest_text ':' with
+              | Some i -> String.sub rest_text 0 i
+              | None -> rest_text
+            in
+            if kind = "warning" then go rest
+            else
+              let message =
+                if String.length rest_text >= String.length kind + 2 then
+                  drop (String.length kind + 2) rest_text
+                else ""
+              in
+              let message =
+                replace_all
+                  (replace_all
+                     (replace_all message ~sub:"\\n" ~by:" ")
+                     ~sub:"\\t" ~by:" ")
+                  ~sub:"\\\\" ~by:"\\"
+              in
+              { line = l; column = c - 1; kind; message = collapse message })
+  in
+  go (String.split_on_char '\n' out)
+
+(* A compiler location line, ["file", line 3 (2-15):] or with [to line 4
+   (1)]: the line, the column and the text after it. *)
+let location_line line =
+  if not (starts_with ~prefix:"\"" line) then None
+  else
+    match String.index_from_opt line 1 '"' with
+    | None -> None
+    | Some q -> (
+        let parse_range i =
+          match digits line i with
+          | Some (_, j) when j < String.length line && line.[j] = '-' -> (
+              match digits line (j + 1) with
+              | Some (_, k) -> Some k
+              | None -> None)
+          | Some (_, j) -> Some j
+          | None -> None
+        in
+        let rest = drop (q + 1) line in
+        if not (starts_with ~prefix:", line " rest) then None
+        else
+          let i = q + 1 + 7 in
+          match digits line i with
+          | Some (l, j) when starts_with ~prefix:" (" (drop j line) -> (
+              match digits line (j + 2) with
+              | Some (c, _) -> (
+                  match parse_range (j + 2) with
+                  | Some k when k < String.length line && line.[k] = ')' ->
+                      let k = k + 1 in
+                      let k =
+                        if starts_with ~prefix:" to line " (drop k line) then
+                          match digits line (k + 9) with
+                          | Some (_, m)
+                            when starts_with ~prefix:" (" (drop m line) -> (
+                              match parse_range (m + 2) with
+                              | Some e
+                                when e < String.length line && line.[e] = ')' ->
+                                  e + 1
+                              | _ -> -1)
+                          | _ -> -1
+                        else k
+                      in
+                      if k > 0 && k < String.length line && line.[k] = ':' then
+                        let at = Option.get (index_from line 0 "):") in
+                        Some (l, c, drop (at + 2) line)
+                      else None
+                  | _ -> None)
+              | None -> None)
+          | _ -> None)
+
