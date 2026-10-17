@@ -560,6 +560,19 @@ let engine_analysis engine : Jide_controller.Server.analysis =
         | Some (analysis : Jide_engine.Engine.analysis) ->
             Some (analysis.version, analysis.diagnostics)
         | None -> None);
+    required =
+      (fun ~uri ->
+        match Jide_engine.Engine.check engine ~uri with
+        | Some (analysis : Jide_engine.Engine.analysis) ->
+            List.map
+              (fun (file : Jide_engine.Engine.required) ->
+                {
+                  Jide_controller.Server.uri = file.uri;
+                  text = file.text;
+                  diagnostics = file.diagnostics;
+                })
+              analysis.required
+        | None -> []);
     forget = (fun ~uri:_ -> ());
   }
 
