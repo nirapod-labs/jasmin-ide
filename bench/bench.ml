@@ -69,9 +69,14 @@ let usage =
       "A request row is compared with its budget, in milliseconds: completion,";
       "signature help, hover and definition answer to 20, and references and";
       "rename to 100 over the project, which is every Jasmin file under the";
-      "entry's directory. A request the server does not answer is reported as";
-      "unavailable, one row for each, so the table is complete before the";
-      "features are.";
+      "entry's directory. What such a request searches is the entry and the";
+      "files it requires, not every file the project opened. A request the";
+      "server does not advertise in its initialize result is not sent: its row";
+      "says so, one row for each, so the table is complete before the features";
+      "are. So is a row with no position to ask at, on an entry that declares";
+      "nothing and calls nothing. After the table, each budget is printed with";
+      "its worst median and p95 over the units and a verdict: met only when every";
+      "row of the budget was measured and none missed.";
       "";
       "The exit status is 0 when every unit ran, and 2 when the command line";
       "or an input is wrong.";
@@ -423,9 +428,11 @@ let print_keystroke_table results =
    open and analysed before the first run, so a number is the work the request
    does and not the check that came before it.
 
-   A request the server does not answer yet is reported as unavailable, one
-   row for each of the six requests. The harness is then complete before the
-   features are, and the day a handler lands the same row measures it with no
+   The server advertises the requests it answers in its initialize result.
+   A request it does not advertise is not sent, and its row says it was not
+   measured: a request sent anyway would come back as a refusal, and a refusal
+   ends the run, so the harness would have to report an answer it did not get.
+   The day a handler lands and is advertised, the same row measures it with no
    change here: the row is the server's answer, not a stand-in for it. *)
 
 type feature =
@@ -446,6 +453,16 @@ let feature_name = function
   | Definition -> "definition"
   | References -> "references"
   | Rename -> "rename"
+
+(* The capability the server advertises for each request in its initialize
+   result. *)
+let capability_of_feature = function
+  | Completion -> "completionProvider"
+  | Signature_help -> "signatureHelpProvider"
+  | Hover -> "hoverProvider"
+  | Definition -> "definitionProvider"
+  | References -> "referencesProvider"
+  | Rename -> "renameProvider"
 
 let method_of_feature = function
   | Completion -> "textDocument/completion"
@@ -497,8 +514,10 @@ let request_params feature ~uri ~position =
 (* The byte a request is made at. The name of the first function the entry
    declares is a symbol every Jasmin file has; signature help asks at the
    first call instead, because a signature belongs to a call, and falls back
-   to the function's name when the file calls nothing. A file that declares
-   and calls nothing is asked at its first byte. *)
+   to the function's name when the file calls nothing. An entry that declares
+   nothing and calls nothing has no position to ask at, and then no request is
+   made: [None] is reported as an unavailable row rather than measured at byte
+   0, which would be a cheap answer taken at a place no editor asks from. *)
 let request_byte (index : Jide_engine.Index.t) feature =
   let declaration_byte =
     match
@@ -524,10 +543,10 @@ let request_byte (index : Jide_engine.Index.t) feature =
     | None -> None
   in
   match (feature, call_byte, declaration_byte) with
-  | Signature_help, Some byte, _ -> byte
-  | _, _, Some byte -> byte
-  | _, Some byte, None -> byte
-  | _, None, None -> 0
+  | Signature_help, Some byte, _ -> Some byte
+  | _, _, Some byte -> Some byte
+  | _, Some byte, None -> Some byte
+  | _, None, None -> None
 
 (* The analysis the server asks for, over its own engine: the same adapter the
    executable wires, so the snapshot a request reads is the one the server
@@ -543,6 +562,87 @@ let engine_analysis engine : Jide_controller.Server.analysis =
         | None -> None);
     forget = (fun ~uri:_ -> ());
   }
+
+(* The engine's own answers to the editing requests, in the shape the protocol
+   layer asks for them. This is the record the executable builds
+   (`lsp-server/native/main.ml`) for completion and signature help, written
+   again here because that file is an executable and the benchmark links the
+   libraries: without it the server would answer from
+   {!Jide_controller.Features.unavailable}, every request would come back with
+   the empty answer, and the table would time a request that did no work.
+   Rename has no engine answer in the tree at this commit, so its two entries
+   stay [None] and the server refuses a rename, which the table reports as a
+   refusal rather than a number. *)
+let completion_kind_of (kind : Jide_engine.Complete.kind) :
+    Jide_engine.Types.completion_kind =
+  match kind with
+  | Jide_engine.Complete.Keyword -> Jide_engine.Types.Keyword
+  | Jide_engine.Complete.Function -> Jide_engine.Types.Function
+  | Jide_engine.Complete.Parameter | Jide_engine.Complete.Variable ->
+      Jide_engine.Types.Variable_
+  | Jide_engine.Complete.Global -> Jide_engine.Types.Field
+  | Jide_engine.Complete.Type_alias -> Jide_engine.Types.Type_parameter
+  | Jide_engine.Complete.Annotation_key -> Jide_engine.Types.Text
+
+let completion_item_of (item : Jide_engine.Complete.item) :
+    Jide_engine.Types.completion_item =
+  {
+    Jide_engine.Types.label = item.Jide_engine.Complete.label;
+    kind = completion_kind_of item.Jide_engine.Complete.kind;
+    detail = item.Jide_engine.Complete.detail;
+    documentation = None;
+    insert_text = None;
+    sort_text = None;
+  }
+
+let completion_of (completion : Jide_engine.Complete.completion) :
+    Jide_engine.Types.completion_item list =
+  List.map completion_item_of completion.Jide_engine.Complete.items
+
+let signature_of (signature : Jide_engine.Complete.signature) :
+    Jide_engine.Types.signature =
+  {
+    Jide_engine.Types.label = signature.Jide_engine.Complete.label;
+    documentation = None;
+    parameters =
+      List.map
+        (fun label -> { Jide_engine.Types.label; documentation = None })
+        signature.Jide_engine.Complete.parameters;
+  }
+
+let signature_help_of (help : Jide_engine.Complete.signature) :
+    Jide_engine.Types.signature_help =
+  {
+    Jide_engine.Types.signatures = [ signature_of help ];
+    active_signature = 0;
+    active_parameter = help.Jide_engine.Complete.active;
+  }
+
+let engine_features engine : Jide_controller.Features.t =
+  let completion ~uri ~byte =
+    match Jide_engine.Engine.snapshot engine ~uri with
+    | Some snapshot ->
+        Some
+          (completion_of
+             (Jide_engine.Complete.completion ~index:snapshot.index
+                ~resolve:snapshot.resolve ~byte ()))
+    | None -> None
+  in
+  let signature_help ~uri ~byte =
+    match Jide_engine.Engine.snapshot engine ~uri with
+    | Some snapshot ->
+        Option.map signature_help_of
+          (Jide_engine.Complete.signature_help ~index:snapshot.index
+             ~resolve:snapshot.resolve ~facts:snapshot.facts ~byte ())
+    | None -> None
+  in
+  Jide_controller.Features.make ~completion ~signature_help
+    ~prepare_rename:(fun ~uri:_ ~byte:_ -> None)
+    ~rename:(fun ~uri:_ ~byte:_ ~new_name:_ -> None)
+    ~workspace_symbols:(fun ~query:_ -> None)
+    ~highlights:(fun ~uri:_ ~byte:_ -> None)
+    ~semantic_tokens:(fun ~uri:_ -> None)
+    ()
 
 let absolute path =
   match Unix.realpath path with
@@ -597,7 +697,12 @@ let open_project ~skip server directory =
   walk directory;
   (!files, !bytes)
 
-type request_status = Answered | Unavailable | Refused of string
+type request_status =
+  | Answered
+  | Not_advertised
+  | Unavailable
+  | No_position
+  | Refused of string
 
 type feature_result = {
   feature : feature;
@@ -612,13 +717,44 @@ type request_result = {
   project_bytes : int;
 }
 
+(* What the server said to a request. It is its own type so that [`Answered]
+   cannot be confused with a row's state: [No_position] is a fact about the
+   unit, never something a response says. *)
 let answer_of_response (response : Jsonrpc.Response.t) =
   match response.result with
-  | Ok _ -> Answered
+  | Ok _ -> `Answered
   | Error error -> (
       match error.Jsonrpc.Response.Error.code with
-      | Jsonrpc.Response.Error.Code.MethodNotFound -> Unavailable
-      | _ -> Refused error.message)
+      | Jsonrpc.Response.Error.Code.MethodNotFound -> `Unavailable
+      | _ -> `Refused error.message)
+
+(* The response to request [id] among the packets a server returned. *)
+let response_to ~id packets =
+  List.find_map
+    (function
+      | Jsonrpc.Packet.Response response
+        when Jsonrpc.Id.equal response.Jsonrpc.Response.id (`Int id) ->
+          Some response
+      | _ -> None)
+    packets
+
+(* The capabilities an initialize response advertises, or [`Null] when the
+   response is missing or an error: a server that answers nothing advertises
+   nothing, so every request is then not measured. *)
+let advertised_capabilities packets =
+  match response_to ~id:1 packets with
+  | Some { Jsonrpc.Response.result = Ok json; _ } -> (
+      match Yojson.Safe.Util.member "capabilities" json with
+      | `Assoc _ as capabilities -> capabilities
+      | _ -> `Null)
+  | Some { Jsonrpc.Response.result = Error _; _ } | None -> `Null
+
+let advertises capabilities feature =
+  match
+    Yojson.Safe.Util.member (capability_of_feature feature) capabilities
+  with
+  | `Null | `Bool false -> false
+  | _ -> true
 
 let measure_requests ~runs unit_ =
   let text = read_file unit_.file in
@@ -628,11 +764,14 @@ let measure_requests ~runs unit_ =
   let server =
     Jide_controller.Server.create
       ~log:(fun _ -> ())
-      ~engine ~analysis:(engine_analysis engine) ()
+      ~engine ~features:(engine_features engine)
+      ~analysis:(engine_analysis engine) ()
   in
-  ignore
-    (Jide_controller.Server.handle_packet server
-       (request 1 "initialize" (initialize_params_at directory)));
+  let initialized =
+    Jide_controller.Server.handle_packet server
+      (request 1 "initialize" (initialize_params_at directory))
+  in
+  let capabilities = advertised_capabilities initialized in
   (match Jide_controller.Server.state server with
   | Jide_controller.Server.Running -> ()
   | _ -> die (unit_.label ^ ": the server did not reach the running state"));
@@ -658,28 +797,16 @@ let measure_requests ~runs unit_ =
   | Some _ -> ()
   | None -> die (unit_.label ^ ": the snapshot holds no analysis of the entry"));
   let next_id = ref 1 in
-  let ask feature =
+  let ask ~position feature =
     incr next_id;
     let id = !next_id in
-    let position =
-      Jide_engine.Document.position_of_byte document
-        (request_byte index feature)
-    in
     let packets =
       Jide_controller.Server.handle_packet server
         (request id
            (method_of_feature feature)
            (request_params feature ~uri ~position))
     in
-    match
-      List.find_map
-        (function
-          | Jsonrpc.Packet.Response response
-            when Jsonrpc.Id.equal response.Jsonrpc.Response.id (`Int id) ->
-              Some response
-          | _ -> None)
-        packets
-    with
+    match response_to ~id packets with
     | Some response -> response
     | None ->
         die
@@ -701,15 +828,33 @@ let measure_requests ~runs unit_ =
         sizes
   in
   let measure feature =
-    if over_project feature then ignore (open_the_project ());
-    match answer_of_response (ask feature) with
-    | Unavailable -> { feature; status = Unavailable; samples = [] }
-    | Refused message -> { feature; status = Refused message; samples = [] }
-    | Answered ->
-        let samples =
-          List.init runs (fun _ -> fst (time (fun () -> ignore (ask feature))))
-        in
-        { feature; status = Answered; samples }
+    if not (advertises capabilities feature) then
+      (* Not sent: the server does not advertise the request, so there is
+         nothing to time and no project to open for it. *)
+      { feature; status = Not_advertised; samples = [] }
+    else
+    match request_byte index feature with
+    | None ->
+        (* No declaration and no call: there is no position an editor would
+           ask from, so the row is unavailable rather than a measurement of
+           byte 0, and no request is made. A project row opens nothing either,
+           so [project_files] stays 0: a size printed beside no number would
+           describe a project request that never happened. The tally counts
+           the row with the unanswered rows. *)
+        { feature; status = No_position; samples = [] }
+    | Some byte -> (
+        if over_project feature then ignore (open_the_project ());
+        let position = Jide_engine.Document.position_of_byte document byte in
+        match answer_of_response (ask ~position feature) with
+        | `Unavailable -> { feature; status = Unavailable; samples = [] }
+        | `Refused message ->
+            { feature; status = Refused message; samples = [] }
+        | `Answered ->
+            let samples =
+              List.init runs (fun _ ->
+                  fst (time (fun () -> ignore (ask ~position feature))))
+            in
+            { feature; status = Answered; samples })
   in
   let rows = List.map measure features in
   let project_files, project_bytes =
@@ -719,11 +864,18 @@ let measure_requests ~runs unit_ =
 
 let request_state row =
   match row.status with
+  | Not_advertised ->
+      "not measured: the server does not advertise "
+      ^ capability_of_feature row.feature
   | Unavailable -> "unavailable"
+  | No_position -> "unavailable (no declaration or call to ask at)"
   | Refused message -> "refused: " ^ message
   | Answered ->
       if percentile 0.95 row.samples <= budget_of_feature row.feature then "met"
       else "missed"
+
+let is_refused row =
+  match row.status with Refused _ -> true | _ -> false
 
 let print_request_samples results =
   List.iter
@@ -775,16 +927,69 @@ let print_request_tally results =
   let measured = count (fun row -> row.status = Answered) in
   let met = count (fun row -> String.equal (request_state row) "met") in
   let missed = count (fun row -> String.equal (request_state row) "missed") in
-  let unavailable = count (fun row -> row.status = Unavailable) in
-  let refused =
-    count (function { status = Refused _; _ } -> true | _ -> false)
+  let unavailable =
+    count (fun row -> row.status = Unavailable || row.status = No_position)
   in
+  let not_measured = count (fun row -> row.status = Not_advertised) in
+  let refused = count is_refused in
   Printf.printf
-    "request: %d rows, %d measured (%d met, %d missed), %d unavailable"
-    (List.length rows) measured met missed unavailable;
+    "request: %d rows, %d measured (%d met, %d missed), %d unavailable, %d not \
+     measured"
+    (List.length rows) measured met missed unavailable not_measured;
   if refused > 0 then Printf.printf ", %d refused" refused;
-  print_newline ();
-  if refused > 0 then die "the server refused a request; the table says which"
+  print_newline ()
+
+(* -- the budgets ---------------------------------------------------------- *)
+
+(* Each budget of design section 15 that the requests decide, over every unit:
+   the worst median and the worst p95 of the rows measured, and a verdict. A
+   budget is met only when every one of its rows was measured and none missed.
+   A budget with a row not measured, or refused, is not met in full, and the
+   line names each such request with the state its row gives. *)
+let print_budgets results =
+  let rows = List.concat_map (fun result -> result.rows) results in
+  let budget label description budget_ms requests =
+    let mine = List.filter (fun row -> List.mem row.feature requests) rows in
+    let measured = List.filter (fun row -> row.status = Answered) mine in
+    let missed =
+      List.filter
+        (fun row -> String.equal (request_state row) "missed")
+        measured
+    in
+    let worst_median =
+      List.fold_left
+        (fun best row -> Float.max best (median row.samples))
+        0.0 measured
+    in
+    let worst_p95 =
+      List.fold_left
+        (fun best row -> Float.max best (percentile 0.95 row.samples))
+        0.0 measured
+    in
+    let verdict =
+      if missed <> [] then "missed"
+      else if measured <> [] && List.length measured = List.length mine then
+        "met"
+      else "not measured in full"
+    in
+    Printf.printf
+      "budget %s (%s, p95 at most %.1f ms): %d of %d rows measured, %d \
+       missed, worst median %.3f ms, worst p95 %.3f ms: %s\n"
+      label description budget_ms (List.length measured) (List.length mine)
+      (List.length missed) worst_median worst_p95 verdict;
+    List.iter
+      (fun request ->
+        let own = List.filter (fun row -> row.feature = request) mine in
+        match List.filter (fun row -> row.status <> Answered) own with
+        | [] -> ()
+        | first :: _ as gaps ->
+            Printf.printf "  %s on %d of %d units: %s\n" (feature_name request)
+              (List.length gaps) (List.length own) (request_state first))
+      requests
+  in
+  budget "B2" "snapshot requests" snapshot_budget
+    [ Completion; Signature_help; Hover; Definition ];
+  budget "B3" "project requests" project_budget [ References; Rename ]
 
 (* -- the largest corpus files -------------------------------------------- *)
 
@@ -966,10 +1171,18 @@ let main arguments =
             "editor requests from a warm snapshot, %d runs per unit, \
              milliseconds against 20 (snapshot) and 100 (project)\n"
             options.runs;
-          let results = List.map (measure_requests ~runs:options.runs) units in
+          let results =
+            List.map (measure_requests ~runs:options.runs) units
+          in
           if options.samples then print_request_samples results;
           print_request_table results;
-          print_request_tally results
+          print_request_tally results;
+          print_budgets results;
+          if
+            List.exists
+              (fun result -> List.exists is_refused result.rows)
+              results
+          then die "the server refused a request; the table says which"
       | Largest -> ())
 
 let () = main (List.tl (Array.to_list Sys.argv))

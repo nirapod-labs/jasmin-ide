@@ -35,7 +35,8 @@
 #
 # `arch` is an architecture name or `auto`, which takes the first path
 # component that names one; `idirs` is `-` or a comma-separated list of
-# name=path include paths.
+# name=path include paths. A line whose first field begins with `#` is a
+# comment and is not a unit.
 
 set -u
 
@@ -56,15 +57,15 @@ window=${JASMIN_BENCH_WINDOW:-}
 #    is a refusal rather than a measurement: a number taken beside a build is
 #    a measurement of the build. JASMIN_BENCH_NO_WINDOW is the one explicit
 #    way past this, and it says on stderr that the numbers are not window
-#    evidence.
+#    evidence. docs/bench.md has the recipe: open the window, then name it.
 if [ -z "$window" ]; then
 	if [ -n "${JASMIN_BENCH_NO_WINDOW:-}" ]; then
-		printf 'bench: measuring outside a timing window (JASMIN_BENCH_NO_WINDOW is set)\n' >&2
+		printf 'bench: measuring outside a timing window (JASMIN_BENCH_NO_WINDOW is set); the numbers are not window evidence\n' >&2
 	else
-		refuse "no timing window: set JASMIN_BENCH_WINDOW to a path that exists only inside one, or JASMIN_BENCH_NO_WINDOW=1 to measure anyway"
+		refuse "no timing window: open one and set JASMIN_BENCH_WINDOW to the path it creates, or set JASMIN_BENCH_NO_WINDOW=1 to measure anyway (not window evidence); docs/bench.md"
 	fi
 elif [ ! -e "$window" ]; then
-	refuse "no timing window: $window does not exist"
+	refuse "no timing window: $window does not exist (open one first, or set JASMIN_BENCH_NO_WINDOW=1)"
 fi
 
 # 2. Refuse to measure beside a build. A held slot is a build; so is a dune
@@ -121,6 +122,9 @@ printf 'bench: %s\n' "$(date -u +%FT%TZ)"
 printf 'bench: %d units, %s runs each\n' "$(wc -l <"$table" | tr -d ' ')" "$runs"
 printf 'bench: load %s\n' "$(uptime | sed 's/.*load averages*: //')"
 while IFS=$tab read -r label arch idirs path; do
+	case "$label" in
+	'' | '#'*) continue ;;
+	esac
 	printf '  %s\t%s\t%s\t%s\n' "$label" "$arch" "$idirs" "$path"
 done <"$table"
 

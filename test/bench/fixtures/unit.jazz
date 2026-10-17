@@ -1,0 +1,5 @@
+fn f() -> reg u32 {
+  reg u32 x;
+  x = 0;
+  return x;
+}
