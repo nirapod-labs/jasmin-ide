@@ -35,7 +35,8 @@
 #
 # `arch` is an architecture name or `auto`, which takes the first path
 # component that names one; `idirs` is `-` or a comma-separated list of
-# name=path include paths.
+# name=path include paths. A line whose first field begins with `#` is a
+# comment and is not a unit.
 
 set -u
 
@@ -121,6 +122,9 @@ printf 'bench: %s\n' "$(date -u +%FT%TZ)"
 printf 'bench: %d units, %s runs each\n' "$(wc -l <"$table" | tr -d ' ')" "$runs"
 printf 'bench: load %s\n' "$(uptime | sed 's/.*load averages*: //')"
 while IFS=$tab read -r label arch idirs path; do
+	case "$label" in
+	'' | '#'*) continue ;;
+	esac
 	printf '  %s\t%s\t%s\t%s\n' "$label" "$arch" "$idirs" "$path"
 done <"$table"
 

@@ -987,12 +987,9 @@ let print_budgets results =
               (List.length gaps) (List.length own) (request_state first))
       requests
   in
-  Printf.printf
-    "request: %d rows, %d measured (%d met, %d missed), %d unavailable"
-    (List.length rows) measured met missed unavailable;
-  if refused > 0 then Printf.printf ", %d refused" refused;
-  print_newline ();
-  if refused > 0 then die "the server refused a request; the table says which"
+  budget "B2" "snapshot requests" snapshot_budget
+    [ Completion; Signature_help; Hover; Definition ];
+  budget "B3" "project requests" project_budget [ References; Rename ]
 
 (* -- the largest corpus files -------------------------------------------- *)
 
@@ -1174,10 +1171,18 @@ let main arguments =
             "editor requests from a warm snapshot, %d runs per unit, \
              milliseconds against 20 (snapshot) and 100 (project)\n"
             options.runs;
-          let results = List.map (measure_requests ~runs:options.runs) units in
+          let results =
+            List.map (measure_requests ~runs:options.runs) units
+          in
           if options.samples then print_request_samples results;
           print_request_table results;
-          print_request_tally results
+          print_request_tally results;
+          print_budgets results;
+          if
+            List.exists
+              (fun result -> List.exists is_refused result.rows)
+              results
+          then die "the server refused a request; the table says which"
       | Largest -> ())
 
 let () = main (List.tl (Array.to_list Sys.argv))

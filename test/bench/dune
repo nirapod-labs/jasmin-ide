@@ -11,6 +11,12 @@
 ; the slot half reads a directory while the process half reads the host's whole
 ; process table. None of them measures anything, so the test needs no corpus
 ; and no build of its own.
+;
+; capabilities.t runs the built driver's request pass on fixtures/unit.jazz,
+; so the binary and the fixture are dependencies: a rebuilt driver re-runs it.
 
 (cram
- (deps ../../bench/run.sh))
+ (deps
+  ../../bench/run.sh
+  ../../bench/bench.exe
+  fixtures/unit.jazz))
