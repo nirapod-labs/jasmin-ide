@@ -25,9 +25,10 @@
 #   JASMIN_BENCH_NO_WINDOW
 #                        set to anything to measure without a window; the
 #                        run says so, and its numbers are not window evidence
-#   JASMIN_BENCH_LOCKS   a directory of build slots, each held by a running
-#                        build as build.lock.N (default: the window's own
-#                        directory)
+#   JASMIN_BENCH_LOCKS   a lock directory: a running build holds build.lock.N
+#                        in it. A build lock there at the end of the run, or
+#                        when a verdict is printed, makes the verdict not
+#                        final (default: the window's own directory)
 #
 # A units table has one row per unit, four tab-separated fields:
 #
@@ -43,6 +44,12 @@ set -u
 refuse() {
 	printf 'bench: %s\n' "$*" >&2
 	exit 2
+}
+
+# The host's 1-minute load average, the first of the three uptime reports. A
+# load far above the core count means work ran beside the measurement.
+load1() {
+	uptime | sed 's/.*load averages*: //' | awk '{ sub(/,$/, "", $1); print $1 }'
 }
 
 root=$(cd -- "$(dirname -- "$0")/.." && pwd) || refuse "cannot find the repository"
@@ -81,6 +88,9 @@ if [ -z "$locks" ] && [ -n "$window" ]; then
 	locks=$(dirname -- "$window")
 fi
 if [ -n "$locks" ]; then
+	# The binary reads the same directory when it prints a verdict, so a
+	# build lock that appears during the run makes the verdict not final.
+	export JASMIN_BENCH_LOCKS=$locks
 	for lock in "$locks"/build.lock.*; do
 		[ -d "$lock" ] && refuse "a build is running ($lock is held)"
 	done
@@ -121,6 +131,7 @@ fi
 printf 'bench: %s\n' "$(date -u +%FT%TZ)"
 printf 'bench: %d units, %s runs each\n' "$(wc -l <"$table" | tr -d ' ')" "$runs"
 printf 'bench: load %s\n' "$(uptime | sed 's/.*load averages*: //')"
+printf 'bench: 1-minute load %s at start\n' "$(load1)"
 while IFS=$tab read -r label arch idirs path; do
 	case "$label" in
 	'' | '#'*) continue ;;
@@ -132,4 +143,10 @@ done <"$table"
 "$exe" keystroke --units "$table" --runs "$runs" --samples || exit $?
 "$exe" request --units "$table" --runs "$runs" --samples || exit $?
 
+printf 'bench: 1-minute load %s at end\n' "$(load1)"
+if [ -n "$locks" ]; then
+	for lock in "$locks"/build.lock.*; do
+		[ -d "$lock" ] && printf 'bench: %s is held at the end of the run: no verdict above is final\n' "$lock"
+	done
+fi
 printf 'bench: %s\n' "$(date -u +%FT%TZ)"

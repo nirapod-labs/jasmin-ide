@@ -86,6 +86,27 @@ never reaches the measurement with nothing to measure.
   bench: not a directory: no-such-directory
   [2]
 
+The driver records the 1-minute load at its start and its end, and says so
+when a build lock is in the lock directory at the end. The stand-in binary
+here prints nothing, and for the request pass it creates a build lock, so the
+run reaches its end with a lock held and measures nothing. The corpus is a
+directory the test makes and keeps empty, which passes the corpus check.
+
+  $ mkdir corpus
+  $ cat > fakes/bench.exe <<'EOF'
+  > #!/bin/sh
+  > case "$1" in request) mkdir -p locks/build.lock.1 ;; esac
+  > EOF
+  $ chmod +x fakes/bench.exe
+  $ env -i PATH="$PWD/fakes:$PATH" JASMIN_BENCH_WINDOW=window/measure.lock JASMIN_BENCH_LOCKS=locks JASMIN_BENCH_CORPUS=corpus JASMIN_BENCH_EXE=fakes/bench.exe sh ../../bench/run.sh 2>&1 | sed -E 's/^bench: [0-9T:-]+Z$/bench: <time>/; s/^bench: load .*/bench: load <averages>/; s/1-minute load [0-9.]+ at/1-minute load <n> at/'
+  bench: <time>
+  bench: 0 units, 20 runs each
+  bench: load <averages>
+  bench: 1-minute load <n> at start
+  bench: 1-minute load <n> at end
+  bench: locks/build.lock.1 is held at the end of the run: no verdict above is final
+  bench: <time>
+
 The directories the cases made are theirs to remove.
 
-  $ rm -rf locks fakes window slots
+  $ rm -rf locks fakes window slots corpus

@@ -1,5 +1,5 @@
-(* Timing for the budgets of design section 15 that the server itself
-   decides: the whole check of a unit, the interval from a keystroke to the
+(* Timing for the latency budgets that the server itself decides: the whole
+   check of a unit, the interval from a keystroke to the
    diagnostics it produces, and the editor requests (completion, signature
    help, hover and definition from a snapshot, and references and rename over
    a project).
@@ -322,8 +322,8 @@ type keystroke_result = {
 
 (* The interval the keystroke budget names: the packet arrives at the loop,
    the loop stores the change, the check runs and the diagnostics are built.
-   The design's debounce and its publish step are not in the tree at this
-   commit, so neither contributes here. *)
+   The debounce and the publish step, which the keystroke budget also covers,
+   are not in the tree at this commit, so neither contributes here. *)
 let run_keystroke ~attempt server unit_ base uri =
   let text = edit base attempt in
   let packet =
@@ -418,10 +418,10 @@ let print_keystroke_table results =
 
 (* -- the editor requests -------------------------------------------------- *)
 
-(* Two budgets of design section 15 are decided by one request on a snapshot
-   the server already holds: completion, signature help, hover and definition
-   within 20 ms, and references and rename over a project of a library tree's
-   size within 100 ms.
+(* Two budgets are decided by requests on a snapshot the server already holds:
+   the snapshot-request budget (completion, signature help, hover and
+   definition, within 20 ms) and the project-wide request budget (references
+   and rename over a project, within 100 ms).
 
    Each request is sent through the server's own request path, the one an
    editor's client takes, and the interval is that path alone: the snapshot is
@@ -941,11 +941,28 @@ let print_request_tally results =
 
 (* -- the budgets ---------------------------------------------------------- *)
 
-(* Each budget of design section 15 that the requests decide, over every unit:
-   the worst median and the worst p95 of the rows measured, and a verdict. A
-   budget is met only when every one of its rows was measured and none missed.
-   A budget with a row not measured, or refused, is not met in full, and the
-   line names each such request with the state its row gives. *)
+(* The name of a build lock held in the lock directory that JASMIN_BENCH_LOCKS
+   names, or [None] when there is none or the variable is not set. A build
+   holds one as build.lock.N, so one present when a verdict is printed means a
+   build ran or is running beside the measurement. *)
+let build_lock_held () =
+  match Sys.getenv_opt "JASMIN_BENCH_LOCKS" with
+  | None | Some "" -> None
+  | Some directory -> (
+      match Sys.readdir directory with
+      | entries ->
+          Array.sort String.compare entries;
+          Array.to_list entries
+          |> List.find_opt (fun name ->
+                 String.starts_with ~prefix:"build.lock." name)
+      | exception Sys_error _ -> None)
+
+(* Each budget that the requests decide, over every unit: the worst median and
+   the worst p95 of the rows measured, and a verdict. A budget is met only when
+   every one of its rows was measured and none missed. A budget with a row not
+   measured, or refused, is not met in full, and the line names each such
+   request with the state its row gives. A met or missed verdict is not final
+   while a build lock is held, so it is printed as not final instead. *)
 let print_budgets results =
   let rows = List.concat_map (fun result -> result.rows) results in
   let budget label description budget_ms requests =
@@ -972,6 +989,12 @@ let print_budgets results =
         "met"
       else "not measured in full"
     in
+    let verdict =
+      match (build_lock_held (), verdict) with
+      | Some lock, ("met" | "missed") ->
+          Printf.sprintf "not final: %s is held in the lock directory" lock
+      | _, verdict -> verdict
+    in
     Printf.printf
       "budget %s (%s, p95 at most %.1f ms): %d of %d rows measured, %d \
        missed, worst median %.3f ms, worst p95 %.3f ms: %s\n"
@@ -987,9 +1010,11 @@ let print_budgets results =
               (List.length gaps) (List.length own) (request_state first))
       requests
   in
-  budget "B2" "snapshot requests" snapshot_budget
+  budget "snapshot requests" "completion, signature help, hover, definition"
+    snapshot_budget
     [ Completion; Signature_help; Hover; Definition ];
-  budget "B3" "project requests" project_budget [ References; Rename ]
+  budget "project-wide requests" "references and rename" project_budget
+    [ References; Rename ]
 
 (* -- the largest corpus files -------------------------------------------- *)
 

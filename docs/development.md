@@ -24,6 +24,17 @@ committed. A second run finds it assembled and does nothing.
 The server lands in `_build/default/lsp-server/native/main.exe`, and under
 its public name in `_build/install/default/bin/jasmin-lsp`.
 
+## Fuzzing and benchmarks
+
+`make fuzz` runs both fuzzing surfaces for `FUZZ_SECONDS` (120) with
+`FUZZ_SEED` (1), over generated text and, with `CORPUS`, over that corpus
+too. A failure prints the seed and case that replay it.
+
+`make bench CORPUS=<tests directory>` measures the latency of a whole check,
+a keystroke and a request on the largest files. Numbers are worth something
+only on an idle machine, so `bench/run.sh` refuses to start while a build
+runs and asks for `JASMIN_BENCH_NO_WINDOW=1` when no timing window is held.
+
 ## The edge channel
 
 The release channel builds against the tarball `vendor/jasmin.lock` pins. The
