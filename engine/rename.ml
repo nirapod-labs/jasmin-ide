@@ -13,9 +13,12 @@
    walk built at the occurrence's byte, which is the view pretyping takes. The
    walk is define-before-use, so a declaration written later in the same
    block is invisible there; the rule's other end asks, at the declaration
-   each occurrence would duplicate, whether the declaration being renamed is
-   already in scope. Between them a rename cannot declare one name twice in
-   one scope, which is the one rule that keeps a rename safe. *)
+   each occurrence would duplicate, whether the declaration being renamed
+   would land in that declaration's own frame. Between them a rename cannot
+   declare one name twice in one frame, which is the one rule that keeps a
+   rename safe. A frame is not a scope: a namespace merges its contents into
+   its parent under its own name, so what a namespace's own scope declares as
+   [total] its parent's frame holds as [A::total]. *)
 
 type edit = { span : Jide_lang.Span.t; new_text : string }
 type edits = (string * edit list) list
@@ -257,9 +260,13 @@ let clash_at (resolve : Resolve.t) ~(file : string) ~(byte : int)
 
 (* The name spaces the scope keeps apart: a function and a type alias live in
    their own lists, and every other declaration an index holds (a parameter, a
-   variable, a global) lives in the variables' list. *)
+   variable, a global) lives in the variables' list. A namespace's own name is
+   in none of the three: [namespace A { ... }] and a function or a variable
+   called [A] are two names the compiler accepts in one file, so a rename to
+   [A] is not a collision with the namespace. *)
 let same_name_space (left : Index.kind) (right : Index.kind) =
   match (left, right) with
+  | Index.Namespace, _ | _, Index.Namespace -> false
   | Index.Function, Index.Function -> true
   | Index.Type_alias, Index.Type_alias -> true
   | (Index.Function | Index.Type_alias), _ -> false
@@ -271,7 +278,7 @@ let same_name_space (left : Index.kind) (right : Index.kind) =
    parent is listed with its qualification, which is not the name its own
    scope declares, so the binding's name is compared as well as its identity:
    a declaration of another scope that happens to be visible here is not the
-   declaration a later name would duplicate. *)
+   declaration a later name would be written as. *)
 let in_scope (resolve : Resolve.t) ~(file : string) ~(byte : int)
     ~(target : Index.declaration) =
   match Resolve.scope_at resolve ~file ~byte with
@@ -285,23 +292,71 @@ let in_scope (resolve : Resolve.t) ~(file : string) ~(byte : int)
       || List.exists holds scope.Resolve.funs
       || List.exists holds scope.Resolve.vars
 
+(* The namespaces a declaration is written inside, outermost first: every
+   namespace item of the file whose range holds the declaration's name. The
+   index lists declarations in source order, so the outermost namespace comes
+   first. *)
+let namespace_path (index : Index.t) (declaration : Index.declaration) =
+  List.filter_map
+    (fun (item : Index.declaration) ->
+      if
+        item.Index.kind = Index.Namespace
+        && item.Index.item_span.Jide_lang.Span.start_byte
+           <= declaration.Index.name_span.Jide_lang.Span.start_byte
+        && declaration.Index.name_span.Jide_lang.Span.end_byte
+           <= item.Index.item_span.Jide_lang.Span.end_byte
+      then Some item.Index.name
+      else None)
+    index.Index.declarations
+
+(* Whether two declarations land in one frame once the namespaces around them
+   close, which is the question the rule's second end is asking. The compiler
+   keeps one frame per namespace: a variable is pushed into the frame of the
+   namespace it is written in ([Vars.push_core]), and a namespace merges its
+   contents into its parent under its own name, so [A::total] and [total] are
+   two names in one frame and only two equal paths put two variables in one
+   of them. A function or a type alias is pushed differently: [Funs.push]
+   looks the unqualified name up in every enclosing frame, so a function
+   inside a namespace and one outside it are one name to the compiler, and
+   visibility alone answers for them. A declaration of another file is left
+   to that answer too: the frame it lands in is the one its [require] was
+   read into, which this file's index does not record. *)
+let one_frame (index : Index.t) (target : Index.declaration)
+    (declaration : Index.declaration) =
+  match target.Index.kind with
+  | Index.Function | Index.Type_alias -> true
+  | _ ->
+      if
+        String.equal
+          (Index.normalise target.Index.file)
+          (Index.normalise index.Index.file)
+      then namespace_path index target = namespace_path index declaration
+      else true
+
 (* The other end of the collision rule. The scope at an occurrence is the scope
    before it, so a declaration written later in the same block is invisible
    there, though renaming to its name would declare that name twice in one
-   scope: an error for a function or a type alias, a warning for a variable.
+   frame: an error for a function or a type alias, a warning for a variable.
    The question is therefore asked at the declaration the new name would
    duplicate: when the declaration being renamed is already in scope where that
-   one is written, the renamed program has two declarations of one name. *)
+   one is written, and the two would land in one frame, the renamed program has
+   two declarations of one name. *)
 let later_clash (group : searched) (index : Index.t)
     (target : Index.declaration) (new_name : string) =
-  List.find_opt
-    (fun (declaration : Index.declaration) ->
-      String.equal declaration.Index.name new_name
-      && same_name_space declaration.Index.kind target.Index.kind
-      && (not (Index.equal_declaration declaration target))
-      && in_scope group.resolution ~file:group.path
-           ~byte:declaration.Index.name_span.Jide_lang.Span.start_byte ~target)
-    index.Index.declarations
+  (* A rename to the name the declaration already has writes every occurrence
+     as itself: no declaration of the program changes, so nothing can collide,
+     and the interface promises the edits rather than a refusal. *)
+  if String.equal new_name target.Index.name then None
+  else
+    List.find_opt
+      (fun (declaration : Index.declaration) ->
+        String.equal declaration.Index.name new_name
+        && same_name_space declaration.Index.kind target.Index.kind
+        && (not (Index.equal_declaration declaration target))
+        && one_frame index target declaration
+        && in_scope group.resolution ~file:group.path
+             ~byte:declaration.Index.name_span.Jide_lang.Span.start_byte ~target)
+      index.Index.declarations
 
 (* ------------------------------------------------------------------ *)
 
