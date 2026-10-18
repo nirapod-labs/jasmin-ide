@@ -152,7 +152,8 @@ let test_an_include_path_name () =
   with_directory
     [
       ( "entry.jazz",
-        "require \"LIB:deep.jinc\"\nfn main() -> reg u32 { return 0; }\n" );
+        "from LIB require \"deep.jinc\"\nfn main() -> reg u32 { return 0; }\n"
+      );
     ]
     (fun directory path ->
       Sys.mkdir (Filename.concat directory "src") 0o700;
@@ -164,22 +165,35 @@ let test_an_include_path_name () =
       in
       check "include path: the named directory finds it"
         (Jide_engine.Context.entry deep = Some (path "entry.jazz"));
-      (* Without the name the requirement names a file beside the entry, so it
-         is not the one under src. *)
+      (* Without the name the requirement is not bound, so the file has no
+         context: the compiler refuses an unbound name the same way. *)
       let deep =
         context ~entries ~idirs:[] ~read:read_disk (path "src/deep.jinc")
       in
       check "include path: no name, no context"
         (Jide_engine.Context.is_alone deep);
+      (* A bare require of the same text names a file beside the entry. The
+         colon is part of that file name, not an include path name, so the
+         file under src is not reached this way. *)
+      write (path "entry.jazz")
+        "require \"LIB:deep.jinc\"\nfn main() -> reg u32 { return 0; }\n";
+      let deep =
+        context ~entries ~idirs ~read:read_disk (path "src/deep.jinc")
+      in
+      check "include path: a colon is part of a bare name"
+        (Jide_engine.Context.is_alone deep);
       Sys.remove (path "src/deep.jinc");
       Sys.rmdir (path "src"))
 
 let test_comments_and_several_names () =
+  let bare written = { Jide_engine.Context.from = None; written } in
+  let named from written = { Jide_engine.Context.from = Some from; written } in
   check "require: one name"
-    (Jide_engine.Context.requires_of_text "require \"a.jinc\"\n" = [ "a.jinc" ]);
+    (Jide_engine.Context.requires_of_text "require \"a.jinc\"\n"
+    = [ bare "a.jinc" ]);
   check "require: several names on one line"
     (Jide_engine.Context.requires_of_text "require \"a.jinc\" \"b.jinc\"\n"
-    = [ "a.jinc"; "b.jinc" ]);
+    = [ bare "a.jinc"; bare "b.jinc" ]);
   check "require: a line comment hides one"
     (Jide_engine.Context.requires_of_text "// require \"a.jinc\"\n" = []);
   check "require: a block comment hides one"
@@ -188,12 +202,26 @@ let test_comments_and_several_names () =
     (Jide_engine.Context.requires_of_text
        "inline fn f() -> u32 { return \"require \\\"a.jinc\\\"\"; }"
     = []);
-  check "require: an include name is kept as written"
+  check "require: from names its include path"
+    (Jide_engine.Context.requires_of_text "from LIB require \"a.jinc\"\n"
+    = [ named "LIB" "a.jinc" ]);
+  check "require: from applies to every name after it"
+    (Jide_engine.Context.requires_of_text
+       "from LIB require \"a.jinc\" \"b.jinc\"\n"
+    = [ named "LIB" "a.jinc"; named "LIB" "b.jinc" ]);
+  check "require: a comment may sit between from and require"
+    (Jide_engine.Context.requires_of_text
+       "from LIB /* the root */ require \"a.jinc\"\n"
+    = [ named "LIB" "a.jinc" ]);
+  check "require: a require after other text is bare"
+    (Jide_engine.Context.requires_of_text "from LIB; require \"a.jinc\"\n"
+    = [ bare "a.jinc" ]);
+  check "require: a colon is part of a bare name"
     (Jide_engine.Context.requires_of_text "require \"LIB:a.jinc\"\n"
-    = [ "LIB:a.jinc" ]);
+    = [ bare "LIB:a.jinc" ]);
   check "require: an escaped quote ends nothing"
     (Jide_engine.Context.requires_of_text "require \"a\\\"b.jinc\"\n"
-    = [ "a\\\"b.jinc" ])
+    = [ bare "a\\\"b.jinc" ])
 
 let test_a_cycle_ends () =
   with_directory
@@ -218,10 +246,16 @@ let test_the_paths_are_normalised () =
     (Jide_engine.Context.normalise "/a//b/../c.jinc" = "/a/c.jinc");
   check "normalise: above the root"
     (Jide_engine.Context.normalise "/../a.jinc" = "/a.jinc");
+  check "normalise: a relative path keeps the .. that leave it"
+    (Jide_engine.Context.normalise "../a/./b/../c.jinc" = "../a/c.jinc");
+  check "normalise: two .. above the start"
+    (Jide_engine.Context.normalise "a/../../c.jinc" = "../c.jinc");
   check "normalise: two spellings are equal"
     (Jide_engine.Context.equal "/a/./b/../c.jinc" "/a/c.jinc");
   check "normalise: different files are not"
-    (not (Jide_engine.Context.equal "/a/c.jinc" "/a/d.jinc"))
+    (not (Jide_engine.Context.equal "/a/c.jinc" "/a/d.jinc"));
+  check "normalise: a .. above the start is not dropped"
+    (not (Jide_engine.Context.equal "../c.jinc" "c.jinc"))
 
 let test_a_relative_require () =
   with_directory [] (fun directory path ->
@@ -340,6 +374,74 @@ let test_the_default_entry_set () =
       Sys.rmdir (path "deep/nested");
       Sys.rmdir (path "deep"))
 
+(* The directory the entries are searched under: the project root when the
+   nearest project file holds the file, else the workspace root, else none. *)
+let test_the_search_root () =
+  with_directory [] (fun directory path ->
+      Sys.mkdir (Filename.concat directory "project") 0o700;
+      Sys.mkdir (Filename.concat directory "project/sub") 0o700;
+      Sys.mkdir (Filename.concat directory "elsewhere") 0o700;
+      let project = path "project" in
+      let workspace = directory in
+      let file = path "project/sub/lib.jinc" in
+      check "search root: the project holds the file"
+        (Jide_engine.Context.search_root ~workspace ~project file = Some project);
+      check "search root: the workspace is the fallback"
+        (Jide_engine.Context.search_root ~workspace file = Some workspace);
+      check "search root: a project that does not hold the file is passed over"
+        (Jide_engine.Context.search_root ~workspace ~project:(path "elsewhere")
+           file
+        = Some workspace);
+      check "search root: no project and no workspace"
+        (Jide_engine.Context.search_root file = None);
+      let cwd = Sys.getcwd () in
+      check "search root: a relative file gets a relative root"
+        (Jide_engine.Context.search_root ~project:cwd "lib.jinc" = Some ".");
+      check "search root: a root above the working directory is absolute"
+        (Jide_engine.Context.search_root ~project:(Filename.dirname cwd)
+           "lib.jinc"
+        = Some (Filename.dirname cwd));
+      Sys.rmdir (path "project/sub");
+      Sys.rmdir (path "project");
+      Sys.rmdir (path "elsewhere"))
+
+(* The server finds its entries the way the command line does: the project
+   file above a document bounds the search, even when the workspace root the
+   client named is a subdirectory of the project. *)
+let test_the_engine_searches_the_project_root () =
+  let uri_of_lib path = uri_of (path "sub/lib.jinc") in
+  let lib_text = "type word = u32\n" in
+  with_directory
+    [
+      (Jide_engine.Project.file_name, "[jasmin]\n");
+      ( "entry.jazz",
+        "require \"sub/lib.jinc\"\nfn main() -> reg u32 { return 0; }\n" );
+    ]
+    (fun directory path ->
+      Sys.mkdir (Filename.concat directory "sub") 0o700;
+      write (path "sub/lib.jinc") lib_text;
+      let context_with engine =
+        Jide_engine.Engine.open_document engine ~uri:(uri_of_lib path)
+          ~version:1 ~text:lib_text;
+        ignore (Jide_engine.Engine.check engine ~uri:(uri_of_lib path));
+        Jide_engine.Engine.context engine ~uri:(uri_of_lib path)
+      in
+      let below_root = Jide_engine.Engine.create () in
+      Jide_engine.Engine.set_root below_root (Some (path "sub"));
+      check "engine: the entry above the workspace root is found"
+        (match context_with below_root with
+        | Some context ->
+            Jide_engine.Context.entry context = Some (path "entry.jazz")
+        | None -> false);
+      let no_root = Jide_engine.Engine.create () in
+      check "engine: without a root the project file still bounds the search"
+        (match context_with no_root with
+        | Some context ->
+            Jide_engine.Context.entry context = Some (path "entry.jazz")
+        | None -> false);
+      Sys.remove (path "sub/lib.jinc");
+      Sys.rmdir (path "sub"))
+
 let () =
   test_the_three_file_project ();
   test_a_file_no_entry_requires ();
@@ -353,6 +455,8 @@ let () =
   test_the_engine_reads_the_project_entries ();
   test_the_client_override_wins ();
   test_the_default_entry_set ();
+  test_the_search_root ();
+  test_the_engine_searches_the_project_root ();
   if !failures = 0 then print_endline "all context tests passed"
   else (
     Printf.printf "%d context test(s) failed\n" !failures;

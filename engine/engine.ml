@@ -40,6 +40,7 @@ type snapshot = {
   index : Index.t;
   resolve : Resolve.t;
   facts : Jide_jasmin.Facts.t;
+  arch : Jide_jasmin.Adapter.arch;
 }
 
 type required = {
@@ -80,7 +81,9 @@ type t = {
   mutable project : Project.loaded option;
   projects : (string, Project.loaded) Hashtbl.t;
   mutable context_entry : string option;
-  mutable entries : string list option;
+  discovered : (string, string list) Hashtbl.t;
+      (* The entries found under a directory the search is bounded by, keyed
+         by that directory. [set_root] drops them with the root. *)
   check : checker;
   context_stage : context_stage;
   mutable analysis_count : int;
@@ -108,7 +111,7 @@ let create ?(check = adapter_check) ?(context = Context.of_file) () =
     project = None;
     projects = Hashtbl.create 16;
     context_entry = None;
-    entries = None;
+    discovered = Hashtbl.create 4;
     check;
     context_stage = context;
     analysis_count = 0;
@@ -128,7 +131,7 @@ let forget_analyses t = Hashtbl.reset t.analyses
    validated ones only and reports the rest. A file that names no include path
    keeps the base's list, so a setting that names one is not lost when a
    project file happens to name none. *)
-let settings_of_project ~base (loaded : Project.loaded) =
+let settings_of_project ~(base : settings) (loaded : Project.loaded) =
   let project = loaded.Project.project in
   {
     arch = Option.value ~default:base.arch project.Project.arch;
@@ -157,10 +160,13 @@ let project_of t (document : Document.t) =
   | Some path -> project_above t (Filename.dirname path)
 
 (* The settings one document is checked under: the base first, then the
-   nearest project file above the document, which is the order the design's
-   section 7 gives for the two sources this module knows about. *)
+   nearest project file above the document. The named include paths of the
+   [JASMINPATH] environment variable come after the ones those give, as the
+   compiler binds them after its [-I] options, so the check, the context walk
+   and the resolver all read a [from NAME require] the same way. *)
 let settings_for t (document : Document.t) =
-  settings_of_project ~base:t.base (project_of t document)
+  let settings = settings_of_project ~base:t.base (project_of t document) in
+  { settings with idirs = Jide_jasmin.Adapter.with_jasmin_path settings.idirs }
 
 (* The settings a document with the root's own project above it would get, so
    a caller that is not looking at one document may ask what the workspace is
@@ -198,7 +204,7 @@ let project_diagnostics t =
 
 let set_root t root =
   t.root <- root;
-  t.entries <- None;
+  Hashtbl.reset t.discovered;
   Hashtbl.reset t.projects;
   forget_resolutions t;
   forget_analyses t;
@@ -498,26 +504,39 @@ let required_of_check t ~(document : Document.t)
       })
     result.Jide_jasmin.Adapter.required
 
+(* The .jazz files under a directory the search is bounded by. They are found
+   once per directory: the set changes only with the root, and [set_root]
+   drops it. *)
+let discovered_entries t directory =
+  match Hashtbl.find_opt t.discovered directory with
+  | Some entries -> entries
+  | None ->
+      let entries = Context.entries_of_directory directory in
+      Hashtbl.replace t.discovered directory entries;
+      entries
+
 (* The entry set the context rule uses: the client's own choice when it made
-   one, and the entry list of the project above the document otherwise. The
-   rule itself is [Context.of_file]'s; this only says where its entries come
+   one, and the entry list of the project above the document otherwise. When
+   that list is empty the entries are the .jazz files under the project root
+   or, without a project file above the document, under the workspace root
+   ([Context.search_root] says which, and never looks above either). A
+   document under neither has no entries, so it is checked alone. The rule
+   itself is [Context.of_file]'s; this only says where its entries come
    from. *)
 let entries t (document : Document.t) =
   match t.context_entry with
   | Some entry -> [ entry ]
   | None -> (
-      let project = (project_of t document).Project.project in
-      match project.Project.entries with
+      let loaded = project_of t document in
+      match loaded.Project.project.Project.entries with
       | [] -> (
-          match t.root with
+          match Document.path document with
           | None -> []
-          | Some directory -> (
-              match t.entries with
-              | Some entries -> entries
-              | None ->
-                  let entries = Context.entries_of_directory directory in
-                  t.entries <- Some entries;
-                  entries))
+          | Some file -> (
+              let project = Option.map Filename.dirname loaded.Project.path in
+              match Context.search_root ?workspace:t.root ?project file with
+              | None -> []
+              | Some directory -> discovered_entries t directory))
       | entries -> entries)
 
 (* The text of a file: the editor's buffer when the file is open, the disk
@@ -596,10 +615,15 @@ let blank_snapshot =
     | Some index -> index
     | None -> fst (Index.of_text ~file "")
   in
-  { index; resolve; facts = Jide_jasmin.Facts.empty }
+  {
+    index;
+    resolve;
+    facts = Jide_jasmin.Facts.empty;
+    arch = Jide_jasmin.Arch.X86_64;
+  }
 
-let blank_snapshot_for ~(file : string) =
-  { blank_snapshot with index = { blank_snapshot.index with Index.file } }
+let blank_snapshot_for ~(file : string) ~(arch : Jide_jasmin.Adapter.arch) =
+  { blank_snapshot with index = { blank_snapshot.index with Index.file }; arch }
 
 (* The index and the resolver of one analysed text, and the facts its check
    left. The index is the resolver's own for the document it resolved, so the
@@ -618,7 +642,7 @@ let blank_snapshot_for ~(file : string) =
    the facts go in all the same: they came from the check, which is a different
    stage, and the value holds one copy of them either way. *)
 let snapshot_of t ~idirs ~(file : string) ~(text : string)
-    ~(facts : Jide_jasmin.Facts.t) =
+    ~(facts : Jide_jasmin.Facts.t) ~(arch : Jide_jasmin.Adapter.arch) =
   let build () =
     let resolve = Resolve.of_text ~idirs ~read:(read_file t) ~file text in
     let index =
@@ -626,11 +650,11 @@ let snapshot_of t ~idirs ~(file : string) ~(text : string)
       | Some index -> index
       | None -> fst (Index.of_text ~file text)
     in
-    { index; resolve; facts }
+    { index; resolve; facts; arch }
   in
   match build () with
   | snapshot -> snapshot
-  | exception _ -> { (blank_snapshot_for ~file) with facts }
+  | exception _ -> { (blank_snapshot_for ~file ~arch) with facts }
 
 (* The whole analysis of one document. Nothing here raises: the check, the
    index and the resolver, and the context stage all run under a catch-all, so
@@ -650,7 +674,7 @@ let analyse t ~uri (document : Document.t) key =
       key;
       text = body;
       bom;
-      snapshot = blank_snapshot_for ~file;
+      snapshot = blank_snapshot_for ~file ~arch:settings.arch;
       context = alone_context document;
       diagnostics =
         [
@@ -689,7 +713,9 @@ let analyse t ~uri (document : Document.t) key =
               Jide_jasmin.Facts.empty,
               [] )
     in
-    let snapshot = snapshot_of t ~idirs:settings.idirs ~file ~text ~facts in
+    let snapshot =
+      snapshot_of t ~idirs:settings.idirs ~file ~text ~facts ~arch:settings.arch
+    in
     {
       uri = Document.uri document;
       version = Document.version document;

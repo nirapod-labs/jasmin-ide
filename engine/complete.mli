@@ -16,7 +16,11 @@ type kind =
   | Variable
   | Global
   | Type_alias
-  | Annotation_key  (** a label of an annotation, after [#] *)
+  | Annotation_key
+      (** a label of an annotation, after a hash and an open bracket *)
+  | Intrinsic
+      (** a name the compiler's table lists for the document's architecture,
+          after a [#] *)
 
 type item = { label : string; kind : kind; detail : string option }
 (** One completion candidate. [detail] is the declaration's own rendering
@@ -35,10 +39,10 @@ type trigger =
   | Hash
   | Colon
       (** The character a client triggered the request with, when it names one.
-    Design section 10 gives completion the two trigger characters [#] and
-    [:], and both ask for the annotation keys: after [#] they are the labels
-    of the annotation being written, and a [:] is the fixed list the design
-    assigns to that trigger. *)
+    The design gives completion the two trigger characters [#] and [:]. A [#]
+    asks for the intrinsics of the document's architecture, which is how a
+    primitive call is written, and a [:] asks for the annotation keys, the
+    fixed list the design assigns to that trigger. *)
 
 val keywords : string list
 (** The lexer's own keyword table, in the lexer's order and without the
@@ -51,6 +55,7 @@ val annotation_keys : string list
 
 val completion :
   ?trigger:trigger ->
+  arch:Jide_jasmin.Adapter.arch ->
   index:Index.t ->
   resolve:Resolve.t ->
   byte:int ->
@@ -59,13 +64,14 @@ val completion :
 (** [completion ~index ~resolve ~byte ()] is what the client shows at [byte] of
     [index]'s file.
 
-    After a [#] the candidates are the annotation keys. Everywhere else they
-    are the lexer's keywords and the names the resolver's scope holds at that
-    byte: the type aliases, the functions and the variables, which is where a
-    function a [require] brought in already is. The list is filtered by the
-    word being typed and sorted by label; an empty prefix lists everything.
-    Nothing is looked up that is not in [index] and [resolve]: there is no
-    re-check, and no file is read. *)
+    After a [#] the candidates are the names the compiler's intrinsic table
+    lists for [arch], and nothing else. After a hash followed by an opening
+    bracket they are the annotation keys. Everywhere else they are the lexer's keywords and the names the
+    resolver's scope holds at that byte: the type aliases, the functions and
+    the variables, which is where a function a [require] brought in already
+    is. The list is filtered by the word being typed and sorted by label; an
+    empty prefix lists everything. Nothing is looked up that is not in [arch],
+    [index] and [resolve]: there is no re-check, and no file is read. *)
 
 type signature = {
   label : string;  (** the signature as the editor prints it, callee first *)
@@ -78,6 +84,7 @@ type signature = {
 }
 
 val signature_help :
+  arch:Jide_jasmin.Adapter.arch ->
   ?facts:Jide_jasmin.Facts.t ->
   index:Index.t ->
   resolve:Resolve.t ->
@@ -96,5 +103,17 @@ val signature_help :
     between its parentheses. [None] means no call, or a call whose callee
     names no function the resolver reaches.
 
-    An intrinsic call ([#spill(x)]) is answered by the intrinsic table, which
-    is not in this tree yet, so it reports [None] for now. *)
+    An intrinsic call ([#ADD_64(x, y)]) is answered by the intrinsic table
+    for [arch], which is the compiler's instruction description: the
+    parameters are the types the description gives the instruction's inputs,
+    in order, and the results are the types it gives its outputs. The name
+    is resolved the way the compiler resolves it, so the suffix, the vector
+    simplification and the arm spelling are the compiler's own. [arch] is the
+    architecture the document is analysed under, which the engine's snapshot
+    carries. It has no default, so a caller cannot answer every project as
+    x86-64 without saying so.
+
+    A name the table does not hold reports [None]. Four forms the compiler
+    accepts are typed by a rule of its own rather than by a table row, namely
+    [#spill], [#unspill], [#randombytes] and [#declassify], so they have no
+    instruction description and no signature to show. *)

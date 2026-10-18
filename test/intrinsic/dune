@@ -1,0 +1,15 @@
+; The arity and signature comparison of every intrinsic (arity.ml, oracle.ml).
+; It is a program rather than a test because its expected side is the native
+; compiler and its corpus is a directory this repository does not carry.
+; `dune runtest` runs the library half and both controls through run.sh, with
+; no compiler and no corpus; `make intrinsic-arity` runs the compiler half too.
+
+(executable
+ (name arity)
+ (modules arity oracle)
+ (libraries jide_engine jide_jasmin jide_lang unix))
+
+(rule
+ (alias runtest)
+ (action
+  (run sh %{dep:run.sh} %{exe:arity.exe})))
