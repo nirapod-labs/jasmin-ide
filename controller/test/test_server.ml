@@ -466,6 +466,8 @@ type probe = {
   mutable raises : bool;  (** Whether the analysis fails instead. *)
   mutable version_offset : int;  (** Added to the version it read. *)
   mutable diagnostics : Jide_lang.Diagnostic.t list;  (** What it reports. *)
+  mutable required : Jide_controller.Server.required list;
+      (** The files it reports errors in, each with its own text. *)
 }
 
 let probe () =
@@ -476,6 +478,7 @@ let probe () =
     raises = false;
     version_offset = 0;
     diagnostics = [];
+    required = [];
   }
 
 let sample_diagnostic message =
@@ -498,6 +501,11 @@ let probe_analysis (probe : probe) engine : Jide_controller.Server.analysis =
               ( Jide_engine.Document.version document + probe.version_offset,
                 probe.diagnostics ));
     diagnostics = (fun ~uri -> Hashtbl.find_opt stored uri);
+    required =
+      (fun ~uri ->
+        match Hashtbl.find_opt stored uri with
+        | Some _ -> probe.required
+        | None -> []);
     forget =
       (fun ~uri ->
         probe.forgotten <- probe.forgotten @ [ uri ];
@@ -630,6 +638,72 @@ let test_publish_carries_the_full_set () =
             field "message" second = Some (`String "second")
         | _ -> false)
   | _ -> check "two diagnostics: one publish" false
+
+let range_start json =
+  match field "range" json with
+  | Some range -> (
+      match field "start" range with
+      | Some start -> (int_field "line" start, int_field "character" start)
+      | None -> (None, None))
+  | None -> (None, None)
+
+(* An error in a file the document requires is published against that file's
+   own uri, with the range its own text gives it, and cleared when the
+   document no longer reports it. The file is not open in the engine, so the
+   clear has to be published: nothing else will ever publish for it. *)
+let test_a_required_file_is_published_against_its_own_uri () =
+  let probe = probe () in
+  let server, _ = create_probe probe in
+  initialize server;
+  let document = "file:///tmp/entry.jazz" in
+  let included = "file:///tmp/consts.jinc" in
+  let included_text = "u16 x = MLKEM_NOPE;\n" in
+  let report () =
+    [
+      {
+        Jide_controller.Server.uri = included;
+        text = included_text;
+        diagnostics =
+          [
+            Jide_lang.Diagnostic.make ~code:"typing"
+              ~severity:Jide_lang.Diagnostic.Error
+              (Jide_lang.Span.make ~start_byte:8 ~end_byte:18)
+              "unknown variable: `MLKEM_NOPE'";
+          ];
+      };
+    ]
+  in
+  did_open server ~uri:document ~text:"require \"consts.jinc\"\n";
+  probe.required <- report ();
+  advance 0.3;
+  (match publishes (analyse_due server) with
+  | [ own; file ] ->
+      check "required: the document is published first"
+        (string_field "uri" own = Some document);
+      check "required: the file is published against its own uri"
+        (string_field "uri" file = Some included);
+      check "required: the file's set carries no version"
+        (int_field "version" file = None);
+      check "required: one diagnostic at the file's own range"
+        (match diagnostics_field file with
+        | Some [ diagnostic ] -> range_start diagnostic = (Some 0, Some 8)
+        | _ -> false)
+  | _ -> check "required: the file is published too" false);
+  (* The file is fixed: the next analysis of the document reports none, and
+     the set published for the file is cleared. *)
+  probe.required <- [];
+  did_change server ~uri:document ~version:2
+    ~text:"require \"consts.jinc\"\n\nfn f() -> reg u32 { return 0; }\n";
+  advance 0.3;
+  match publishes (analyse_due server) with
+  | [ own; file ] ->
+      check "required: the document is published again"
+        (string_field "uri" own = Some document);
+      check "required: the cleared file is named"
+        (string_field "uri" file = Some included);
+      check "required: the cleared set is empty"
+        (diagnostics_field file = Some [])
+  | _ -> check "required: a fixed include is cleared" false
 
 let test_a_change_restarts_the_wait () =
   let probe = probe () in
@@ -1570,6 +1644,7 @@ let () =
   test_open_waits_for_the_delay ();
   test_time_to_next ();
   test_publish_carries_the_full_set ();
+  test_a_required_file_is_published_against_its_own_uri ();
   test_a_change_restarts_the_wait ();
   test_two_changes_are_one_publish ();
   test_close_clears ();
