@@ -4,6 +4,9 @@
 
 (cram
  (deps
+  ../../Makefile
+  ../../scripts/check-workflows.sh
+  ../../scripts/check-version.sh
   ../../scripts/corpus-smoke.sh
   ../../scripts/check-linked.sh
   ../../scripts/release-checksums.sh
