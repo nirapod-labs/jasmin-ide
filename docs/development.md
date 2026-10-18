@@ -24,6 +24,29 @@ committed. A second run finds it assembled and does nothing.
 The server lands in `_build/default/lsp-server/native/main.exe`, and under
 its public name in `_build/install/default/bin/jasmin-lsp`.
 
+## Testing
+
+```
+make test     # every test in the tree
+make fmt      # the formatting check; dune build @fmt --auto-promote fixes it
+make ci       # everything below, in order
+```
+
+`make test` reruns every test, including the cram tests dune would otherwise
+replay from `_build` (it gives them a new `JIDE_TEST_RUN`). The context tests
+under `test/context/` run only when `JASMIN_CONTEXT_CORPUS` names a checkout
+of [libjade](https://github.com/formosa-crypto/libjade); `make context
+CORPUS=<checkout>` runs just those.
+
+`make ci` runs `version-check`, `build`, `bench-build`, `fmt`, `test`,
+`oracle`, `editor-code`, `editor-vscode`, `editor-zed`, `zed-queries` and
+`workflows`, and stops at the first failure. Three steps print a skip when
+their input isn't set: `oracle` without `JASMINC`, `editor-code` without
+`JASMIN_TM_CORPUS` (a Jasmin release tree for the TextMate corpus check) and
+`zed-queries` without `JASMIN_GRAMMAR_DIR` (a `tree-sitter-jasmin` checkout).
+`editor-vscode` downloads a VS Code build and never skips, unless
+`JASMIN_ALLOWED_SKIPS=editor-vscode` says so.
+
 ## Fuzzing and benchmarks
 
 `make fuzz` runs both fuzzing surfaces for `FUZZ_SECONDS` (120) with
