@@ -1,4 +1,9 @@
 dist/
+# The test runner's VS Code download (`test/vscode/run.mjs`). Both forms are
+# listed on purpose: a worktree that shares one download links this path, and
+# git does not treat a symlink as a directory, so `.vscode-test/` alone would
+# leave the link showing as an untracked file.
+.vscode-test
 .vscode-test/
 # The staged server directory: `scripts/package-vsix.mjs` writes it, hands it
 # to `vsce` and removes it again. It is never part of the source tree.
