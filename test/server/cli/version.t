@@ -4,16 +4,20 @@ version it links, and which source that Jasmin was built from
 written to stderr either.
 
 The line's shape is pinned exactly, with no generic wildcard, so a missing
-part fails here rather than in a reader's eye. It is then checked against
-where each part comes from: the server version against `controller/version.ml`
-and the Jasmin release against the lock file, so a version that was bumped in
-one place and not the other fails too, and a `--version` that reported a
-hard-coded string would not pass.
+part fails here rather than in a reader's eye. The route is the one part that
+differs between a build from the vendored tree and a build from the installed
+library, so the line does not name it here: the route is checked against the
+record the build made of which one it used (`controller/build_route.ml`). It
+is then checked against where each part comes from: the server version against
+`controller/version.ml`, the Jasmin release against the lock file, and the
+route against that record. A version that was bumped in one place and not the
+other fails too, and a `--version` that reported a hard-coded string would not
+pass.
 
   $ ../../../lsp-server/native/main.exe --version > out.txt 2> err.txt; echo "status $?"
   status 0
-  $ cat out.txt
-  jasmin-lsp 0.1.0 (Jasmin Compiler 2026.09.0, built from vendored release 2026.09.0)
+  $ sed 's/, built from .*)$/, built from ROUTE)/' out.txt
+  jasmin-lsp 0.1.0 (Jasmin Compiler 2026.09.0, built from ROUTE)
   $ wc -l < out.txt | tr -d ' '
   1
   $ wc -c < err.txt | tr -d ' '
@@ -27,6 +31,15 @@ hard-coded string would not pass.
   $ sed -n 's/^version = //p' ../../../vendor/jasmin.lock
   2026.09.0
   $ grep -c "(Jasmin Compiler $(sed -n 's/^version = //p' ../../../vendor/jasmin.lock)," out.txt
+  1
+
+The route is checked against the record the build made of it. That record
+holds `None` for the installed library and the release number for the
+vendored tree, and the line must name that route and no other.
+
+  $ route=$(sed -n 's/^let vendored_release = Some "\(.*\)"$/vendored release \1/p' ../../../controller/build_route.ml)
+  $ route=${route:-installed library}
+  $ grep -cxF "jasmin-lsp 0.1.0 (Jasmin Compiler 2026.09.0, built from $route)" out.txt
   1
 
 `-v` is the same line: it is the short form of the same option, not a

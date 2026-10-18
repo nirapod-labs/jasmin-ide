@@ -3,8 +3,9 @@
 ; take, and the `check` mode that was already there. One `.t` per behaviour.
 ;
 ; Every input is either a `.t` file, which dune adds to the stanza itself, or
-; one of the five entries below: the binary, the two files a test reads to
-; check what the binary says against where the fact comes from, and the two
+; one of the six entries below: the binary, the three files a test reads to
+; check what the binary says against where the fact comes from (the server
+; version, the Jasmin lock, and the record of the build's route), and the two
 ; helpers the one session test drives it through. A file a test reads that is
 ; not listed here would not invalidate its recorded result, so a dependency
 ; added later belongs in this list too.
@@ -24,5 +25,6 @@
   %{exe:../../../lsp-server/native/main.exe}
   ../../../controller/version.ml
   ../../../vendor/jasmin.lock
+  ../../../controller/build_route.ml
   ../lifecycle/frames.sh
   ../lifecycle/bounded.sh))
