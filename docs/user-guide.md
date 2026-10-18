@@ -133,3 +133,36 @@ The names in the `JASMINPATH` environment variable (`NAME=PATH`, separated by
 and `-I`, and the project file's directory only as the place to look for
 entries.
 
+## How a `.jinc` file is checked
+
+A `.jinc` file usually relies on what the file requiring it set up first, so
+checking it alone reports errors that aren't real. An entry file is checked
+on its own. Any other file is checked in the context of the first entry that
+requires it, directly or through other files: the entry is typed up to that
+`require`, and the file is typed in that environment. A file no entry
+requires is checked on its own. Entries are searched under the nearest
+project file's directory, or the workspace root when there is none.
+
+## Known limits
+
+- No safety, constant-time or speculative constant-time checking. A clean
+  file here says nothing about either.
+- The server checks up to the end of the compiler's preprocessing. It shows no
+  assembly and no later pass.
+- Only `.jazz` and `.jinc`.
+- Release builds are planned for Linux x86-64, Linux aarch64 and macOS arm64.
+  A server you build elsewhere works if you point the editor at it.
+- A syntax error hides type errors inside the item it broke. Items the parser
+  could keep are still typed.
+- The server speaks the Jasmin version it was built against. Another version
+  with different syntax needs a server built against it.
+
+## When something is wrong
+
+- Nothing highlights: another extension may claim `.jazz` (see above), or in
+  Zed the grammar didn't build.
+- No diagnostics: look at the `Jasmin IDE` output channel in VS Code, or the
+  extension host log in Zed. A server that can't be found says so and names
+  the setting to fix.
+- The server exits at once: run `jasmin-lsp check` on the file. It uses the
+  same parse and the same typing.
