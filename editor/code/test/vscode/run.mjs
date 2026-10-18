@@ -7,8 +7,16 @@
 // the window's own teardown of the extension. It starts a window, so it is not
 // part of `pnpm run validate`: `pnpm run test:vscode` runs it by hand and
 // `make editor-vscode` runs it for the gate. The first run downloads a VS Code
-// build into `.vscode-test/` (gitignored), which is the build-and-test
-// download the gate allows.
+// build into `.vscode-test/` beside this extension (gitignored), which is the
+// build-and-test download the gate allows; a host where that is impossible
+// fails the gate step unless the caller allows that skip by name
+// (`JASMIN_ALLOWED_SKIPS`), so a gate log never reads green over a window that
+// did not open.
+//
+// `VSCODE_TEST_CACHE` names another directory for that download, and the lab
+// sets it to one shared directory, so that every worktree reads the same VS
+// Code build instead of downloading its own copy into `.vscode-test/`. Unset,
+// the cache is `.vscode-test/` beside this extension, as it always was.
 //
 // The window records everything the extension writes to its output channel
 // into the capture file named by `JASMIN_IDE_VSCODE_CAPTURE`, and the checks
@@ -21,8 +29,13 @@
 // rename on a keyword). The suite decides each check from the capabilities
 // the client recorded in the server's initialize reply. A server that does
 // not advertise a capability is not asked for it, so the check is recorded as
-// SKIP with the missing capability named, and the skip is printed here: a
-// green run never claims a measurement it did not make.
+// SKIP with the missing capability named.
+//
+// A skip is a measurement that did not happen, so it cannot by itself end in
+// a green run: every skip is matched against the allowlist in `skips.mjs`,
+// which names the skips this tree expects today and why, and any other skip
+// fails the run. An allowed skip is printed with its reason, and the summary
+// line counts it, so a PASS says exactly which checks it measured.
 import { runTests } from "@vscode/test-electron";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -30,6 +43,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { allowedSkips, expectedChecks, judgeEditingHelp } from "./skips.mjs";
 
 const editorDirectory = fileURLToPath(new URL("../..", import.meta.url));
 const repositoryRoot = fileURLToPath(new URL("../../../..", import.meta.url));
@@ -111,7 +125,7 @@ let failure;
 try {
   code = await runTests({
     version: vscodeVersion,
-    cachePath: join(editorDirectory, ".vscode-test"),
+    cachePath: process.env.VSCODE_TEST_CACHE || join(editorDirectory, ".vscode-test"),
     extensionDevelopmentPath: editorDirectory,
     extensionTestsPath: fileURLToPath(new URL("./suite.js", import.meta.url)),
     extensionTestsEnv: {JASMIN_IDE_VSCODE_CAPTURE: capturePath},
@@ -187,8 +201,8 @@ const firstAt = (needle) => texts.findIndex((text) => text.includes(needle));
 // The editing-help checks the suite recorded in the window, whatever their
 // outcome. A check that could not be measured is recorded as SKIP with its
 // reason, so a skip is named in this log instead of passing as an unmentioned
-// gap; the two checks are expected, and fewer means the window never got to
-// them.
+// gap; the expected count and the skips a green run may carry are in
+// `skips.mjs`, and fewer records mean the window never got to them.
 const editingHelp = captured
   .filter((entry) => entry.channel === "suite" && entry.level === "m3-check")
   .map((entry) => JSON.parse(entry.text));
@@ -292,12 +306,16 @@ const survivors = serverPids.filter((pid) => {
 
 const passed = checks.filter((check) => check.ok).length;
 
-const skippedChecks = editingHelp.filter((check) => check.status === "SKIP").length;
-const failedChecks = editingHelp.filter((check) => check.status === "FAIL").length;
-const editingHelpOk =
-  editingHelp.length === 2 &&
-  failedChecks === 0 &&
-  editingHelp.every((check) => check.status === "PASS" || check.status === "SKIP");
+// Which skips this run carries, and whether each one was expected. A skip is
+// a measurement that did not happen, so the run cannot pass on one the
+// allowlist does not name (`skips.mjs`); an allowed one is printed with its
+// reason and counted in the summary.
+const {
+  ok: editingHelpOk,
+  skipped: skippedChecks,
+  failed: failedChecks,
+  unexpected: unexpectedSkips
+} = judgeEditingHelp(editingHelp);
 
 console.log(`vscode-test: VS Code ${vscodeVersion}, server ${serverPath}`);
 console.log(`vscode-test: editing-help project ${projectEntry}`);
@@ -342,6 +360,17 @@ for (const check of checks) {
 }
 for (const check of editingHelp) {
   console.log(`vscode-test: ${check.status} ${check.check}: ${check.detail}`);
+  if (check.status === "SKIP") {
+    // The reason belongs in the log: a reader of the gate's output has only
+    // this line to tell an expected skip from a check that stopped happening.
+    const reason = allowedSkips.get(check.check);
+    console.log(
+      reason === undefined
+        ? `vscode-test: FAIL skip ${check.check}: the skip allowlist does not name this check, so the run cannot ` +
+            "pass on a measurement it did not make"
+        : `vscode-test:   allowed skip: ${reason}`
+    );
+  }
 }
 if (editingHelp.length === 0) {
   console.log("vscode-test: FAIL editing-help: the window recorded neither of the two checks");
@@ -349,12 +378,15 @@ if (editingHelp.length === 0) {
     "vscode-test:   never arrived: a [suite/m3-check] record for each of completion and rename, written when " +
       "the suite reaches them; none means the suite stopped before the editing-help project was open"
   );
-} else if (editingHelp.length !== 2) {
-  console.log(`vscode-test: FAIL editing-help: the window recorded ${editingHelp.length} check(s), expected 2`);
+} else if (editingHelp.length !== expectedChecks) {
+  console.log(
+    `vscode-test: FAIL editing-help: the window recorded ${editingHelp.length} check(s), expected ${expectedChecks}`
+  );
 }
 console.log(
-  `vscode-test: editing-help checks ${editingHelp.length - skippedChecks} ran, ` +
-    `${skippedChecks} skipped, ${failedChecks} failed`
+  `vscode-test: editing-help checks ${editingHelp.length - skippedChecks.length} ran, ` +
+    `${skippedChecks.length} skipped (${skippedChecks.length - unexpectedSkips.length} allowed), ` +
+    `${failedChecks.length} failed`
 );
 if (serverPids.length === 0) {
   console.log("vscode-test: FAIL exit: no server process was seen inside the window");
@@ -382,9 +414,11 @@ const ok =
   editingHelpOk;
 
 console.log(`vscode-test: ${passed}/${checks.length} lifecycle checks observed`);
-if (skippedChecks > 0) {
+if (skippedChecks.length > 0) {
+  const names = skippedChecks.map((check) => check.check).join(", ");
   console.log(
-    `vscode-test: ${skippedChecks} editing-help check(s) skipped, not measured: the server does not advertise what they need (each SKIP line names it)`
+    `vscode-test: ${skippedChecks.length} editing-help check(s) skipped, not measured: ${names}; ` +
+      `the server does not advertise what they need (each SKIP line names it, and an allowed one carries its reason)`
   );
 }
 console.log(`vscode-test: ${ok ? "PASS" : "FAIL"}`);

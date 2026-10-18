@@ -16,11 +16,20 @@ export interface LaunchSettings {
   readonly include: Readonly<Record<string, string>>;
 }
 
-/** The `initialize` options the client sends, under the names the server reads. */
+/** The diagnostics section of those options: the one setting it carries. */
+export interface DiagnosticsOptions {
+  readonly delay: number;
+}
+
+/**
+ * The `initialize` options the client sends: `arch` and `include` carry the
+ * project file's own key names, and `diagnostics.delay` is the one name the
+ * server reads out of the request.
+ */
 export interface InitializationOptions {
-  readonly diagnosticsDelay: number;
   readonly arch: string;
   readonly include: Record<string, string>;
+  readonly diagnostics: DiagnosticsOptions;
 }
 
 /** The one transport the server offers: the protocol on standard input and output. */
@@ -40,6 +49,9 @@ export interface ServerLaunch {
  * The arguments are the `server.args` setting and nothing else: the server
  * takes no argument to serve, so an installation that leaves the setting at
  * its default is started with an empty argument list.
+ *
+ * The delay is nested in `diagnostics`, the name the server reads. Nothing
+ * beside it carries the same number: one setting, one wire shape.
  */
 export function planServerLaunch(command: string, settings: LaunchSettings): ServerLaunch {
   return {
@@ -47,9 +59,9 @@ export function planServerLaunch(command: string, settings: LaunchSettings): Ser
     args: [...settings.serverArgs],
     transport: "stdio",
     initializationOptions: {
-      diagnosticsDelay: settings.diagnosticsDelay,
       arch: settings.arch,
-      include: {...settings.include}
+      include: {...settings.include},
+      diagnostics: {delay: settings.diagnosticsDelay}
     }
   };
 }
