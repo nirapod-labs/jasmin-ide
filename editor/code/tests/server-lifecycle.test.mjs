@@ -206,11 +206,11 @@ test("the manifest's defaults resolve to the built server and an empty argument 
   assert.equal(launch.transport, "stdio");
   assert.deepEqual(Object.keys(launch.initializationOptions).sort(), [
     "arch",
-    "diagnosticsDelay",
+    "diagnostics",
     "include"
   ]);
   assert.equal(launch.initializationOptions.arch, "x86-64");
-  assert.equal(launch.initializationOptions.diagnosticsDelay, 250);
+  assert.deepEqual(launch.initializationOptions.diagnostics, {delay: 250});
   assert.deepEqual(launch.initializationOptions.include, {});
 });
 
