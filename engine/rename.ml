@@ -111,6 +111,12 @@ let broken_reason path =
      offered: %s"
     path
 
+let shared_reason name path =
+  Printf.sprintf
+    "the name %s occurs in %s, which more than one require brings in, so its \
+     occurrences cannot be told apart"
+    name path
+
 let collision_reason key (other : Index.declaration) =
   Printf.sprintf "%s already names a different declaration (%s in %s)" key
     other.Index.name other.Index.file
@@ -366,6 +372,61 @@ let broken_files ~(resolve : Resolve.t) ~(broken : string -> bool) =
       if broken index.Index.file then Some index.Index.file else None)
     (Resolve.files resolve)
 
+(* The bare name of a declaration or an occurrence: the segment after the last
+   [::] of a qualified name, or the name itself. *)
+let bare_name (name : string) =
+  match String.rindex_opt name ':' with
+  | None -> name
+  | Some index -> String.sub name (index + 1) (String.length name - index - 1)
+
+(* A file that more than one [require] reaches has one text, and the resolution
+   holds one answer per byte of it, so an occurrence in it cannot be given to
+   one of the declarations the file brings in: the compiler reads the file once
+   per require, and the same name is a different declaration at each site. The
+   files found in more than one place are those named by two or more requires
+   of the closure (a [from] require is not resolved here, so it counts for
+   nothing). *)
+let shared_files (resolve : Resolve.t) =
+  let sites = Hashtbl.create 8 in
+  List.iter
+    (fun (index : Index.t) ->
+      let dir = Filename.dirname index.Index.file in
+      List.iter
+        (fun (require : Index.require) ->
+          if Option.is_none require.Index.from then
+            let written = require.Index.written in
+            let target =
+              if Filename.is_relative written then Filename.concat dir written
+              else written
+            in
+            let key = Index.normalise target in
+            let count = Option.value ~default:0 (Hashtbl.find_opt sites key) in
+            Hashtbl.replace sites key (count + 1))
+        index.Index.requires)
+    (Resolve.files resolve);
+  Hashtbl.fold
+    (fun key count acc -> if count >= 2 then key :: acc else acc)
+    sites []
+
+(* A refusal when a shared file holds an occurrence of [name]. The occurrence
+   could be the renamed declaration at one of its sites and a different one at
+   another, so no edit of that file can be made for one of them alone. *)
+let shared_refusal ~(resolve : Resolve.t) ~(name : string) =
+  let name = bare_name name in
+  List.find_map
+    (fun path ->
+      match Resolve.file resolve path with
+      | None -> None
+      | Some (index : Index.t) ->
+          if
+            List.exists
+              (fun (occurrence : Index.occurrence) ->
+                String.equal (bare_name occurrence.Index.name) name)
+              index.Index.occurrences
+          then Some (shared_reason name path)
+          else None)
+    (shared_files resolve)
+
 (* Both entry points refuse a recovered require closure the same way and with
    the same words: a [prepareRename] that offered a name the following [rename]
    would not write shows its input box for a reason the user cannot see yet.
@@ -375,7 +436,15 @@ let subject_or_refusal ~(index : Index.t) ~(resolve : Resolve.t) ~(byte : int)
     ~(broken : string -> bool) =
   match broken_files ~resolve ~broken with
   | path :: _ -> Error (broken_reason path)
-  | [] -> locate ~index ~resolve ~byte
+  | [] -> (
+      match locate ~index ~resolve ~byte with
+      | Error _ as error -> error
+      | Ok subject -> (
+          match
+            shared_refusal ~resolve ~name:subject.declaration.Index.name
+          with
+          | Some reason -> Error reason
+          | None -> Ok subject))
 
 let prepare ~(index : Index.t) ~(resolve : Resolve.t) ~(byte : int)
     ~(broken : string -> bool) =
