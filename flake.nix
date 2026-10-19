@@ -79,7 +79,7 @@
           ##################################################################
           # Where the Jasmin library comes from.
           #
-          # The server links the OCaml library `jasmin`, so this file has to
+          # The server links the OCaml library `jasmin.jasmin`, so this file has to
           # say which derivation provides it. Two are possible, and they are
           # not equivalent:
           #
@@ -102,32 +102,24 @@
           ##################################################################
           jasminLibrary = "tarball";
 
-          # The library name the repository's dune files spell is `jasmin`,
-          # so that is the name this derivation has to install. The release
-          # tarball declares `(public_name jasmin.jasmin)`, which installs
-          # the findlib package `jasmin` with the library in a sub-package,
-          # and a plain `(libraries jasmin)` then does not resolve.
-          #
-          # Only the primary library's public name is changed. `uint63`'s
-          # two-level names stay as upstream writes them: that is a library
-          # with two implementations, and giving all three one flat name
-          # makes dune refuse the build, because a public library may not
-          # depend on a private one.
-          #
-          # The package has to be declared for a public name to be legal,
-          # and the two directories this derivation assembles carry no
-          # dune-project, so one is written here.
-          jasminDuneProject = ''
-            printf '(lang dune 3.7)\n(name jasmin)\n(package (name jasmin))\n(using menhir 2.1)\n' > dune-project
-          '';
-
           # The release tarball, assembled the way vendor/fetch.sh assembles
-          # it: the compiler's `src` and `uint63` trees with their LICENSE and
-          # MANIFEST, and nothing else. The safety library, apron and PPL are
-          # not built.
-          jasminTarball = pkgs.stdenv.mkDerivation {
+          # it: the compiler's `src` and `uint63` trees with their LICENSE,
+          # MANIFEST and dune-project, and nothing else. The dune files are
+          # the archive's own, with no edit, so the library keeps the public
+          # name upstream gives it, `jasmin.jasmin`, which is the name the
+          # repository's dune files ask for; the archive's dune-project
+          # declares the package `jasmin` that name belongs to. The safety
+          # library, apron and PPL are not built.
+          #
+          # `buildDunePackage` rather than a plain derivation, so the library
+          # is installed into the OCaml site-lib directory that the server's
+          # build searches; `dune install --prefix` alone would put it under
+          # `$out/lib/jasmin`, where findlib does not look.
+          jasminTarball = ocamlPackages.buildDunePackage {
             pname = "jasmin";
             inherit version;
+
+            duneVersion = "3";
 
             src = pkgs.fetchurl {
               url = upstream;
@@ -146,40 +138,19 @@
               mv source/compiler/uint63 lib/uint63
               mv source/compiler/LICENSE lib/LICENSE
               mv source/compiler/MANIFEST lib/MANIFEST
+              mv source/compiler/dune-project lib/dune-project
               chmod -R u+w lib
               cd lib
               runHook postUnpack
             '';
 
-            postPatch = ''
-              substituteInPlace src/dune \
-                --replace-fail '(public_name jasmin.jasmin)' '(public_name jasmin)'
-              ${jasminDuneProject}
-            '';
-
-            nativeBuildInputs = [
-              ocamlPackages.dune_3
-              ocamlPackages.menhir
-            ];
-            buildInputs = [ ocamlPackages.ocaml ];
+            nativeBuildInputs = [ ocamlPackages.menhir ];
             propagatedBuildInputs = [
               ocamlPackages.angstrom
               ocamlPackages.batteries
               ocamlPackages.menhirLib
               ocamlPackages.zarith
             ];
-
-            buildPhase = ''
-              runHook preBuild
-              dune build -p jasmin @install -j"$NIX_BUILD_CORES"
-              runHook postBuild
-            '';
-
-            installPhase = ''
-              runHook preInstall
-              dune install --prefix="$out" jasmin
-              runHook postInstall
-            '';
 
             meta = {
               description = "The OCaml library of the Jasmin compiler, for the language server";
@@ -218,12 +189,9 @@
           # is assembled by vendor/fetch.sh, which downloads, so it is not part
           # of a Nix build; the rest of vendor/ is source that no build reads,
           # and vendor/jasmin.lock stays because the opam contract test reads
-          # the release it pins. With the tree removed the library has to come
-          # from `jasminLibraryPackage` above, named `jasmin` by its `postPatch`
-          # rewrite; an installed opam `jasmin` does not stand in for it, since
-          # that package installs the library as `jasmin.jasmin` and a plain
-          # `(libraries jasmin)` then does not resolve. docs/nix.md records what
-          # is measured about the opam side.
+          # the release it pins. With the tree removed the library comes from
+          # `jasminLibraryPackage` above, under the name `jasmin.jasmin` that
+          # the released opam package installs as well.
           dropVendor = ''
             rm -rf vendor/jasmin
           '';

@@ -269,10 +269,9 @@ jobs:
           path: ${{ runner.temp }}/release/
           if-no-files-found: error
 
-  # Each release binary runs the corpus of the release it was built against,
-  # through the harness this repository already has: every verdict must agree
-  # with the release's own record of what its compiler says. A binary runs only
-  # on its own platform, so this is a matrix too. The corpus is not in this
+  # Each release binary runs the corpus of the release it was built against:
+  # every file gets a verdict and nothing is internal. A binary runs only on its
+  # own platform, so this is a matrix too. The corpus is not in this
   # repository and is never copied into it; it comes from the tag the lock file
   # names.
   smoke:
@@ -308,7 +307,7 @@ jobs:
             https://github.com/jasmin-lang/jasmin.git "$RUNNER_TEMP/jasmin"
           binary=$RUNNER_TEMP/release/jasmin-lsp-${GITHUB_REF_NAME#v}-${{ matrix.platform }}
           chmod 755 "$binary"
-          JASMIN_LSP=$binary sh test/parity/parity.sh "$RUNNER_TEMP/jasmin"
+          sh scripts/corpus-smoke.sh "$binary" "$RUNNER_TEMP/jasmin"
 
   # The packages: one VSIX per platform carrying that platform's server, one
   # universal package with no server, the Zed extension's module and manifest,
