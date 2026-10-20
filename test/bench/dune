@@ -16,7 +16,4 @@
 ; so the binary and the fixture are dependencies: a rebuilt driver re-runs it.
 
 (cram
- (deps
-  ../../bench/run.sh
-  ../../bench/bench.exe
-  fixtures/unit.jazz))
+ (deps ../../bench/run.sh ../../bench/bench.exe fixtures/unit.jazz))

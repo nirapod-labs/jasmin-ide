@@ -75,8 +75,7 @@ let usage =
       "says so, one row for each, so the table is complete before the features";
       "are. So is a row with no position to ask at, on an entry that declares";
       "nothing and calls nothing. After the table, each budget is printed with";
-      "its worst median and p95 over the units and a verdict: met only when \
-       every";
+      "its worst median and p95 over the units and a verdict: met only when every";
       "row of the budget was measured and none missed.";
       "";
       "The exit status is 0 when every unit ran, and 2 when the command line";
@@ -847,28 +846,28 @@ let measure_requests ~runs unit_ =
          nothing to time and no project to open for it. *)
       { feature; status = Not_advertised; samples = [] }
     else
-      match request_byte index feature with
-      | None ->
-          (* No declaration and no call: there is no position an editor would
-             ask from, so the row is unavailable rather than a measurement of
-             byte 0, and no request is made. A project row opens nothing either,
-             so [project_files] stays 0: a size printed beside no number would
-             describe a project request that never happened. The tally counts
-             the row with the unanswered rows. *)
-          { feature; status = No_position; samples = [] }
-      | Some byte -> (
-          if over_project feature then ignore (open_the_project ());
-          let position = Jide_engine.Document.position_of_byte document byte in
-          match answer_of_response (ask ~position feature) with
-          | `Unavailable -> { feature; status = Unavailable; samples = [] }
-          | `Refused message ->
-              { feature; status = Refused message; samples = [] }
-          | `Answered ->
-              let samples =
-                List.init runs (fun _ ->
-                    fst (time (fun () -> ignore (ask ~position feature))))
-              in
-              { feature; status = Answered; samples })
+    match request_byte index feature with
+    | None ->
+        (* No declaration and no call: there is no position an editor would
+           ask from, so the row is unavailable rather than a measurement of
+           byte 0, and no request is made. A project row opens nothing either,
+           so [project_files] stays 0: a size printed beside no number would
+           describe a project request that never happened. The tally counts
+           the row with the unanswered rows. *)
+        { feature; status = No_position; samples = [] }
+    | Some byte -> (
+        if over_project feature then ignore (open_the_project ());
+        let position = Jide_engine.Document.position_of_byte document byte in
+        match answer_of_response (ask ~position feature) with
+        | `Unavailable -> { feature; status = Unavailable; samples = [] }
+        | `Refused message ->
+            { feature; status = Refused message; samples = [] }
+        | `Answered ->
+            let samples =
+              List.init runs (fun _ ->
+                  fst (time (fun () -> ignore (ask ~position feature))))
+            in
+            { feature; status = Answered; samples })
   in
   let rows = List.map measure features in
   let project_files, project_bytes =
@@ -888,7 +887,8 @@ let request_state row =
       if percentile 0.95 row.samples <= budget_of_feature row.feature then "met"
       else "missed"
 
-let is_refused row = match row.status with Refused _ -> true | _ -> false
+let is_refused row =
+  match row.status with Refused _ -> true | _ -> false
 
 let print_request_samples results =
   List.iter
@@ -1009,8 +1009,8 @@ let print_budgets results =
       | _, verdict -> verdict
     in
     Printf.printf
-      "budget %s (%s, p95 at most %.1f ms): %d of %d rows measured, %d missed, \
-       worst median %.3f ms, worst p95 %.3f ms: %s\n"
+      "budget %s (%s, p95 at most %.1f ms): %d of %d rows measured, %d \
+       missed, worst median %.3f ms, worst p95 %.3f ms: %s\n"
       label description budget_ms (List.length measured) (List.length mine)
       (List.length missed) worst_median worst_p95 verdict;
     List.iter
@@ -1209,7 +1209,9 @@ let main arguments =
             "editor requests from a warm snapshot, %d runs per unit, \
              milliseconds against 20 (snapshot) and 100 (project)\n"
             options.runs;
-          let results = List.map (measure_requests ~runs:options.runs) units in
+          let results =
+            List.map (measure_requests ~runs:options.runs) units
+          in
           if options.samples then print_request_samples results;
           print_request_table results;
           print_request_tally results;
