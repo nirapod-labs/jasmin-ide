@@ -233,6 +233,43 @@ let test_a_qualified_name_renames_its_last_segment () =
             }\n");
       check "qualified: two occurrences are rewritten" (edit_count edits = 2)
 
+(* A declaration may carry a qualified name too: [inline fn ble::e] is one
+   function, and the compiler accepts it beside a call written [ble::e()]. The
+   last segment of the declaration is the range a rename rewrites, as it is for
+   a use. *)
+let qualified_declaration =
+  "inline fn ble::e () -> reg u32 {\n\
+  \  reg u32 x = 0;\n\
+  \  return x;\n\
+   }\n\
+   export fn out() -> reg u32 {\n\
+  \  reg u32 x = ble::e();\n\
+  \  return x;\n\
+   }\n"
+
+let test_a_qualified_declaration_renames_its_last_segment () =
+  let file = "/work/qualified-declaration.jazz" in
+  match
+    renamed ~file ~text:qualified_declaration ~within:"::e ()" ~name:"e"
+      ~new_name:"times" ()
+  with
+  | Error reason ->
+      check ("qualified declaration: the rename is refused: " ^ reason) false
+  | Ok edits ->
+      check "qualified declaration: the declaration and the call are rewritten"
+        (String.equal
+           (apply qualified_declaration edits)
+           "inline fn ble::times () -> reg u32 {\n\
+           \  reg u32 x = 0;\n\
+           \  return x;\n\
+            }\n\
+            export fn out() -> reg u32 {\n\
+           \  reg u32 x = ble::times();\n\
+           \  return x;\n\
+            }\n");
+      check "qualified declaration: two occurrences are rewritten"
+        (edit_count edits = 2)
+
 (* A namespace's own name is refused: a qualified name has one range for the
    whole of it, so there is no range for the [A] a rename would rewrite. *)
 let test_a_namespace_name_is_refused () =
@@ -1152,6 +1189,62 @@ let test_a_later_declaration_in_a_required_file_is_refused () =
           (apply cross_file_document edits);
         false)
 
+(* A file that two requires bring in has one text and one meaning at each
+   site: [sum.jinc] reads the parameter [N] of whichever namespace requires it.
+   Renaming the [N] of one namespace would edit the file for the other as well,
+   so the rename is refused with the reason, and so is prepareRename. *)
+let shared_library =
+  "/* Parameters:\n\
+  \  param int N;\n\
+   */\n\
+   fn sum(reg u32[N] t) -> reg u32 {\n\
+  \  reg u32 s;\n\
+  \  inline int c;\n\
+  \  s = 0;\n\
+  \  for c = 0 to N {\n\
+  \    s += t[c];\n\
+  \  }\n\
+  \  return s;\n\
+   }\n"
+
+let shared_document =
+  "namespace Short {\n\
+  \  param int N = 1;\n\
+  \  require \"sum.jinc\"\n\
+   }\n\
+   namespace Long {\n\
+  \  param int N = 8;\n\
+  \  require \"sum.jinc\"\n\
+   }\n"
+
+let test_a_name_in_a_file_two_requires_bring_in_is_refused () =
+  let file = "/work/shared.jazz" in
+  let within = "param int N = 1;" in
+  let files = [ ("sum.jinc", shared_library) ] in
+  let result =
+    renamed ~files ~file ~text:shared_document ~within ~name:"N" ~new_name:"M"
+      ()
+  in
+  check
+    ("shared: a parameter whose name the shared file uses is refused, saying \
+      why: " ^ refusal result)
+    (match result with
+    | Error reason ->
+        String.starts_with ~prefix:"the name N occurs in " reason
+        && String.ends_with
+             ~suffix:
+               "sum.jinc, which more than one require brings in, so its \
+                occurrences cannot be told apart"
+             reason
+    | Ok _ -> false);
+  let resolved = resolve ~files file shared_document in
+  check "shared: prepareRename refuses the same name"
+    (refused
+       (Jide_engine.Rename.prepare ~index:(index_of resolved file)
+          ~resolve:resolved
+          ~byte:(byte shared_document ~within ~name:"N")
+          ~broken:nothing_broken))
+
 (* Nothing to rename: a position on no name, a name with no declaration. Both
    reasons are asserted exactly, because prepareRename answers the same
    refusals as the rename, in the same words. *)
@@ -1366,6 +1459,12 @@ let test_the_renamed_program_keeps_its_verdict () =
         "g",
         "A",
         accepted );
+      ( "a qualified declaration's last segment",
+        qualified_declaration,
+        "::e ()",
+        "e",
+        "times",
+        accepted );
     ]
   in
   List.iter
@@ -1432,6 +1531,7 @@ let () =
   test_an_annotation_label_is_refused ();
   test_an_include_path_is_refused ();
   test_a_qualified_name_renames_its_last_segment ();
+  test_a_qualified_declaration_renames_its_last_segment ();
   test_a_namespace_name_is_refused ();
   test_a_namespace_prefix_is_refused ();
   test_a_spaced_qualified_name_is_refused ();
@@ -1441,6 +1541,7 @@ let () =
   test_a_later_function_in_the_same_file_is_refused ();
   test_a_later_declaration_in_a_nested_block_is_refused ();
   test_a_later_declaration_in_a_required_file_is_refused ();
+  test_a_name_in_a_file_two_requires_bring_in_is_refused ();
   test_a_name_in_another_namespace_is_not_a_collision ();
   test_a_variable_in_another_namespace_is_not_a_collision ();
   test_a_function_in_another_namespace_is_a_collision ();
