@@ -49,8 +49,8 @@ val prepare :
     that has recovered syntax errors (see {!rename}'s [broken]), a position
     that holds no identifier (a keyword, a literal, the inside of a comment or
     a string, blank space), an intrinsic, an annotation label, an include
-    path, a name the resolver found no declaration for, a name that occurs in
-    a file more than one [require] brings in (see below), a namespace's own
+    path, a name the resolver found no declaration for, an occurrence that
+    means different declarations at the require sites of its file (see below), a namespace's own
     name, the namespace part of a qualified name (the [A] of [A::x], whose
     last segment is the name a rename would rewrite), and a qualified name
     written with spaces around [::], whose last segment has no range. A
@@ -99,10 +99,11 @@ val rename :
       intrinsic, an annotation label, an include path or a namespace's own
       name, or it is the namespace part of a qualified name, or it names no
       declaration;
-    - the name of the declaration occurs in a file that more than one
-      [require] brings in. Such a file has one text but a separate meaning at
-      each require site, so an occurrence in it cannot be given to one
-      declaration, and an edit of it would change the other sites too;
+    - an occurrence in a file that more than one [require] brings in means
+      the declaration at one require site and another at a second. Such a
+      file has one text, so an edit of it would change both meanings; the
+      refusal names them. An occurrence that means the same declaration at
+      every site is an edit, once;
     - an occurrence of the symbol is a qualified name written with spaces
       around [::], whose last segment has no range of its own, so rewriting
       it would delete the qualification;

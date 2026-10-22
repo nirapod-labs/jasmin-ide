@@ -458,48 +458,37 @@ let plan ~(index : Index.t) ~(resolve : Resolve.t) ~(files : Resolve.t list)
 
 let prepare ~(index : Index.t) ~(resolve : Resolve.t) ~(byte : int)
     ~(broken : string -> bool) =
-  match subject_or_refusal ~index ~resolve ~byte ~broken with
+  match plan ~index ~resolve ~files:[] ~byte ~broken with
   | Error reason -> Error reason
-  | Ok subject -> Ok (subject.writable, subject.declaration.Index.kind)
+  | Ok (subject, _groups) ->
+      Ok (subject.writable, subject.declaration.Index.kind)
+
+let renamed_written (occurrence : Index.occurrence) (new_name : string) =
+  match String.rindex_opt occurrence.Index.name ':' with
+  | None -> new_name
+  | Some index -> String.sub occurrence.Index.name 0 (index + 1) ^ new_name
 
 let rename ~(files : Resolve.t list) ~(index : Index.t) ~(resolve : Resolve.t)
     ~(byte : int) ~(new_name : string) ~(broken : string -> bool) =
   if not (valid_name new_name) then Error (invalid_reason new_name)
   else
-    match subject_or_refusal ~index ~resolve ~byte ~broken with
+    match plan ~index ~resolve ~files ~byte ~broken with
     | Error reason -> Error reason
-    | Ok subject -> (
+    | Ok (subject, groups) -> (
         let target = subject.declaration in
-        let groups = search ~resolve ~files ~target in
         (* The rule's other end, once per file searched: a declaration the new
            name already has there, when the declaration being renamed is in
            scope where that one is written. *)
         let rec check_declarations = function
           | [] -> Ok ()
-          | (group : searched) :: rest -> (
-              match Resolve.file group.resolution group.path with
-              | None -> check_declarations rest
-              | Some index -> (
-                  match later_clash group index target new_name with
-                  | Some other -> Error (collision_reason new_name other)
-                  | None -> check_declarations rest))
+          | (resolution, path, index) :: rest -> (
+              match later_clash resolution ~path index target new_name with
+              | Some other -> Error (collision_reason new_name other)
+              | None -> check_declarations rest)
         in
-        (* Every occurrence is checked before the rename is answered: a
-           partial edit set would leave the program naming two declarations,
-           and an occurrence whose last segment has no range cannot be
-           rewritten at all. The check and the edit are made together, so no
-           range is ever written that was not checked, and one refusal refuses
-           the whole rename. *)
-        let rec check_groups = function
-          | [] -> Ok []
-          | (group : searched) :: rest -> (
-              match check_group group with
-              | Error _ as error -> error
-              | Ok edits -> (
-                  match check_groups rest with
-                  | Error _ as error -> error
-                  | Ok groups -> Ok ((group.path, edits) :: groups)))
-        and check_group (group : searched) =
+        (* Every occurrence is checked at every site of its file before the
+           rename is answered, so one refusal refuses the whole rename. *)
+        let check_group (group : searched) =
           let rec loop acc = function
             | [] -> Ok (List.rev acc)
             | (occurrence : Index.occurrence) :: rest -> (
@@ -508,10 +497,18 @@ let rename ~(files : Resolve.t list) ~(index : Index.t) ~(resolve : Resolve.t)
                 | Some span -> (
                     let at = occurrence.Index.span.Jide_lang.Span.start_byte in
                     let key = renamed_written occurrence new_name in
-                    match
-                      clash_at group.resolution ~file:group.path ~byte:at ~key
-                        ~kind:target.Index.kind ~target
-                    with
+                    let clash =
+                      List.fold_left
+                        (fun found site ->
+                          match found with
+                          | Taken _ | Unknown -> found
+                          | Free ->
+                              clash_at group.resolution ~file:group.path ~site
+                                ~byte:at ~key ~kind:target.Index.kind ~target)
+                        Free
+                        (Resolve.sites group.resolution group.path)
+                    in
+                    match clash with
                     | Free -> loop ({ span; new_text = new_name } :: acc) rest
                     | Unknown ->
                         Error
@@ -520,6 +517,13 @@ let rename ~(files : Resolve.t list) ~(index : Index.t) ~(resolve : Resolve.t)
           in
           loop [] group.occurrences
         in
-        match check_declarations groups with
+        let rec check_groups acc = function
+          | [] -> Ok (List.rev acc)
+          | (group : searched) :: rest -> (
+              match check_group group with
+              | Error _ as error -> error
+              | Ok edits -> check_groups ((group.path, edits) :: acc) rest)
+        in
+        match check_declarations (reached ~resolve ~files) with
         | Error _ as error -> error
-        | Ok () -> check_groups groups)
+        | Ok () -> check_groups [] groups)
