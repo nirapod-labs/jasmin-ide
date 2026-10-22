@@ -1,50 +1,75 @@
-The list covers every release file and not the sidecars beside them.
+The checksums of a release directory: written, read back by the standard
+tools, and verified with every way a list can be wrong.
 
-A cram directory is reused between runs, so the test starts by clearing what
-it builds below.
-
-  $ rm -rf release uppercase traversal twice empty hollow nested
-
+  $ sums() { sh ../../scripts/checksums.sh "$@" 2>&1; echo "exit: $?"; }
   $ mkdir release
   $ printf 'alpha\n' > release/jasmin-lsp-0.0.0-linux-x86_64
-  $ printf 'beta\n' > release/jasmin-lsp-0.0.0-linux-x86_64.sha256
-  $ sh ../../scripts/release-checksums.sh release
-  release-checksums.sh: wrote release/SHA256SUMS: 1 files
-    jasmin-lsp-0.0.0-linux-x86_64
+  $ printf 'beta\n' > release/jasmin-lsp-0.0.0-macos-aarch64
+  $ printf 'stale\n' > release/SHA256SUMS
+  $ sums write release
+  checksums.sh: wrote release/SHA256SUMS and 2 sidecars
+  exit: 0
   $ cat release/SHA256SUMS
   b6a98d9ce9a2d9149288fa3df42d377c3e42737afdcdaf714e33c0a100b51060  jasmin-lsp-0.0.0-linux-x86_64
+  f2c82decdd7181cf98945929a62598db7e6b477e11f6e0eb0ae97020eff151ad  jasmin-lsp-0.0.0-macos-aarch64
 
-The verifier passes that list, and says how many files it checked.
+The list and each sidecar are in the format `sha256sum -c` reads, so a user
+needs no tool of ours to check a download.
 
-  $ sh ../../scripts/release-verify-sums.sh release 2>&1; echo "exit: $?"
+  $ check() { (cd release && { sha256sum -c "$1" 2>/dev/null || shasum -a 256 -c "$1"; }); }
+  $ check SHA256SUMS
+  jasmin-lsp-0.0.0-linux-x86_64: OK
+  jasmin-lsp-0.0.0-macos-aarch64: OK
+  $ check jasmin-lsp-0.0.0-linux-x86_64.sha256
+  jasmin-lsp-0.0.0-linux-x86_64: OK
+  $ sums verify release
   ok jasmin-lsp-0.0.0-linux-x86_64
-  release-verify-sums.sh: verified 1 files
+  ok jasmin-lsp-0.0.0-macos-aarch64
+  checksums.sh: verified 2 files
   exit: 0
 
-One changed byte is a failure, and the line names the digest the list holds
-and the one the file now has.
+One changed byte, a file the list omits and a listed file that is gone each
+fail the verification.
 
   $ printf 'alphb\n' > release/jasmin-lsp-0.0.0-linux-x86_64
-  $ sh ../../scripts/release-verify-sums.sh release 2>&1; echo "exit: $?"
+  $ sums verify release | grep -v '^ok'
   FAILED jasmin-lsp-0.0.0-linux-x86_64: wanted b6a98d9ce9a2d9149288fa3df42d377c3e42737afdcdaf714e33c0a100b51060, the file is 85f03290ae89e66d38551781c74b1eb56bb14c9230110c48b54aa1e5c60237bb
-  release-verify-sums.sh: 1 problems: 1 from the list, 0 file(s) the list omits
+  checksums.sh: 1 problem(s)
+  exit: 1
+  $ printf 'alpha\n' > release/jasmin-lsp-0.0.0-linux-x86_64
+  $ printf 'gamma\n' > release/notes.txt
+  $ sums verify release | grep -v '^ok'
+  FAILED notes.txt: in the directory and not in the list
+  checksums.sh: 1 problem(s)
+  exit: 1
+  $ rm release/notes.txt release/jasmin-lsp-0.0.0-macos-aarch64
+  $ sums verify release | grep -v '^ok'
+  FAILED jasmin-lsp-0.0.0-macos-aarch64: the list names a file the directory does not hold
+  checksums.sh: 1 problem(s)
   exit: 1
 
-The same list is green again once the bytes are back, so the red above was the
-changed byte and not the list.
+A line that is not well formed names nothing: an uppercase digest, a path
+that leaves the directory, a name given twice.
 
-  $ printf 'alpha\n' > release/jasmin-lsp-0.0.0-linux-x86_64
-  $ sh ../../scripts/release-verify-sums.sh release >/dev/null; echo "exit: $?"
-  exit: 0
-
-A file in the directory that the list does not name is a failure too: the list
-would be incomplete while every line on it is right.
-
-  $ printf 'gamma\n' > release/notes.txt
-  $ sh ../../scripts/release-verify-sums.sh release 2>&1; echo "exit: $?"
-  ok jasmin-lsp-0.0.0-linux-x86_64
-  FAILED notes.txt: in the directory and not in the list
-  release-verify-sums.sh: 1 problems: 0 from the list, 1 file(s) the list omits
+  $ mkdir bad && printf 'alpha\n' > bad/file
+  $ printf 'B6a98d9ce9a2d9149288fa3df42d377c3e42737afdcdaf714e33c0a100b51060  file\n' > bad/SHA256SUMS
+  $ sums verify bad
+  FAILED file: the digest is not 64 lowercase hex digits
+  FAILED file: in the directory and not in the list
+  checksums.sh: 2 problem(s)
+  exit: 1
+  $ printf 'b6a98d9ce9a2d9149288fa3df42d377c3e42737afdcdaf714e33c0a100b51060  ../file\n' > bad/SHA256SUMS
+  $ sums verify bad
+  FAILED ../file: not a plain file name
+  FAILED file: in the directory and not in the list
+  checksums.sh: 2 problem(s)
+  exit: 1
+  $ printf 'b6a98d9ce9a2d9149288fa3df42d377c3e42737afdcdaf714e33c0a100b51060  file\n' > bad/SHA256SUMS
+  $ cat bad/SHA256SUMS bad/SHA256SUMS > bad/twice && mv bad/twice bad/SHA256SUMS
+  $ sums verify bad
+  ok file
+  FAILED file: named twice
+  checksums.sh: 1 problem(s)
   exit: 1
 
 A listed file that is gone is a failure, not a skip. The sidecar left beside
