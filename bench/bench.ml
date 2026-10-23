@@ -1,5 +1,5 @@
-(* Timing for the latency budgets that the server itself decides: the whole
-   check of a unit, the interval from a keystroke to the
+(* Timing for the budgets of design section 15 that the server itself
+   decides: the whole check of a unit, the interval from a keystroke to the
    diagnostics it produces, and the editor requests (completion, signature
    help, hover and definition from a snapshot, and references and rename over
    a project).
@@ -69,14 +69,10 @@ let usage =
       "A request row is compared with its budget, in milliseconds: completion,";
       "signature help, hover and definition answer to 20, and references and";
       "rename to 100 over the project, which is every Jasmin file under the";
-      "entry's directory. What such a request searches is the entry and the";
-      "files it requires, not every file the project opened. A request the";
-      "server does not advertise in its initialize result is not sent: its row";
-      "says so, one row for each, so the table is complete before the features";
-      "are. So is a row with no position to ask at, on an entry that declares";
-      "nothing and calls nothing. After the table, each budget is printed with";
-      "its worst median and p95 over the units and a verdict: met only when every";
-      "row of the budget was measured and none missed.";
+      "entry's directory. A request the server does not answer is reported as";
+      "unavailable, one row for each, so the table is complete before the";
+      "features are; so is a row with no position to ask at, on an entry that";
+      "declares nothing and calls nothing.";
       "";
       "The exit status is 0 when every unit ran, and 2 when the command line";
       "or an input is wrong.";
@@ -322,8 +318,8 @@ type keystroke_result = {
 
 (* The interval the keystroke budget names: the packet arrives at the loop,
    the loop stores the change, the check runs and the diagnostics are built.
-   The debounce and the publish step, which the keystroke budget also covers,
-   are not in the tree at this commit, so neither contributes here. *)
+   The design's debounce and its publish step are not in the tree at this
+   commit, so neither contributes here. *)
 let run_keystroke ~attempt server unit_ base uri =
   let text = edit base attempt in
   let packet =
@@ -418,21 +414,19 @@ let print_keystroke_table results =
 
 (* -- the editor requests -------------------------------------------------- *)
 
-(* Two budgets are decided by requests on a snapshot the server already holds:
-   the snapshot-request budget (completion, signature help, hover and
-   definition, within 20 ms) and the project-wide request budget (references
-   and rename over a project, within 100 ms).
+(* Two budgets of design section 15 are decided by one request on a snapshot
+   the server already holds: completion, signature help, hover and definition
+   within 20 ms, and references and rename over a project of a library tree's
+   size within 100 ms.
 
    Each request is sent through the server's own request path, the one an
    editor's client takes, and the interval is that path alone: the snapshot is
    open and analysed before the first run, so a number is the work the request
    does and not the check that came before it.
 
-   The server advertises the requests it answers in its initialize result.
-   A request it does not advertise is not sent, and its row says it was not
-   measured: a request sent anyway would come back as a refusal, and a refusal
-   ends the run, so the harness would have to report an answer it did not get.
-   The day a handler lands and is advertised, the same row measures it with no
+   A request the server does not answer yet is reported as unavailable, one
+   row for each of the six requests. The harness is then complete before the
+   features are, and the day a handler lands the same row measures it with no
    change here: the row is the server's answer, not a stand-in for it. *)
 
 type feature =
@@ -453,16 +447,6 @@ let feature_name = function
   | Definition -> "definition"
   | References -> "references"
   | Rename -> "rename"
-
-(* The capability the server advertises for each request in its initialize
-   result. *)
-let capability_of_feature = function
-  | Completion -> "completionProvider"
-  | Signature_help -> "signatureHelpProvider"
-  | Hover -> "hoverProvider"
-  | Definition -> "definitionProvider"
-  | References -> "referencesProvider"
-  | Rename -> "renameProvider"
 
 let method_of_feature = function
   | Completion -> "textDocument/completion"
@@ -560,102 +544,8 @@ let engine_analysis engine : Jide_controller.Server.analysis =
         | Some (analysis : Jide_engine.Engine.analysis) ->
             Some (analysis.version, analysis.diagnostics)
         | None -> None);
-    required =
-      (fun ~uri ->
-        match Jide_engine.Engine.check engine ~uri with
-        | Some (analysis : Jide_engine.Engine.analysis) ->
-            List.map
-              (fun (file : Jide_engine.Engine.required) ->
-                {
-                  Jide_controller.Server.uri = file.uri;
-                  text = file.text;
-                  diagnostics = file.diagnostics;
-                })
-              analysis.required
-        | None -> []);
     forget = (fun ~uri:_ -> ());
   }
-
-(* The engine's own answers to the editing requests, in the shape the protocol
-   layer asks for them. This is the record the executable builds
-   (`lsp-server/native/main.ml`) for completion and signature help, written
-   again here because that file is an executable and the benchmark links the
-   libraries: without it the server would answer from
-   {!Jide_controller.Features.unavailable}, every request would come back with
-   the empty answer, and the table would time a request that did no work.
-   Rename has no engine answer in the tree at this commit, so its two entries
-   stay [None] and the server refuses a rename, which the table reports as a
-   refusal rather than a number. *)
-let completion_kind_of (kind : Jide_engine.Complete.kind) :
-    Jide_engine.Types.completion_kind =
-  match kind with
-  | Jide_engine.Complete.Keyword -> Jide_engine.Types.Keyword
-  | Jide_engine.Complete.Function -> Jide_engine.Types.Function
-  | Jide_engine.Complete.Parameter | Jide_engine.Complete.Variable ->
-      Jide_engine.Types.Variable_
-  | Jide_engine.Complete.Global -> Jide_engine.Types.Field
-  | Jide_engine.Complete.Type_alias -> Jide_engine.Types.Type_parameter
-  | Jide_engine.Complete.Annotation_key -> Jide_engine.Types.Text
-
-let completion_item_of (item : Jide_engine.Complete.item) :
-    Jide_engine.Types.completion_item =
-  {
-    Jide_engine.Types.label = item.Jide_engine.Complete.label;
-    kind = completion_kind_of item.Jide_engine.Complete.kind;
-    detail = item.Jide_engine.Complete.detail;
-    documentation = None;
-    insert_text = None;
-    sort_text = None;
-  }
-
-let completion_of (completion : Jide_engine.Complete.completion) :
-    Jide_engine.Types.completion_item list =
-  List.map completion_item_of completion.Jide_engine.Complete.items
-
-let signature_of (signature : Jide_engine.Complete.signature) :
-    Jide_engine.Types.signature =
-  {
-    Jide_engine.Types.label = signature.Jide_engine.Complete.label;
-    documentation = None;
-    parameters =
-      List.map
-        (fun label -> { Jide_engine.Types.label; documentation = None })
-        signature.Jide_engine.Complete.parameters;
-  }
-
-let signature_help_of (help : Jide_engine.Complete.signature) :
-    Jide_engine.Types.signature_help =
-  {
-    Jide_engine.Types.signatures = [ signature_of help ];
-    active_signature = 0;
-    active_parameter = help.Jide_engine.Complete.active;
-  }
-
-let engine_features engine : Jide_controller.Features.t =
-  let completion ~uri ~byte =
-    match Jide_engine.Engine.snapshot engine ~uri with
-    | Some snapshot ->
-        Some
-          (completion_of
-             (Jide_engine.Complete.completion ~index:snapshot.index
-                ~resolve:snapshot.resolve ~byte ()))
-    | None -> None
-  in
-  let signature_help ~uri ~byte =
-    match Jide_engine.Engine.snapshot engine ~uri with
-    | Some snapshot ->
-        Option.map signature_help_of
-          (Jide_engine.Complete.signature_help ~index:snapshot.index
-             ~resolve:snapshot.resolve ~facts:snapshot.facts ~byte ())
-    | None -> None
-  in
-  Jide_controller.Features.make ~completion ~signature_help
-    ~prepare_rename:(fun ~uri:_ ~byte:_ -> None)
-    ~rename:(fun ~uri:_ ~byte:_ ~new_name:_ -> None)
-    ~workspace_symbols:(fun ~query:_ -> None)
-    ~highlights:(fun ~uri:_ ~byte:_ -> None)
-    ~semantic_tokens:(fun ~uri:_ -> None)
-    ()
 
 let absolute path =
   match Unix.realpath path with
@@ -710,12 +600,7 @@ let open_project ~skip server directory =
   walk directory;
   (!files, !bytes)
 
-type request_status =
-  | Answered
-  | Not_advertised
-  | Unavailable
-  | No_position
-  | Refused of string
+type request_status = Answered | Unavailable | No_position | Refused of string
 
 type feature_result = {
   feature : feature;
