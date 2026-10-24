@@ -626,34 +626,6 @@ let answer_of_response (response : Jsonrpc.Response.t) =
       | Jsonrpc.Response.Error.Code.MethodNotFound -> `Unavailable
       | _ -> `Refused error.message)
 
-(* The response to request [id] among the packets a server returned. *)
-let response_to ~id packets =
-  List.find_map
-    (function
-      | Jsonrpc.Packet.Response response
-        when Jsonrpc.Id.equal response.Jsonrpc.Response.id (`Int id) ->
-          Some response
-      | _ -> None)
-    packets
-
-(* The capabilities an initialize response advertises, or [`Null] when the
-   response is missing or an error: a server that answers nothing advertises
-   nothing, so every request is then not measured. *)
-let advertised_capabilities packets =
-  match response_to ~id:1 packets with
-  | Some { Jsonrpc.Response.result = Ok json; _ } -> (
-      match Yojson.Safe.Util.member "capabilities" json with
-      | `Assoc _ as capabilities -> capabilities
-      | _ -> `Null)
-  | Some { Jsonrpc.Response.result = Error _; _ } | None -> `Null
-
-let advertises capabilities feature =
-  match
-    Yojson.Safe.Util.member (capability_of_feature feature) capabilities
-  with
-  | `Null | `Bool false -> false
-  | _ -> true
-
 let measure_requests ~runs unit_ =
   let text = read_file unit_.file in
   let uri = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path unit_.file) in
@@ -662,8 +634,7 @@ let measure_requests ~runs unit_ =
   let server =
     Jide_controller.Server.create
       ~log:(fun _ -> ())
-      ~engine ~features:(engine_features engine)
-      ~analysis:(engine_analysis engine) ()
+      ~engine ~analysis:(engine_analysis engine) ()
   in
   let initialized =
     Jide_controller.Server.handle_packet server
