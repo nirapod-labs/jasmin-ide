@@ -35,9 +35,14 @@ export interface JasminSettings {
 
 /** What the server receives in the `initialize` request's initializationOptions. */
 export interface InitializationOptions {
-  readonly diagnosticsDelay: number;
   readonly arch: string;
   readonly include: Readonly<Record<string, string>>;
+  readonly diagnostics: DiagnosticsOptions;
+}
+
+/** The diagnostics section of those options: the one setting it carries. */
+export interface DiagnosticsOptions {
+  readonly delay: number;
 }
 
 /**
@@ -60,12 +65,17 @@ export function readSettings(configuration: ConfigurationReader): JasminSettings
 /**
  * Maps the settings onto the options of the `initialize` request, for the
  * server to use when the workspace has no project file.
+ *
+ * The delay is nested, `diagnostics.delay`, which is the name the server reads
+ * and the shape the Zed extension sends. A flat alias beside it would be a
+ * second wire shape for one setting, so there is none: `arch` and `include`
+ * stay at the top level, where the server's project fields put them.
  */
 export function toInitializationOptions(settings: JasminSettings): InitializationOptions {
   return {
-    diagnosticsDelay: settings.diagnosticsDelay,
     arch: settings.arch,
-    include: settings.include
+    include: settings.include,
+    diagnostics: {delay: settings.diagnosticsDelay}
   };
 }
 

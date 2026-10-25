@@ -12,8 +12,15 @@
 # carries neither; the difference is whether the directory was staged before
 # `vsce` ran, not a line here. An exclusion of `**/*.map` still leaves the
 # bundled server alone, because it is an executable with no extension.
+#
+# The test cache is named twice on purpose. `.vscode-test/**` leaves out the
+# contents of a real download, and the bare `.vscode-test` leaves out the path
+# itself, which is what a worktree that links one shared download puts here: a
+# symlink is not a directory, so the first pattern does not match it and `vsce
+# ls` would list the link as a file of the package.
 .artifacts/**
 .vscode/**
+.vscode-test
 .vscode-test/**
 .vscode-test-web/**
 coverage/**

@@ -108,16 +108,27 @@ test("the initialization options carry the delay, the architecture and the inclu
   );
 
   assert.deepEqual(toInitializationOptions(settings), {
-    diagnosticsDelay: 120,
     arch: "armv8",
-    include: {libjade: "/src/libjade"}
+    include: {libjade: "/src/libjade"},
+    diagnostics: {delay: 120}
   });
 });
 
 test("the initialization options hold nothing but the three server settings", () => {
   const options = toInitializationOptions(readSettings(configuration()));
 
-  assert.deepEqual(Object.keys(options).sort(), ["arch", "diagnosticsDelay", "include"]);
+  assert.deepEqual(Object.keys(options).sort(), ["arch", "diagnostics", "include"]);
+});
+
+test("the delay is nested, with no flat twin beside it", () => {
+  const options = toInitializationOptions(readSettings(configuration({"diagnostics.delay": 700})));
+
+  assert.deepEqual(options.diagnostics, {delay: 700});
+  assert.equal(
+    Object.hasOwn(options, "diagnosticsDelay"),
+    false,
+    "the server reads diagnostics.delay; a flat name would be a second wire shape"
+  );
 });
 
 test("the server receives repaired values, not the raw settings", () => {
@@ -126,8 +137,8 @@ test("the server receives repaired values, not the raw settings", () => {
   );
 
   assert.deepEqual(toInitializationOptions(settings), {
-    diagnosticsDelay: maximumDiagnosticsDelay,
     arch: defaultArch,
-    include: {}
+    include: {},
+    diagnostics: {delay: maximumDiagnosticsDelay}
   });
 });
