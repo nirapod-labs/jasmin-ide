@@ -8,6 +8,4 @@
   ../../scripts/check-workflows.sh
   ../../scripts/check-version.sh
   ../../scripts/corpus-smoke.sh
-  ../../scripts/check-linked.sh
-  ../../scripts/release-checksums.sh
-  ../../scripts/release-assets.sh))
+  ../../scripts/check-linked.sh))
