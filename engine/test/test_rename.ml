@@ -1230,11 +1230,12 @@ let test_a_name_in_a_file_two_requires_bring_in_is_refused () =
       why: " ^ refusal result)
     (match result with
     | Error reason ->
-        String.starts_with ~prefix:"the name N occurs in " reason
+        String.starts_with ~prefix:"N in " reason
         && String.ends_with
              ~suffix:
-               "sum.jinc, which more than one require brings in, so its \
-                occurrences cannot be told apart"
+               "means N when it is read into namespace Short and N when it is \
+                read into namespace Long, so an edit of that file would change \
+                both"
              reason
     | Ok _ -> false);
   let resolved = resolve ~files file shared_document in
@@ -1244,6 +1245,157 @@ let test_a_name_in_a_file_two_requires_bring_in_is_refused () =
           ~resolve:resolved
           ~byte:(byte shared_document ~within ~name:"N")
           ~broken:nothing_broken))
+
+(* A global declared before two namespaces is one declaration, read by a file
+   both namespaces require: each reading names the same global, so the file
+   is edited once and the rename is correct. The name occurs in the shared
+   file, which the rule that refused every such name would have refused. *)
+let shared_global_document =
+  "u32 g = 1;\n\n\
+   namespace Short {\n\
+  \  param int N = 1;\n\
+  \  require \"uses.jinc\"\n\
+   }\n\n\
+   namespace Long {\n\
+  \  param int N = 8;\n\
+  \  require \"uses.jinc\"\n\
+   }\n\n\
+   export\n\
+   fn test(reg u32 a) -> reg u32 {\n\
+  \  reg u32 r;\n\
+  \  r = g;\n\
+  \  return r;\n\
+   }\n"
+
+let shared_global_library =
+  "fn uses(reg u32 x) -> reg u32 {\n\
+  \  reg u32 r;\n\
+  \  r = x;\n\
+  \  r += g;\n\
+  \  return r;\n\
+   }\n"
+
+let test_a_global_read_by_a_shared_file_is_renamed_once () =
+  let file = "/work/shared-global.jazz" in
+  match
+    renamed
+      ~files:[ ("uses.jinc", shared_global_library) ]
+      ~file ~text:shared_global_document ~within:"u32 g = 1;" ~name:"g"
+      ~new_name:"h" ()
+  with
+  | Error reason ->
+      check ("shared global: the rename is refused: " ^ reason) false
+  | Ok edits ->
+      let per_file =
+        List.map
+          (fun (path, group) -> (Filename.basename path, List.length group))
+          edits
+      in
+      check
+        (Printf.sprintf
+           "shared global: the document holds two edits and the shared file \
+            one, by file: %s"
+           (String.concat ", "
+              (List.map (fun (p, n) -> Printf.sprintf "%s %d" p n) per_file)))
+        (List.sort compare per_file
+         = [ ("shared-global.jazz", 2); ("uses.jinc", 1) ]
+        || List.sort compare per_file
+           = [ ("uses.jinc", 1); ("shared-global.jazz", 2) ]);
+      check "shared global: the document's own text is renamed at both uses"
+        (String.equal
+           (apply shared_global_document
+              (List.filter
+                 (fun (path, _) ->
+                   Filename.basename path = "shared-global.jazz")
+                 edits))
+           "u32 h = 1;\n\n\
+            namespace Short {\n\
+           \  param int N = 1;\n\
+           \  require \"uses.jinc\"\n\
+            }\n\n\
+            namespace Long {\n\
+           \  param int N = 8;\n\
+           \  require \"uses.jinc\"\n\
+            }\n\n\
+            export\n\
+            fn test(reg u32 a) -> reg u32 {\n\
+           \  reg u32 r;\n\
+           \  r = h;\n\
+           \  return r;\n\
+            }\n")
+
+(* The document's global is renamed to a name a file it requires declares.
+   Both declarations then sit in one frame. The compiler accepts that without a
+   diagnostic, even where nothing uses the name, and a later use would bind to
+   one of the two with nothing to say which. The rule keeps such a rename out.
+   The file that holds the clashing declaration has no occurrence of the
+   renamed symbol, so only the second end of the rule, asked of every file the
+   resolution read, can see it. *)
+let later_library_document =
+  "u32 count = 0;\n\
+   require \"lib.jinc\"\n\
+   export\n\
+   fn f(reg u32 a) -> reg u32 {\n\
+  \  reg u32 r;\n\
+  \  r = a;\n\
+  \  return r;\n\
+   }\n"
+
+let later_library = "u32 total = 1;\n"
+
+let test_a_name_a_required_file_declares_is_refused () =
+  let file = "/work/collide-document.jazz" in
+  let result =
+    renamed
+      ~files:[ ("lib.jinc", later_library) ]
+      ~file ~text:later_library_document ~within:"u32 count = 0;" ~name:"count"
+      ~new_name:"total" ()
+  in
+  check
+    ("required file: a rename to a name the required file declares is refused, \
+      saying where: " ^ refusal result)
+    (match result with
+    | Error reason ->
+        String.starts_with ~prefix:"total already names a different declaration"
+          reason
+        && String.ends_with ~suffix:"/work/lib.jinc)" reason
+    | Ok _ -> false)
+
+(* The other direction: the library's global is renamed to a name the project
+   file declares after the require. The library is the document, the project
+   file reads the library, and the project file is searched only for the
+   declaration it holds, which no occurrence of the renamed symbol reaches. *)
+let later_document_text =
+  "require \"lib.jinc\"\n\
+   u32 total = 0;\n\
+   export\n\
+   fn f(reg u32 a) -> reg u32 {\n\
+  \  reg u32 r;\n\
+  \  r = a;\n\
+  \  r += total;\n\
+  \  return r;\n\
+   }\n"
+
+let library_with_count = "u32 count = 1;\n"
+
+let test_a_name_a_project_file_declares_after_the_require_is_refused () =
+  let file = "/work/lib.jinc" in
+  let result =
+    renamed
+      ~files:[ ("lib.jinc", library_with_count) ]
+      ~project:[ ("/work/doc.jazz", later_document_text) ]
+      ~file ~text:library_with_count ~within:"u32 count = 1;" ~name:"count"
+      ~new_name:"total" ()
+  in
+  check
+    ("project file: a rename to a name the project file declares after the \
+      require is refused, saying where: " ^ refusal result)
+    (match result with
+    | Error reason ->
+        String.starts_with ~prefix:"total already names a different declaration"
+          reason
+        && String.ends_with ~suffix:"/work/doc.jazz)" reason
+    | Ok _ -> false)
 
 (* Nothing to rename: a position on no name, a name with no declaration. Both
    reasons are asserted exactly, because prepareRename answers the same
@@ -1542,6 +1694,9 @@ let () =
   test_a_later_declaration_in_a_nested_block_is_refused ();
   test_a_later_declaration_in_a_required_file_is_refused ();
   test_a_name_in_a_file_two_requires_bring_in_is_refused ();
+  test_a_global_read_by_a_shared_file_is_renamed_once ();
+  test_a_name_a_required_file_declares_is_refused ();
+  test_a_name_a_project_file_declares_after_the_require_is_refused ();
   test_a_name_in_another_namespace_is_not_a_collision ();
   test_a_variable_in_another_namespace_is_not_a_collision ();
   test_a_function_in_another_namespace_is_a_collision ();

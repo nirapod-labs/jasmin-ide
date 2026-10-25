@@ -5,20 +5,19 @@
    declaration being renamed. Nothing is matched by name alone, so a
    same-named declaration in another block, another file or another namespace
    keeps its own occurrences, and a name the resolver never reached is left
-   alone.
+   alone. A declaration is its text: a file read into two namespaces declares
+   two instances of each name it holds, and both are renamed together,
+   because one edit of the file renames both.
 
-   The collision rule is asked at both ends of the scope relation. At each
-   occurrence, the name it would be written with after the rename must not
-   already name a different declaration there: that is the environment the
-   walk built at the occurrence's byte, which is the view pretyping takes. The
-   walk is define-before-use, so a declaration written later in the same
-   block is invisible there; the rule's other end asks, at the declaration
-   each occurrence would duplicate, whether the declaration being renamed
-   would land in that declaration's own frame. Between them a rename cannot
-   declare one name twice in one frame, which is the one rule that keeps a
-   rename safe. A frame is not a scope: a namespace merges its contents into
-   its parent under its own name, so what a namespace's own scope declares as
-   [total] its parent's frame holds as [A::total]. *)
+   Whether the rename is safe is not predicted from scope rules. The edit is
+   made in memory, every resolution that reads an edited file is walked again
+   over the edited texts, and the rename is answered only when every
+   occurrence in every file means the declaration it meant before, at every
+   site it is read at, and the compiler would report the same declarations as
+   declared twice. The walk is the resolver's, which is pretyping's naming
+   rules, so a name the compiler would bind to another declaration after the
+   rename, a declaration that would shadow one a later use reaches, or a
+   second function of one name are all seen as what they are: a change. *)
 
 type edit = { span : Jide_lang.Span.t; new_text : string }
 type edits = (string * edit list) list
@@ -48,6 +47,33 @@ let valid_name (name : string) =
       in
       loop 1)
   && not (is_keyword name)
+
+(* The names a call is read as something other than a function call by: the
+   compiler's flag combinations ([_EQ], [_uLT], ...), which it refuses as a
+   function's name and reads a call to as the combination, and the three
+   predicates of an assertion. The first list is the compiler's own printer
+   over its own type; the second is [safety_map] in [Pretyping.tt_assert],
+   which the library does not export. *)
+let combine_flag_names =
+  let open Jasmin.Operators in
+  List.map Jasmin.Printer.string_of_combine_flags
+    [
+      CF_LT Jasmin.Wsize.Signed;
+      CF_LT Jasmin.Wsize.Unsigned;
+      CF_LE Jasmin.Wsize.Signed;
+      CF_LE Jasmin.Wsize.Unsigned;
+      CF_EQ;
+      CF_NEQ;
+      CF_GE Jasmin.Wsize.Signed;
+      CF_GE Jasmin.Wsize.Unsigned;
+      CF_GT Jasmin.Wsize.Signed;
+      CF_GT Jasmin.Wsize.Unsigned;
+    ]
+
+let assertion_predicates = [ "is_mem_init"; "is_arr_init"; "is_var_init" ]
+
+let reserved_function_name name =
+  List.mem name combine_flag_names || List.mem name assertion_predicates
 
 (* The identifier holding [byte], or the one ending at it: a client sends the
    position just past the name it offers when the user clicks at its edge. *)
@@ -105,11 +131,37 @@ let prefix_reason =
 let invalid_reason name =
   Printf.sprintf "%s is not a valid Jasmin identifier" name
 
+let reserved_reason name =
+  Printf.sprintf
+    "%s is a name the compiler reads as a built-in where it is called, so no \
+     function can take it"
+    name
+
 let broken_reason path =
   Printf.sprintf
     "a file the document requires has recovered syntax errors, so no rename is \
      offered: %s"
     path
+
+let reparse_reason path =
+  Printf.sprintf
+    "the renamed text of %s would not parse into the same names, so no rename \
+     is offered"
+    path
+
+let unbound_reason name path =
+  Printf.sprintf
+    "%s is used in %s with no declaration, and the rename would give it one"
+    name path
+
+let changed_reason name path =
+  Printf.sprintf "the rename would change what %s in %s names" name path
+
+let undone_duplicate_reason name (other : Index.declaration) =
+  Printf.sprintf
+    "%s is declared twice in one scope (the other is in %s), which the \
+     compiler reports, and the rename would change that report"
+    name other.Index.file
 
 let collision_reason key (other : Index.declaration) =
   Printf.sprintf "%s already names a different declaration (%s in %s)" key
@@ -133,7 +185,33 @@ let writable_span (occurrence : Index.occurrence) =
     else Some occurrence.Index.last
   else Some occurrence.Index.span
 
-let locate ~(index : Index.t) ~(resolve : Resolve.t) ~(byte : int) :
+(* What the name at the occurrence names: the first of the resolutions that
+   read this file, with these bytes, and resolved it. The document's own
+   resolution comes first; a file checked in the context of an entry has names
+   only that entry's walk gives it, so the others are asked after it. *)
+let answer_of ~(index : Index.t) ~(resolutions : Resolve.t list) ~(at : int) =
+  let path = Index.normalise index.Index.file in
+  let readers =
+    List.filter
+      (fun resolution ->
+        match Resolve.file resolution path with
+        | Some read -> String.equal read.Index.text index.Index.text
+        | None -> false)
+      resolutions
+  in
+  let answers =
+    List.filter_map
+      (fun resolution ->
+        Option.map snd (Resolve.answer_at resolution ~file:path ~byte:at))
+      readers
+  in
+  match
+    List.find_opt (function Resolve.Resolved _ -> true | _ -> false) answers
+  with
+  | Some answer -> Some answer
+  | None -> ( match answers with answer :: _ -> Some answer | [] -> None)
+
+let locate ~(index : Index.t) ~(resolutions : Resolve.t list) ~(byte : int) :
     (subject, string) result =
   if is_keyword (word_at index.Index.text byte) then Error keyword_reason
   else
@@ -154,15 +232,13 @@ let locate ~(index : Index.t) ~(resolve : Resolve.t) ~(byte : int) :
           | Index.Include_path -> Error include_reason
           | _ -> (
               let at = occurrence.Index.span.Jide_lang.Span.start_byte in
-              match
-                Resolve.answer_at resolve ~file:index.Index.file ~byte:at
-              with
+              match answer_of ~index ~resolutions ~at with
               | None -> Error undeclared_reason
-              | Some (_, Resolve.Intrinsic) -> Error intrinsic_reason
-              | Some (_, Resolve.Annotation) -> Error annotation_reason
-              | Some (_, Resolve.Include_path) -> Error include_reason
-              | Some (_, Resolve.Unresolved) -> Error undeclared_reason
-              | Some (_, Resolve.Resolved declaration) -> (
+              | Some Resolve.Intrinsic -> Error intrinsic_reason
+              | Some Resolve.Annotation -> Error annotation_reason
+              | Some Resolve.Include_path -> Error include_reason
+              | Some Resolve.Unresolved -> Error undeclared_reason
+              | Some (Resolve.Resolved declaration) -> (
                   if declaration.Index.kind = Index.Namespace then
                     Error namespace_reason
                   else
@@ -174,11 +250,6 @@ let locate ~(index : Index.t) ~(resolve : Resolve.t) ~(byte : int) :
 (* What each occurrence means at every require site of its file *)
 
 exception Refused of string
-
-(* The name and the file of a declaration, for a reason a client shows. *)
-let describe (declaration : Index.declaration) =
-  Printf.sprintf "%s (declared in %s)" declaration.Index.name
-    declaration.Index.file
 
 (* The namespace a site was read into, for a reason a client shows: the
    document's own walk has no namespace. *)
@@ -197,49 +268,72 @@ let meanings (resolution : Resolve.t) ~(file : string)
     (fun site -> (site, Resolve.answer_at_site resolution ~site ~file ~byte))
     (Resolve.sites resolution file)
 
+(* The target is the declaration's text: every instance a reading of its file
+   makes is renamed by the one edit of that file. *)
 let is_target (target : Index.declaration) (answer : Resolve.answer) =
   match answer with
-  | Resolve.Resolved declaration -> Index.same_instance declaration target
+  | Resolve.Resolved declaration -> Index.equal_declaration declaration target
   | Resolve.Intrinsic | Resolve.Annotation | Resolve.Include_path
   | Resolve.Unresolved ->
       false
 
 type occurrence_plan =
-  | Skip  (** the occurrence means something else at every site *)
-  | Edit  (** the occurrence is the target at every site *)
+  | Skip  (** the occurrence means something else at some site, never this *)
+  | Unbound  (** the occurrence names no declaration at any site *)
+  | Edit
+      (** the occurrence is the target at some site, and at every other one it
+          names nothing: a reading that leaves a name unbound stays unbound
+          once it is renamed, which the comparison after the edit checks *)
   | Shared of string
-      (** the target at some site and something else at another: the one text
-          cannot change one of them alone *)
+      (** the target at some site and another declaration at another: the one
+          text cannot change one of them alone *)
+
+(* The name a lookup of the occurrence is by: its last segment. Only an
+   occurrence written with the declaration's own name can resolve to it, so
+   every other one is passed over without asking the walks. *)
+let last_segment (name : string) =
+  match String.rindex_opt name ':' with
+  | None -> name
+  | Some index ->
+      String.trim (String.sub name (index + 1) (String.length name - index - 1))
 
 let classify (resolution : Resolve.t) ~(file : string)
     (target : Index.declaration) (occurrence : Index.occurrence) =
-  let meanings = meanings resolution ~file occurrence in
-  let hits =
-    List.filter (fun (_site, answer) -> is_target target answer) meanings
-  in
-  match hits with
-  | [] -> Skip
-  | _ when List.length hits = List.length meanings -> Edit
-  | _ ->
-      let hit_site, _ = List.hd hits in
-      let other_site, other =
-        List.find
-          (fun (_site, answer) -> not (is_target target answer))
-          meanings
-      in
-      let meaning =
-        match other with
-        | Resolve.Resolved declaration -> declaration.Index.name
-        | Resolve.Intrinsic | Resolve.Annotation | Resolve.Include_path
-        | Resolve.Unresolved ->
-            "no declaration"
-      in
-      Shared
-        (Printf.sprintf
-           "%s in %s means %s when it is read into %s and %s when it is read \
-            into %s, so an edit of that file would change both"
-           occurrence.Index.name file target.Index.name (read_into hit_site)
-           meaning (read_into other_site))
+  if
+    not
+      (String.equal
+         (last_segment occurrence.Index.name)
+         (last_segment target.Index.name))
+  then Skip
+  else
+    let meanings = meanings resolution ~file occurrence in
+    let hits =
+      List.filter (fun (_site, answer) -> is_target target answer) meanings
+    in
+    let others =
+      List.filter
+        (fun (_site, answer) ->
+          (not (is_target target answer)) && answer <> Resolve.Unresolved)
+        meanings
+    in
+    match (hits, others) with
+    | [], [] -> Unbound
+    | [], _ :: _ -> Skip
+    | _ :: _, [] -> Edit
+    | (hit_site, _) :: _, (other_site, other) :: _ ->
+        let meaning =
+          match other with
+          | Resolve.Resolved declaration -> declaration.Index.name
+          | Resolve.Intrinsic | Resolve.Annotation | Resolve.Include_path
+          | Resolve.Unresolved ->
+              "no declaration"
+        in
+        Shared
+          (Printf.sprintf
+             "%s in %s means %s when it is read into %s and %s when it is read \
+              into %s, so an edit of that file would change both"
+             occurrence.Index.name file target.Index.name (read_into hit_site)
+             meaning (read_into other_site))
 
 (* ------------------------------------------------------------------ *)
 (* The occurrences of one identity, grouped by file *)
