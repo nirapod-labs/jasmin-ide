@@ -8,7 +8,10 @@
 ; request is no longer MethodNotFound, so a client that asks before the
 ; engine can answer sees the empty answer its request has in the protocol
 ; (null, or an empty list) and never an error, except for rename, which has
-; no empty answer and is refused with the engine's reason.
+; no empty answer and is refused with the engine's reason. The two intrinsic
+; tests are the exception: they pin the engine's answer after a `#` and inside
+; an intrinsic call end to end, because that answer depends on the
+; architecture the server reads from the project file.
 ;
 ; The two executables are declared as dependencies even though dune would
 ; build them anyway: the dependency is what makes a rebuilt server or client

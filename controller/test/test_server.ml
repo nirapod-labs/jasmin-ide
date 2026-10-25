@@ -136,9 +136,10 @@ let expected_capabilities () =
           ] );
       ( "signatureHelpProvider",
         `Assoc [ ("triggerCharacters", `List [ `String "("; `String "," ]) ] );
-      (* No renameProvider: the engine has no rename, so advertising it
-         would offer the user a rename that can only fail. It returns with
-         the engine's rename. *)
+      (* No renameProvider here: [create] holds the unavailable features, and
+         rename is advertised only where the features answer it. The
+         advertised set with the features is checked by
+         [test_rename_is_advertised_with_the_features]. *)
       ("workspaceSymbolProvider", `Bool true);
       ("documentHighlightProvider", `Bool true);
       ( "semanticTokensProvider",
@@ -161,6 +162,45 @@ let expected_capabilities () =
             ("full", `Bool true);
           ] );
     ]
+
+let create_with_features () =
+  let features =
+    Jide_controller.Features.make
+      ~completion:(fun ~uri:_ ~byte:_ -> None)
+      ~signature_help:(fun ~uri:_ ~byte:_ -> None)
+      ~prepare_rename:(fun ~uri:_ ~byte:_ -> None)
+      ~rename:(fun ~uri:_ ~byte:_ ~new_name:_ -> None)
+      ~workspace_symbols:(fun ~query:_ -> None)
+      ~highlights:(fun ~uri:_ ~byte:_ -> None)
+      ~semantic_tokens:(fun ~uri:_ -> None)
+      ()
+  in
+  Jide_controller.Server.create ~log:(fun _ -> ()) ~features ()
+
+(* Rename is advertised with prepareProvider exactly where the features answer
+   it, and nothing else in the advertised set moves. *)
+let test_rename_is_advertised_with_the_features () =
+  let server = create_with_features () in
+  let replies =
+    send server (request ~params:initialize_params 1 "initialize")
+  in
+  match replies with
+  | [ reply ] -> (
+      match result_json reply with
+      | Some (`Assoc fields) -> (
+          match
+            (List.assoc_opt "capabilities" fields, expected_capabilities ())
+          with
+          | Some (`Assoc advertised), `Assoc expected ->
+              check "rename: renameProvider carries prepareProvider"
+                (List.assoc_opt "renameProvider" advertised
+                = Some (`Assoc [ ("prepareProvider", `Bool true) ]));
+              check "rename: the rest of the advertised set is unchanged"
+                (List.remove_assoc "renameProvider" advertised
+                = List.remove_assoc "renameProvider" expected)
+          | _ -> check "rename: capabilities is an object" false)
+      | _ -> check "rename: initialize result is an object" false)
+  | _ -> check "rename: one reply to initialize" false
 
 let test_initialize () =
   let server = create () in
@@ -1623,6 +1663,7 @@ let test_other_protocol_requests_are_still_unknown () =
 
 let () =
   test_initialize ();
+  test_rename_is_advertised_with_the_features ();
   test_second_initialize ();
   test_request_before_initialize ();
   test_unknown_request ();

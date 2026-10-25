@@ -55,6 +55,7 @@ let completion_kind_of (kind : Jide_engine.Complete.kind) :
   | Jide_engine.Complete.Global -> Jide_engine.Types.Field
   | Jide_engine.Complete.Type_alias -> Jide_engine.Types.Type_parameter
   | Jide_engine.Complete.Annotation_key -> Jide_engine.Types.Text
+  | Jide_engine.Complete.Intrinsic -> Jide_engine.Types.Function
 
 (** One candidate, in the shape the protocol layer encodes. [detail] carries
     the declaration's own source text, which is what the engine cut from the
@@ -113,16 +114,17 @@ let serve () =
     | Some snapshot ->
         Some
           (completion_of
-             (Jide_engine.Complete.completion ~index:snapshot.index
-                ~resolve:snapshot.resolve ~byte ()))
+             (Jide_engine.Complete.completion ~arch:snapshot.arch
+                ~index:snapshot.index ~resolve:snapshot.resolve ~byte ()))
     | None -> None
   in
   let signature_help ~uri ~byte =
     match Jide_engine.Engine.snapshot engine ~uri with
     | Some snapshot ->
         Option.map signature_help_of
-          (Jide_engine.Complete.signature_help ~index:snapshot.index
-             ~resolve:snapshot.resolve ~facts:snapshot.facts ~byte ())
+          (Jide_engine.Complete.signature_help ~arch:snapshot.arch
+             ~index:snapshot.index ~resolve:snapshot.resolve
+             ~facts:snapshot.facts ~byte ())
     | None -> None
   in
   let features =

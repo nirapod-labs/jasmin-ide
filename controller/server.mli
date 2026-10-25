@@ -38,7 +38,9 @@
 
     Three limits of the protocol's client-capability negotiation are
     declared here rather than implemented: this server reads none of the
-    client's capabilities, and the advertisement in [initialize] is fixed.
+    client's capabilities. The advertisement in [initialize] follows the
+    features the server was created with: rename is advertised only where
+    they answer it.
 
     - [documentSymbolProvider] is advertised unconditionally. Whether the
       client can take the hierarchy at all is not asked; {!Navigation}
