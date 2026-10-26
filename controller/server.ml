@@ -182,36 +182,43 @@ let semantic_tokens_capability () =
       ("full", `Bool true);
     ]
 
-let capabilities () =
+let capabilities ~features () =
+  (* Rename is advertised only while the features answer it. A client that sees
+     the capability offers the user a rename, so a server that cannot make one
+     must not show it: the capability follows the features the server holds. *)
+  let rename =
+    if Features.available features then
+      [ ("renameProvider", `Assoc [ ("prepareProvider", `Bool true) ]) ]
+    else []
+  in
+  `Assoc
+    ([
+       ("textDocumentSync", `Int 1);
+       ("definitionProvider", `Bool true);
+       ("referencesProvider", `Bool true);
+       ("hoverProvider", `Bool true);
+       ("documentSymbolProvider", `Bool true);
+       ( "completionProvider",
+         `Assoc
+           [
+             ("triggerCharacters", `List [ `String "#"; `String ":" ]);
+             ("resolveProvider", `Bool false);
+           ] );
+       ( "signatureHelpProvider",
+         `Assoc [ ("triggerCharacters", `List [ `String "("; `String "," ]) ] );
+     ]
+    @ rename
+    @ [
+        ("workspaceSymbolProvider", `Bool true);
+        ("documentHighlightProvider", `Bool true);
+        ("semanticTokensProvider", semantic_tokens_capability ());
+      ])
+
+let initialize_result ~features () =
   `Assoc
     [
-      ("textDocumentSync", `Int 1);
-      ("definitionProvider", `Bool true);
-      ("referencesProvider", `Bool true);
-      ("hoverProvider", `Bool true);
-      ("documentSymbolProvider", `Bool true);
-      ( "completionProvider",
-        `Assoc
-          [
-            ("triggerCharacters", `List [ `String "#"; `String ":" ]);
-            ("resolveProvider", `Bool false);
-          ] );
-      ( "signatureHelpProvider",
-        `Assoc [ ("triggerCharacters", `List [ `String "("; `String "," ]) ] );
-      (* Rename is routed and answers a refusal with a reason, because a
-         rename has no empty form in the protocol. It is NOT advertised
-         while the engine has no rename: a client that sees the capability
-         registers a provider and offers the user a rename that can only
-         fail, and VS Code rewrites the refusal into its own "The element
-         can't be renamed", which hides why. Advertising it belongs to the
-         change that lands the engine's rename. *)
-      ("workspaceSymbolProvider", `Bool true);
-      ("documentHighlightProvider", `Bool true);
-      ("semanticTokensProvider", semantic_tokens_capability ());
+      ("capabilities", capabilities ~features ()); ("serverInfo", server_info ());
     ]
-
-let initialize_result () =
-  `Assoc [ ("capabilities", capabilities ()); ("serverInfo", server_info ()) ]
 
 let root_of_initialize (params : Lsp.Types.InitializeParams.t) =
   match params.rootUri with
@@ -371,7 +378,7 @@ let handle_initialize t (params : Lsp.Types.InitializeParams.t) =
       Jide_engine.Engine.set_root t.engine (root_of_initialize params);
       t.state <- Running;
       t.log "initialized";
-      Some (initialize_result ())
+      Some (initialize_result ~features:t.features ())
   | Running | Shutting_down | Exited -> None
 
 let handle_shutdown t =
@@ -667,9 +674,10 @@ let answer_prepare_rename t (request : Jsonrpc.Request.t)
   editing_answer_at_position t request ~feature:"prepare rename" ~uri
     ~position:params.position ~empty:(Answer `Null) (fun document byte ->
       match Features.prepare_rename t.features ~uri ~byte with
-      | Some span ->
+      | Some (Ok span) ->
           Answer
             (Json_conv.range_json (Jide_engine.Document.lines document) span)
+      | Some (Error reason) -> Refused reason
       | None -> Answer `Null)
 
 let is_blank = function ' ' | '\t' | '\n' | '\r' -> true | _ -> false
