@@ -1,9 +1,7 @@
-; The release scripts' contracts. Both are shell, so the tests run them against
-; directories they write themselves: no compiler, no network, and no release
-; file from anywhere else.
+; The release scripts' contracts, over directories the tests write themselves:
+; no compiler, no network and no release file from anywhere else.
 
 (cram
  (deps
-  ../../scripts/release-checksums.sh
-  ../../scripts/release-double-build.sh
-  ../../scripts/release-verify-sums.sh))
+  ../../scripts/checksums.sh
+  ../../scripts/release-double-build.sh))
