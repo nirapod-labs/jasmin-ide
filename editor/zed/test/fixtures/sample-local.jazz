@@ -1,4 +1,4 @@
-// Sample input for the patterns only the lab's grammar clone can parse. MIT,
+// Sample input for the patterns only a newer grammar than the pin parses. MIT,
 // see LICENSE.
 //
 // The pinned upstream grammar parses neither `#spill(x);` nor
