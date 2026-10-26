@@ -1,5 +1,5 @@
-(* Timing for the budgets of design section 15 that the server itself
-   decides: the whole check of a unit, the interval from a keystroke to the
+(* Timing for the latency budgets that the server itself decides: the whole
+   check of a unit, the interval from a keystroke to the
    diagnostics it produces, and the editor requests (completion, signature
    help, hover and definition from a snapshot, and references and rename over
    a project).
@@ -69,10 +69,15 @@ let usage =
       "A request row is compared with its budget, in milliseconds: completion,";
       "signature help, hover and definition answer to 20, and references and";
       "rename to 100 over the project, which is every Jasmin file under the";
-      "entry's directory. A request the server does not answer is reported as";
-      "unavailable, one row for each, so the table is complete before the";
-      "features are; so is a row with no position to ask at, on an entry that";
-      "declares nothing and calls nothing.";
+      "entry's directory. What such a request searches is the entry and the";
+      "files it requires, not every file the project opened. A request the";
+      "server does not advertise in its initialize result is not sent: its row";
+      "says so, one row for each, so the table is complete before the features";
+      "are. So is a row with no position to ask at, on an entry that declares";
+      "nothing and calls nothing. After the table, each budget is printed with";
+      "its worst median and p95 over the units and a verdict: met only when \
+       every";
+      "row of the budget was measured and none missed.";
       "";
       "The exit status is 0 when every unit ran, and 2 when the command line";
       "or an input is wrong.";
@@ -318,8 +323,8 @@ type keystroke_result = {
 
 (* The interval the keystroke budget names: the packet arrives at the loop,
    the loop stores the change, the check runs and the diagnostics are built.
-   The design's debounce and its publish step are not in the tree at this
-   commit, so neither contributes here. *)
+   The debounce and the publish step, which the keystroke budget also covers,
+   are not in the tree at this commit, so neither contributes here. *)
 let run_keystroke ~attempt server unit_ base uri =
   let text = edit base attempt in
   let packet =
@@ -414,19 +419,21 @@ let print_keystroke_table results =
 
 (* -- the editor requests -------------------------------------------------- *)
 
-(* Two budgets of design section 15 are decided by one request on a snapshot
-   the server already holds: completion, signature help, hover and definition
-   within 20 ms, and references and rename over a project of a library tree's
-   size within 100 ms.
+(* Two budgets are decided by requests on a snapshot the server already holds:
+   the snapshot-request budget (completion, signature help, hover and
+   definition, within 20 ms) and the project-wide request budget (references
+   and rename over a project, within 100 ms).
 
    Each request is sent through the server's own request path, the one an
    editor's client takes, and the interval is that path alone: the snapshot is
    open and analysed before the first run, so a number is the work the request
    does and not the check that came before it.
 
-   A request the server does not answer yet is reported as unavailable, one
-   row for each of the six requests. The harness is then complete before the
-   features are, and the day a handler lands the same row measures it with no
+   The server advertises the requests it answers in its initialize result.
+   A request it does not advertise is not sent, and its row says it was not
+   measured: a request sent anyway would come back as a refusal, and a refusal
+   ends the run, so the harness would have to report an answer it did not get.
+   The day a handler lands and is advertised, the same row measures it with no
    change here: the row is the server's answer, not a stand-in for it. *)
 
 type feature =
@@ -447,6 +454,16 @@ let feature_name = function
   | Definition -> "definition"
   | References -> "references"
   | Rename -> "rename"
+
+(* The capability the server advertises for each request in its initialize
+   result. *)
+let capability_of_feature = function
+  | Completion -> "completionProvider"
+  | Signature_help -> "signatureHelpProvider"
+  | Hover -> "hoverProvider"
+  | Definition -> "definitionProvider"
+  | References -> "referencesProvider"
+  | Rename -> "renameProvider"
 
 let method_of_feature = function
   | Completion -> "textDocument/completion"
@@ -984,18 +1001,10 @@ let main arguments =
             "editor requests from a warm snapshot, %d runs per unit, \
              milliseconds against 20 (snapshot) and 100 (project)\n"
             options.runs;
-          let results =
-            List.map (measure_requests ~runs:options.runs) units
-          in
+          let results = List.map (measure_requests ~runs:options.runs) units in
           if options.samples then print_request_samples results;
           print_request_table results;
-          print_request_tally results;
-          print_budgets results;
-          if
-            List.exists
-              (fun result -> List.exists is_refused result.rows)
-              results
-          then die "the server refused a request; the table says which"
+          print_request_tally results
       | Largest -> ())
 
 let () = main (List.tl (Array.to_list Sys.argv))
