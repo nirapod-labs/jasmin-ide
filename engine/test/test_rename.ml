@@ -49,6 +49,11 @@ let index_of (resolved : Jide_engine.Resolve.t) path =
 (* No file is broken in the tests that do not ask about a broken file. *)
 let nothing_broken _ = false
 
+(* prepareRename answers a range and a kind, or the reason it offers nothing. *)
+let refused
+    (result : (Jide_lang.Span.t * Jide_engine.Index.kind, string) result) =
+  match result with Error _ -> true | Ok _ -> false
+
 (* The text the edits make: every replacement applied at its own range. This
    is what an editor does with a workspace edit, and it is what lets the tests
    check the result as text rather than as ranges. *)
@@ -157,11 +162,13 @@ let test_an_annotation_label_is_refused () =
     | Ok _ -> false);
   check "annotation: prepareRename answers nothing"
     (let resolved = resolve file annotated in
-     Jide_engine.Rename.prepare ~index:(index_of resolved file)
-       ~resolve:resolved
-       ~byte:
-         (byte annotated ~within:"#[returnaddress=stack]" ~name:"returnaddress")
-     = None)
+     refused
+       (Jide_engine.Rename.prepare ~index:(index_of resolved file)
+          ~resolve:resolved
+          ~byte:
+            (byte annotated ~within:"#[returnaddress=stack]"
+               ~name:"returnaddress")
+          ~broken:nothing_broken))
 
 (* The [from NAME] of a require names an entry of the project's include paths,
    not a symbol of the program. *)
@@ -187,10 +194,11 @@ let test_an_include_path_is_refused () =
     | Ok _ -> false);
   check "include path: prepareRename answers nothing"
     (let resolved = resolve ~idirs ~files file named_require in
-     Jide_engine.Rename.prepare ~index:(index_of resolved file)
-       ~resolve:resolved
-       ~byte:(byte named_require ~within:"from LIB require" ~name:"LIB")
-     = None)
+     refused
+       (Jide_engine.Rename.prepare ~index:(index_of resolved file)
+          ~resolve:resolved
+          ~byte:(byte named_require ~within:"from LIB require" ~name:"LIB")
+          ~broken:nothing_broken))
 
 (* A qualified name carries one range for the whole name. The rename rewrites
    its last segment, which is the part that names the symbol; the namespace
@@ -225,6 +233,43 @@ let test_a_qualified_name_renames_its_last_segment () =
             }\n");
       check "qualified: two occurrences are rewritten" (edit_count edits = 2)
 
+(* A declaration may carry a qualified name too: [inline fn ble::e] is one
+   function, and the compiler accepts it beside a call written [ble::e()]. The
+   last segment of the declaration is the range a rename rewrites, as it is for
+   a use. *)
+let qualified_declaration =
+  "inline fn ble::e () -> reg u32 {\n\
+  \  reg u32 x = 0;\n\
+  \  return x;\n\
+   }\n\
+   export fn out() -> reg u32 {\n\
+  \  reg u32 x = ble::e();\n\
+  \  return x;\n\
+   }\n"
+
+let test_a_qualified_declaration_renames_its_last_segment () =
+  let file = "/work/qualified-declaration.jazz" in
+  match
+    renamed ~file ~text:qualified_declaration ~within:"::e ()" ~name:"e"
+      ~new_name:"times" ()
+  with
+  | Error reason ->
+      check ("qualified declaration: the rename is refused: " ^ reason) false
+  | Ok edits ->
+      check "qualified declaration: the declaration and the call are rewritten"
+        (String.equal
+           (apply qualified_declaration edits)
+           "inline fn ble::times () -> reg u32 {\n\
+           \  reg u32 x = 0;\n\
+           \  return x;\n\
+            }\n\
+            export fn out() -> reg u32 {\n\
+           \  reg u32 x = ble::times();\n\
+           \  return x;\n\
+            }\n");
+      check "qualified declaration: two occurrences are rewritten"
+        (edit_count edits = 2)
+
 (* A namespace's own name is refused: a qualified name has one range for the
    whole of it, so there is no range for the [A] a rename would rewrite. *)
 let test_a_namespace_name_is_refused () =
@@ -243,10 +288,11 @@ let test_a_namespace_name_is_refused () =
     | Ok _ -> false);
   check "namespace name: prepareRename answers nothing"
     (let resolved = resolve file namespaced in
-     Jide_engine.Rename.prepare ~index:(index_of resolved file)
-       ~resolve:resolved
-       ~byte:(byte namespaced ~within:"namespace A" ~name:"A")
-     = None)
+     refused
+       (Jide_engine.Rename.prepare ~index:(index_of resolved file)
+          ~resolve:resolved
+          ~byte:(byte namespaced ~within:"namespace A" ~name:"A")
+          ~broken:nothing_broken))
 
 (* The cursor on the [A] of [A::mul] is on the namespace, not on the function:
    renaming from there would rewrite a symbol the client never pointed at. *)
@@ -266,10 +312,11 @@ let test_a_namespace_prefix_is_refused () =
     | Ok _ -> false);
   check "namespace prefix: prepareRename answers nothing"
     (let resolved = resolve file namespaced in
-     Jide_engine.Rename.prepare ~index:(index_of resolved file)
-       ~resolve:resolved
-       ~byte:(byte namespaced ~within:"r = A::mul(x);" ~name:"A")
-     = None)
+     refused
+       (Jide_engine.Rename.prepare ~index:(index_of resolved file)
+          ~resolve:resolved
+          ~byte:(byte namespaced ~within:"r = A::mul(x);" ~name:"A")
+          ~broken:nothing_broken))
 
 (* A qualified name written with spaces around [::] has no range for its last
    segment, so no rename can rewrite it: one such occurrence refuses the whole
@@ -375,10 +422,11 @@ let test_a_rename_is_refused_on_a_keyword () =
     | Ok _ -> false);
   check "keyword: prepareRename answers nothing at the keyword"
     (let resolved = resolve file variables in
-     Jide_engine.Rename.prepare ~index:(index_of resolved file)
-       ~resolve:resolved
-       ~byte:(byte variables ~within:"reg u32 count;" ~name:"reg")
-     = None)
+     refused
+       (Jide_engine.Rename.prepare ~index:(index_of resolved file)
+          ~resolve:resolved
+          ~byte:(byte variables ~within:"reg u32 count;" ~name:"reg")
+          ~broken:nothing_broken))
 
 (* A keyword is refused even as the new name, and the reason names it. *)
 let test_a_keyword_is_not_a_valid_new_name () =
@@ -411,10 +459,11 @@ let test_a_rename_is_refused_on_an_intrinsic () =
     | Ok _ -> false);
   check "intrinsic: prepareRename answers nothing"
     (let resolved = resolve file intrinsics in
-     Jide_engine.Rename.prepare ~index:(index_of resolved file)
-       ~resolve:resolved
-       ~byte:(byte intrinsics ~within:"#spill(x);" ~name:"spill")
-     = None)
+     refused
+       (Jide_engine.Rename.prepare ~index:(index_of resolved file)
+          ~resolve:resolved
+          ~byte:(byte intrinsics ~within:"#spill(x);" ~name:"spill")
+          ~broken:nothing_broken))
 
 (* The new name must lex as one identifier: not empty, not starting with a
    digit, not holding a character the lexer has no rule for, not qualified. *)
@@ -476,6 +525,314 @@ let test_a_collision_with_a_visible_declaration_is_refused () =
           reason
         && String.ends_with ~suffix:"/work/collision.jazz)" reason
     | Ok _ -> false)
+
+(* The rule has two ends. The scope the resolver built at an occurrence is the
+   scope before it, because the walk is define-before-use, so a name declared
+   later in the same block is invisible there. Renaming [count] to [total]
+   would declare [total] twice in one block all the same, and the compiler
+   reports it. *)
+let later_variable =
+  "fn f(reg u32 a) -> reg u32 {\n\
+  \  reg u32 count;\n\
+  \  count = a;\n\
+  \  reg u32 total;\n\
+  \  total = a;\n\
+  \  return total;\n\
+   }\n"
+
+let test_a_later_declaration_in_the_same_block_is_refused () =
+  let file = "/work/later-variable.jazz" in
+  let result =
+    renamed ~file ~text:later_variable ~within:"count = a;" ~name:"count"
+      ~new_name:"total" ()
+  in
+  check
+    ("later declaration: a variable declared later in the same block, saying "
+   ^ refusal result)
+    (match result with
+    | Error reason ->
+        String.starts_with ~prefix:"total already names a different declaration"
+          reason
+        && String.ends_with ~suffix:"/work/later-variable.jazz)" reason
+    | Ok edits ->
+        (* This is what the one-ended rule answered: a second [total] in one
+           block, which the compiler warns about. *)
+        Printf.printf "later declaration: accepted, %d edit(s):\n%s\n%!"
+          (edit_count edits)
+          (apply later_variable edits);
+        false)
+
+(* A function's scope is its file, so a function declared after it is in that
+   scope: renaming [foo] to [bar] here declares [bar] twice, which the
+   compiler reports as an error rather than a warning. *)
+let later_function =
+  "fn foo(reg u32 a) -> reg u32 { return a; }\n\
+   fn bar(reg u32 a) -> reg u32 { return a; }\n"
+
+let test_a_later_function_in_the_same_file_is_refused () =
+  let file = "/work/later-function.jazz" in
+  let result =
+    renamed ~file ~text:later_function ~within:"fn foo" ~name:"foo"
+      ~new_name:"bar" ()
+  in
+  check
+    ("later declaration: a function declared later in the file, saying "
+   ^ refusal result)
+    (match result with
+    | Error reason ->
+        String.starts_with ~prefix:"bar already names a different declaration"
+          reason
+        && String.ends_with ~suffix:"/work/later-function.jazz)" reason
+    | Ok edits ->
+        Printf.printf "later declaration: accepted, %d edit(s):\n%s\n%!"
+          (edit_count edits)
+          (apply later_function edits);
+        false)
+
+(* The same rule reaches a declaration written later inside a nested block:
+   the block's own declaration shadows nothing, so declaring the renamed name
+   there as well is a duplicate in the block that holds both. *)
+let later_nested =
+  "fn f(reg u32 a) -> reg u32 {\n\
+  \  reg u32 count;\n\
+  \  count = a;\n\
+  \  if (a < 1) {\n\
+  \    reg u32 total;\n\
+  \    total = a;\n\
+  \  }\n\
+  \  return count;\n\
+   }\n"
+
+let test_a_later_declaration_in_a_nested_block_is_refused () =
+  let file = "/work/later-nested.jazz" in
+  let result =
+    renamed ~file ~text:later_nested ~within:"count = a;" ~name:"count"
+      ~new_name:"total" ()
+  in
+  check
+    ("later declaration: a variable declared later in a nested block, saying "
+   ^ refusal result)
+    (match result with
+    | Error reason ->
+        String.starts_with ~prefix:"total already names a different declaration"
+          reason
+        && String.ends_with ~suffix:"/work/later-nested.jazz)" reason
+    | Ok _ -> false)
+
+(* The scope a declaration belongs to is not the scope it is visible from. A
+   function written [foo] in a namespace reaches the parent as [A::foo], so a
+   top-level [bar] declared after the namespace is a different name in the
+   compiler's map: giving [A::foo] the name [bar] declares no duplicate. *)
+let namespaced_sibling =
+  "namespace A {\n\
+  \  fn foo(reg u32 a) -> reg u32 { return a; }\n\
+   }\n\
+   fn bar(reg u32 a) -> reg u32 { return a; }\n"
+
+let test_a_name_in_another_namespace_is_not_a_collision () =
+  let file = "/work/namespaced-sibling.jazz" in
+  match
+    renamed ~file ~text:namespaced_sibling ~within:"fn foo" ~name:"foo"
+      ~new_name:"bar" ()
+  with
+  | Error reason ->
+      check ("namespaces: a name in another scope was refused: " ^ reason) false
+  | Ok edits ->
+      check "namespaces: a name in another scope is not a collision"
+        (String.equal
+           (apply namespaced_sibling edits)
+           "namespace A {\n\
+           \  fn bar(reg u32 a) -> reg u32 { return a; }\n\
+            }\n\
+            fn bar(reg u32 a) -> reg u32 { return a; }\n")
+
+(* The same statement for a variable, in both directions. The frame a
+   declaration lands in is not the scope it is visible from: a variable
+   written inside a namespace is pushed into that namespace's own frame and
+   merged into its parent as [A::total], so a top-level [count] renamed to
+   [total] is a different name in the frame the merge fills, and the compiler
+   accepts the renamed program. This is the direction the function test above
+   does not cover: there the declaration inside the namespace is the one
+   renamed, and a function is pushed by its unqualified name, which is why
+   that direction is refused. *)
+let namespace_variable_outside =
+  "u32 count = 0;\n\
+   fn use(reg u32 a) -> reg u32 {\n\
+  \  reg u32 r;\n\
+  \  r = a;\n\
+  \  r += count;\n\
+  \  return r;\n\
+   }\n\
+   namespace A {\n\
+  \  u32 total = 0;\n\
+   }\n"
+
+let namespace_variable_inside =
+  "namespace A {\n\
+  \  u32 count = 0;\n\
+  \  fn use(reg u32 a) -> reg u32 {\n\
+  \    reg u32 r;\n\
+  \    r = a;\n\
+  \    r += count;\n\
+  \    return r;\n\
+  \  }\n\
+   }\n\
+   u32 total = 0;\n"
+
+let test_a_variable_in_another_namespace_is_not_a_collision () =
+  let file = "/work/namespace-variable.jazz" in
+  (match
+     renamed ~file ~text:namespace_variable_outside ~within:"u32 count = 0;"
+       ~name:"count" ~new_name:"total" ()
+   with
+  | Error reason ->
+      check
+        ("namespaces: a top-level variable renamed beside a namespace's \
+          variable was refused: " ^ reason)
+        false
+  | Ok edits ->
+      check
+        "namespaces: a top-level variable takes the name of a variable in a \
+         namespace"
+        (String.equal
+           (apply namespace_variable_outside edits)
+           "u32 total = 0;\n\
+            fn use(reg u32 a) -> reg u32 {\n\
+           \  reg u32 r;\n\
+           \  r = a;\n\
+           \  r += total;\n\
+           \  return r;\n\
+            }\n\
+            namespace A {\n\
+           \  u32 total = 0;\n\
+            }\n"));
+  (* And the mirror: the declaration inside the namespace is the one renamed,
+     and the top-level declaration of the new name is not in its frame. *)
+  let file = "/work/namespace-target.jazz" in
+  match
+    renamed ~file ~text:namespace_variable_inside ~within:"u32 count = 0;"
+      ~name:"count" ~new_name:"total" ()
+  with
+  | Error reason ->
+      check
+        ("namespaces: a variable in a namespace renamed beside a top-level \
+          variable was refused: " ^ reason)
+        false
+  | Ok edits ->
+      check
+        "namespaces: a variable in a namespace takes the name of a top-level \
+         variable"
+        (String.equal
+           (apply namespace_variable_inside edits)
+           "namespace A {\n\
+           \  u32 total = 0;\n\
+           \  fn use(reg u32 a) -> reg u32 {\n\
+           \    reg u32 r;\n\
+           \    r = a;\n\
+           \    r += total;\n\
+           \    return r;\n\
+           \  }\n\
+            }\n\
+            u32 total = 0;\n")
+
+(* The mirror of the test above for a function is a refusal, and the rule has
+   to keep it: the compiler pushes a function by its unqualified name and
+   looks through every enclosing frame, so [A::bar] and a top-level [bar] are
+   one name to it and the renamed program is a hard error. *)
+let function_in_a_namespace =
+  "fn foo(reg u32 a) -> reg u32 { return a; }\n\
+   namespace A {\n\
+  \  fn bar(reg u32 a) -> reg u32 { return a; }\n\
+   }\n"
+
+let test_a_function_in_another_namespace_is_a_collision () =
+  let file = "/work/namespace-function.jazz" in
+  let result =
+    renamed ~file ~text:function_in_a_namespace ~within:"fn foo" ~name:"foo"
+      ~new_name:"bar" ()
+  in
+  check
+    ("namespaces: a function renamed to a namespace function's name, saying "
+   ^ refusal result)
+    (match result with
+    | Error reason ->
+        String.starts_with ~prefix:"bar already names a different declaration"
+          reason
+        && String.ends_with ~suffix:"/work/namespace-function.jazz)" reason
+    | Ok _ -> false)
+
+(* A namespace's own name is in none of the compiler's three name spaces: a
+   function or a variable called [A] may sit beside [namespace A], so taking
+   the name [A] is not a collision with the namespace. *)
+let namespace_named_like_a_value =
+  "namespace A {\n\
+  \  fn f(reg u32 x) -> reg u32 { return x; }\n\
+   }\n\
+   fn g(reg u32 x) -> reg u32 { return x; }\n"
+
+(* The variable's version of the same program, with the namespace written
+   after the value: that is the order in which the old rule saw the namespace
+   during the rule's second end, because the value is then already in scope
+   where the namespace's name is written. The compiler accepts both orders
+   (probed with jasminc 2026.09.0). The use is an assignment, not
+   [return x + g;]: the grammar's return takes a tuple of variables
+   ([RETURN vs=tuple(var) SEMICOLON]), so the expression would not parse and
+   the occurrence would not exist for either the rule or the test to see. *)
+let namespace_named_like_a_value_variable =
+  "u32 g = 0;\n\
+   fn use(reg u32 x) -> reg u32 {\n\
+  \  reg u32 r;\n\
+  \  r = x;\n\
+  \  r += g;\n\
+  \  return r;\n\
+   }\n\
+   namespace A {\n\
+  \  fn f(reg u32 x) -> reg u32 { return x; }\n\
+   }\n"
+
+let test_a_namespace_name_is_not_a_value_collision () =
+  let file = "/work/namespace-name.jazz" in
+  (match
+     renamed ~file ~text:namespace_named_like_a_value ~within:"fn g" ~name:"g"
+       ~new_name:"A" ()
+   with
+  | Error reason ->
+      check
+        ("namespaces: a function renamed to a namespace's own name was \
+          refused: " ^ reason)
+        false
+  | Ok edits ->
+      check "namespaces: a function may take a namespace's own name"
+        (String.equal
+           (apply namespace_named_like_a_value edits)
+           "namespace A {\n\
+           \  fn f(reg u32 x) -> reg u32 { return x; }\n\
+            }\n\
+            fn A(reg u32 x) -> reg u32 { return x; }\n"));
+  let file = "/work/namespace-name-variable.jazz" in
+  match
+    renamed ~file ~text:namespace_named_like_a_value_variable
+      ~within:"u32 g = 0;" ~name:"g" ~new_name:"A" ()
+  with
+  | Error reason ->
+      check
+        ("namespaces: a variable renamed to a namespace's own name was \
+          refused: " ^ reason)
+        false
+  | Ok edits ->
+      check "namespaces: a variable may take a namespace's own name"
+        (String.equal
+           (apply namespace_named_like_a_value_variable edits)
+           "u32 A = 0;\n\
+            fn use(reg u32 x) -> reg u32 {\n\
+           \  reg u32 r;\n\
+           \  r = x;\n\
+           \  r += A;\n\
+           \  return r;\n\
+            }\n\
+            namespace A {\n\
+           \  fn f(reg u32 x) -> reg u32 { return x; }\n\
+            }\n")
 
 (* A collision is not a collision when the other declaration is not in scope
    where the renamed name would be written: [other] is declared in a block
@@ -631,7 +988,7 @@ let test_a_function_name_is_another_name_space () =
            \  return helper;\n\
             }\n")
 
-(* The require closure rule from design section 10: while any file in the
+(* The require closure rule: while any file in the
    document's require closure has recovered syntax errors, no rename. *)
 let requiring =
   "require \"lib.jinc\"\n\
@@ -653,11 +1010,13 @@ let test_a_broken_file_in_the_require_closure_refuses () =
     (match Jide_engine.Resolve.file resolved library_file with
     | Some _ -> true
     | None -> false);
+  let library_is_broken path =
+    String.equal (Jide_engine.Index.normalise path) library_file
+  in
+  let at = byte requiring ~within:"x = a;" ~name:"x" in
   let result =
-    Jide_engine.Rename.rename ~files:[] ~index ~resolve:resolved
-      ~byte:(byte requiring ~within:"x = a;" ~name:"x") ~new_name:"y"
-      ~broken:(fun path ->
-        String.equal (Jide_engine.Index.normalise path) library_file)
+    Jide_engine.Rename.rename ~files:[] ~index ~resolve:resolved ~byte:at
+      ~new_name:"y" ~broken:library_is_broken
   in
   check
     ("require: refused while a required file is broken, saying "
@@ -671,14 +1030,43 @@ let test_a_broken_file_in_the_require_closure_refuses () =
           reason
         && String.ends_with ~suffix:library_file reason
     | Ok _ -> false);
-  (* The same rename is allowed once nothing is broken. *)
+  (* prepareRename refuses for the same reason and with the same message: a
+     client is never offered a name the following rename would not write. *)
+  check
+    ("require: prepareRename refuses with the rename's own message, saying "
+    ^
+    match
+      Jide_engine.Rename.prepare ~index ~resolve:resolved ~byte:at
+        ~broken:library_is_broken
+    with
+    | Error reason -> reason
+    | Ok _ -> "an offered range")
+    (match
+       ( result,
+         Jide_engine.Rename.prepare ~index ~resolve:resolved ~byte:at
+           ~broken:library_is_broken )
+     with
+    | Error rename_reason, Error prepare_reason ->
+        String.equal prepare_reason rename_reason
+    | _ -> false);
+  (* The same rename is allowed once nothing is broken, and prepareRename
+     offers it again. *)
   check "require: allowed once no required file is broken"
     (match
-       Jide_engine.Rename.rename ~files:[] ~index ~resolve:resolved
-         ~byte:(byte requiring ~within:"x = a;" ~name:"x")
+       Jide_engine.Rename.rename ~files:[] ~index ~resolve:resolved ~byte:at
          ~new_name:"y" ~broken:nothing_broken
      with
     | Ok edits -> edit_count edits = 3
+    | Error _ -> false);
+  check "require: prepareRename offers the name once nothing is broken"
+    (match
+       Jide_engine.Rename.prepare ~index ~resolve:resolved ~byte:at
+         ~broken:nothing_broken
+     with
+    | Ok (span, kind) ->
+        kind = Jide_engine.Index.Variable
+        && span.Jide_lang.Span.start_byte = at
+        && span.Jide_lang.Span.end_byte = at + String.length "x"
     | Error _ -> false)
 
 (* A rename follows the identity into the files the document requires: the
@@ -763,51 +1151,337 @@ let test_a_rename_reaches_a_project_file () =
             }\n");
       check "project: two edits, one per file" (edit_count edits = 2)
 
-(* Nothing to rename: a position on no name, a name with no declaration. *)
+(* The other end of the collision rule is asked in every file the search
+   found, not only the document: a global declared in a required file lands in
+   the same frame as a top-level declaration of the document, so renaming the
+   document's global to its name would declare the frame's name twice. *)
+let cross_file_document =
+  "u32 count = 0;\n\
+   require \"lib.jinc\"\n\
+   fn f(reg u32 a) -> reg u32 {\n\
+  \  reg u32 r;\n\
+  \  r = a;\n\
+  \  r += count;\n\
+  \  return r;\n\
+   }\n"
+
+let cross_file_library = "u32 total = 1;\n"
+
+let test_a_later_declaration_in_a_required_file_is_refused () =
+  let file = "/work/cross-file.jazz" in
+  let result =
+    renamed
+      ~files:[ ("lib.jinc", cross_file_library) ]
+      ~file ~text:cross_file_document ~within:"u32 count = 0;" ~name:"count"
+      ~new_name:"total" ()
+  in
+  check
+    ("later declaration: a declaration in a required file, saying "
+   ^ refusal result)
+    (match result with
+    | Error reason ->
+        String.starts_with ~prefix:"total already names a different declaration"
+          reason
+        && String.ends_with ~suffix:"/work/lib.jinc)" reason
+    | Ok edits ->
+        Printf.printf "later declaration: accepted, %d edit(s):\n%s\n%!"
+          (edit_count edits)
+          (apply cross_file_document edits);
+        false)
+
+(* A file that two requires bring in has one text and one meaning at each
+   site: [sum.jinc] reads the parameter [N] of whichever namespace requires it.
+   Renaming the [N] of one namespace would edit the file for the other as well,
+   so the rename is refused with the reason, and so is prepareRename. *)
+let shared_library =
+  "/* Parameters:\n\
+  \  param int N;\n\
+   */\n\
+   fn sum(reg u32[N] t) -> reg u32 {\n\
+  \  reg u32 s;\n\
+  \  inline int c;\n\
+  \  s = 0;\n\
+  \  for c = 0 to N {\n\
+  \    s += t[c];\n\
+  \  }\n\
+  \  return s;\n\
+   }\n"
+
+let shared_document =
+  "namespace Short {\n\
+  \  param int N = 1;\n\
+  \  require \"sum.jinc\"\n\
+   }\n\
+   namespace Long {\n\
+  \  param int N = 8;\n\
+  \  require \"sum.jinc\"\n\
+   }\n"
+
+let test_a_name_in_a_file_two_requires_bring_in_is_refused () =
+  let file = "/work/shared.jazz" in
+  let within = "param int N = 1;" in
+  let files = [ ("sum.jinc", shared_library) ] in
+  let result =
+    renamed ~files ~file ~text:shared_document ~within ~name:"N" ~new_name:"M"
+      ()
+  in
+  check
+    ("shared: a parameter whose name the shared file uses is refused, saying \
+      why: " ^ refusal result)
+    (match result with
+    | Error reason ->
+        String.starts_with ~prefix:"N in " reason
+        && String.ends_with
+             ~suffix:
+               "means N when it is read into namespace Short and N when it is \
+                read into namespace Long, so an edit of that file would change \
+                both"
+             reason
+    | Ok _ -> false);
+  let resolved = resolve ~files file shared_document in
+  check "shared: prepareRename refuses the same name"
+    (refused
+       (Jide_engine.Rename.prepare ~index:(index_of resolved file)
+          ~resolve:resolved
+          ~byte:(byte shared_document ~within ~name:"N")
+          ~broken:nothing_broken))
+
+(* A global declared before two namespaces is one declaration, read by a file
+   both namespaces require: each reading names the same global, so the file
+   is edited once and the rename is correct. The name occurs in the shared
+   file, which the rule that refused every such name would have refused. *)
+let shared_global_document =
+  "u32 g = 1;\n\n\
+   namespace Short {\n\
+  \  param int N = 1;\n\
+  \  require \"uses.jinc\"\n\
+   }\n\n\
+   namespace Long {\n\
+  \  param int N = 8;\n\
+  \  require \"uses.jinc\"\n\
+   }\n\n\
+   export\n\
+   fn test(reg u32 a) -> reg u32 {\n\
+  \  reg u32 r;\n\
+  \  r = g;\n\
+  \  return r;\n\
+   }\n"
+
+let shared_global_library =
+  "fn uses(reg u32 x) -> reg u32 {\n\
+  \  reg u32 r;\n\
+  \  r = x;\n\
+  \  r += g;\n\
+  \  return r;\n\
+   }\n"
+
+let test_a_global_read_by_a_shared_file_is_renamed_once () =
+  let file = "/work/shared-global.jazz" in
+  match
+    renamed
+      ~files:[ ("uses.jinc", shared_global_library) ]
+      ~file ~text:shared_global_document ~within:"u32 g = 1;" ~name:"g"
+      ~new_name:"h" ()
+  with
+  | Error reason ->
+      check ("shared global: the rename is refused: " ^ reason) false
+  | Ok edits ->
+      let per_file =
+        List.map
+          (fun (path, group) -> (Filename.basename path, List.length group))
+          edits
+      in
+      check
+        (Printf.sprintf
+           "shared global: the document holds two edits and the shared file \
+            one, by file: %s"
+           (String.concat ", "
+              (List.map (fun (p, n) -> Printf.sprintf "%s %d" p n) per_file)))
+        (List.sort compare per_file
+         = [ ("shared-global.jazz", 2); ("uses.jinc", 1) ]
+        || List.sort compare per_file
+           = [ ("uses.jinc", 1); ("shared-global.jazz", 2) ]);
+      check "shared global: the document's own text is renamed at both uses"
+        (String.equal
+           (apply shared_global_document
+              (List.filter
+                 (fun (path, _) ->
+                   Filename.basename path = "shared-global.jazz")
+                 edits))
+           "u32 h = 1;\n\n\
+            namespace Short {\n\
+           \  param int N = 1;\n\
+           \  require \"uses.jinc\"\n\
+            }\n\n\
+            namespace Long {\n\
+           \  param int N = 8;\n\
+           \  require \"uses.jinc\"\n\
+            }\n\n\
+            export\n\
+            fn test(reg u32 a) -> reg u32 {\n\
+           \  reg u32 r;\n\
+           \  r = h;\n\
+           \  return r;\n\
+            }\n")
+
+(* The document's global is renamed to a name a file it requires declares.
+   Both declarations then sit in one frame. The compiler accepts that without a
+   diagnostic, even where nothing uses the name, and a later use would bind to
+   one of the two with nothing to say which. The rule keeps such a rename out.
+   The file that holds the clashing declaration has no occurrence of the
+   renamed symbol, so only the second end of the rule, asked of every file the
+   resolution read, can see it. *)
+let later_library_document =
+  "u32 count = 0;\n\
+   require \"lib.jinc\"\n\
+   export\n\
+   fn f(reg u32 a) -> reg u32 {\n\
+  \  reg u32 r;\n\
+  \  r = a;\n\
+  \  return r;\n\
+   }\n"
+
+let later_library = "u32 total = 1;\n"
+
+let test_a_name_a_required_file_declares_is_refused () =
+  let file = "/work/collide-document.jazz" in
+  let result =
+    renamed
+      ~files:[ ("lib.jinc", later_library) ]
+      ~file ~text:later_library_document ~within:"u32 count = 0;" ~name:"count"
+      ~new_name:"total" ()
+  in
+  check
+    ("required file: a rename to a name the required file declares is refused, \
+      saying where: " ^ refusal result)
+    (match result with
+    | Error reason ->
+        String.starts_with ~prefix:"total already names a different declaration"
+          reason
+        && String.ends_with ~suffix:"/work/lib.jinc)" reason
+    | Ok _ -> false)
+
+(* The other direction: the library's global is renamed to a name the project
+   file declares after the require. The library is the document, the project
+   file reads the library, and the project file is searched only for the
+   declaration it holds, which no occurrence of the renamed symbol reaches. *)
+let later_document_text =
+  "require \"lib.jinc\"\n\
+   u32 total = 0;\n\
+   export\n\
+   fn f(reg u32 a) -> reg u32 {\n\
+  \  reg u32 r;\n\
+  \  r = a;\n\
+  \  r += total;\n\
+  \  return r;\n\
+   }\n"
+
+let library_with_count = "u32 count = 1;\n"
+
+let test_a_name_a_project_file_declares_after_the_require_is_refused () =
+  let file = "/work/lib.jinc" in
+  let result =
+    renamed
+      ~files:[ ("lib.jinc", library_with_count) ]
+      ~project:[ ("/work/doc.jazz", later_document_text) ]
+      ~file ~text:library_with_count ~within:"u32 count = 1;" ~name:"count"
+      ~new_name:"total" ()
+  in
+  check
+    ("project file: a rename to a name the project file declares after the \
+      require is refused, saying where: " ^ refusal result)
+    (match result with
+    | Error reason ->
+        String.starts_with ~prefix:"total already names a different declaration"
+          reason
+        && String.ends_with ~suffix:"/work/doc.jazz)" reason
+    | Ok _ -> false)
+
+(* Nothing to rename: a position on no name, a name with no declaration. Both
+   reasons are asserted exactly, because prepareRename answers the same
+   refusals as the rename, in the same words. *)
 let test_positions_that_hold_no_name_are_refused () =
   let file = "/work/variables.jazz" in
-  let resolved = resolve file variables in
-  let index = index_of resolved file in
   let at text ~within ~name =
-    Jide_engine.Rename.prepare ~index ~resolve:resolved
-      ~byte:(byte text ~within ~name)
+    let resolved = resolve file text in
+    Jide_engine.Rename.prepare ~index:(index_of resolved file) ~resolve:resolved
+      ~byte:(byte text ~within ~name) ~broken:nothing_broken
   in
-  check "no name: a byte inside the return keyword holds no name"
-    (at variables ~within:"return count;" ~name:"return" = None);
-  check "no name: a byte on a name with no declaration answers nothing"
-    (let unresolved = "fn f(reg u32 a) -> reg u32 {\n  return nothing;\n}\n" in
-     let resolved = resolve file unresolved in
-     let index = index_of resolved file in
-     Jide_engine.Rename.prepare ~index ~resolve:resolved
-       ~byte:(byte unresolved ~within:"return nothing;" ~name:"nothing")
-     = None);
+  check "no name: a byte inside the return keyword is refused, saying why"
+    (match at variables ~within:"return count;" ~name:"return" with
+    | Error reason ->
+        String.equal reason "a keyword is not a name a rename can change"
+    | Ok _ -> false);
+  let commented =
+    "fn f(reg u32 a) -> reg u32 {\n\
+    \  // a word the index never sees\n\
+    \  return a;\n\
+     }\n"
+  in
+  check "no name: a byte inside a comment holds no name, saying why"
+    (match
+       at commented ~within:"// a word the index never sees" ~name:"index"
+     with
+    | Error reason -> String.equal reason "the position holds no name"
+    | Ok _ -> false);
+  check "no name: a name with no declaration says so"
+    (match
+       at "fn f(reg u32 a) -> reg u32 {\n  return nothing;\n}\n"
+         ~within:"return nothing;" ~name:"nothing"
+     with
+    | Error reason ->
+        String.equal reason "the name at the position has no declaration"
+    | Ok _ -> false);
   check "no name: a name is prepared with its span and its kind"
     (match at variables ~within:"reg u32 count;" ~name:"count" with
-    | Some (span, kind) ->
+    | Ok (span, kind) ->
         kind = Jide_engine.Index.Variable
         && span.Jide_lang.Span.start_byte
            = byte variables ~within:"reg u32 count;" ~name:"count"
         && span.Jide_lang.Span.end_byte
            = span.Jide_lang.Span.start_byte + String.length "count"
-    | None -> false)
+    | Error _ -> false)
 
 (* A rename to the name the symbol already has changes nothing: every
-   occurrence is replaced by itself. *)
+   occurrence is replaced by itself. A later declaration of that name does not
+   stand in its way either, because the renamed program declares nothing it
+   did not declare before. *)
 let test_a_rename_to_the_same_name_changes_nothing () =
   let file = "/work/variables.jazz" in
-  match
-    renamed ~file ~text:variables ~within:"count = a;" ~name:"count"
-      ~new_name:"count" ()
-  with
+  (match
+     renamed ~file ~text:variables ~within:"count = a;" ~name:"count"
+       ~new_name:"count" ()
+   with
   | Error reason -> check ("same name: refused: " ^ reason) false
   | Ok edits ->
       check "same name: the text is unchanged"
         (String.equal (apply variables edits) variables);
-      check "same name: every occurrence is still an edit" (edit_count edits = 5)
+      check "same name: every occurrence is still an edit" (edit_count edits = 5));
+  (* The same call on a program whose name is declared twice: the inner block
+     declares [value] again, which is what the collision rule's second end
+     looks for, and the outer declaration renamed to its own name must still
+     be answered with the edits. *)
+  let file = "/work/two-blocks.jazz" in
+  match
+    renamed ~file ~text:two_blocks ~within:"reg u32 value;\n  value = a;"
+      ~name:"value" ~new_name:"value" ()
+  with
+  | Error reason ->
+      check
+        ("same name: refused where a block shadows the name: " ^ reason)
+        false
+  | Ok edits ->
+      check "same name: the text is unchanged where a block shadows the name"
+        (String.equal (apply two_blocks edits) two_blocks);
+      check "same name: the outer occurrences are still edits"
+        (edit_count edits = 3)
 
-(* The gate's statement, measured: the renamed program gets the same verdict.
-   Both texts are checked by the compiler, and the renamed one is as clean as
-   the one it came from. *)
+(* The gate's statement, measured case by case: the verdict is the compiler's
+   own list, errors and warnings alike, and it is the same list before and
+   after the rename. It is compared with the list the server publishes, so the
+   test measures what a client sees rather than a filtered view of it. A case
+   the rule refuses writes no text, so its verdict cannot change; it stays in
+   the list so that a rule which stops refusing cannot pass this test. *)
 let verdict_program =
   "fn add(reg u64 a, reg u64 b) -> reg u64 {\n\
   \  reg u64 c;\n\
@@ -823,29 +1497,181 @@ let verdict_program =
 let x86_64 = Option.get (Jide_jasmin.Adapter.arch_of_string "x86-64")
 let linux = Option.get (Jide_jasmin.Adapter.call_conv_of_string "linux")
 
-let errors_of text =
-  let result =
-    Jide_jasmin.Adapter.check x86_64 linux ~file:"/work/verdict.jazz" ~text
-      ~idirs:[]
+(* One diagnostic of a verdict: how serious it is and what it says. The
+   message is the compiler's own, never a summary, so two verdicts are equal
+   only when they say the same things. *)
+type verdict = (Jide_lang.Diagnostic.severity * string) list
+
+let check_text ~file text =
+  Jide_jasmin.Adapter.check x86_64 linux ~file ~text ~idirs:[]
+
+(* The compiler's verdict of one check: every error it reports, then every
+   warning printed for this file. Warnings are kept: the engine publishes
+   them as diagnostics, so a warning is a change a client sees. *)
+let compiler_verdict ~file (result : Jide_jasmin.Adapter.check_result) =
+  let errors =
+    List.map
+      (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+        ( diagnostic.Jide_lang.Diagnostic.severity,
+          diagnostic.Jide_lang.Diagnostic.message ))
+      result.Jide_jasmin.Adapter.diagnostics
   in
-  List.filter
+  let warnings =
+    List.filter_map
+      (fun (warning : Jide_jasmin.Warnings.t) ->
+        if String.equal warning.Jide_jasmin.Warnings.file file then
+          Some
+            (Jide_lang.Diagnostic.Warning, warning.Jide_jasmin.Warnings.message)
+        else None)
+      result.Jide_jasmin.Adapter.warnings
+  in
+  errors @ warnings
+
+(* The server's verdict of the same check: what the engine publishes. *)
+let server_verdict ~file ~text (result : Jide_jasmin.Adapter.check_result) =
+  List.map
     (fun (diagnostic : Jide_lang.Diagnostic.t) ->
-      diagnostic.Jide_lang.Diagnostic.severity = Jide_lang.Diagnostic.Error)
-    result.Jide_jasmin.Adapter.diagnostics
+      ( diagnostic.Jide_lang.Diagnostic.severity,
+        diagnostic.Jide_lang.Diagnostic.message ))
+    (Jide_engine.Engine.diagnostics_of_check ~file ~text result)
+
+let severity_rank = function
+  | Jide_lang.Diagnostic.Error -> 0
+  | Jide_lang.Diagnostic.Warning -> 1
+  | Jide_lang.Diagnostic.Information -> 2
+  | Jide_lang.Diagnostic.Hint -> 3
+
+(* One order for both lists, so the comparison is element by element rather
+   than by length: errors before warnings, then by message. *)
+let canonical (verdict : verdict) =
+  List.sort
+    (fun (left_severity, left_message) (right_severity, right_message) ->
+      match
+        Int.compare (severity_rank left_severity) (severity_rank right_severity)
+      with
+      | 0 -> String.compare left_message right_message
+      | order -> order)
+    verdict
+
+let show_verdict (verdict : verdict) =
+  match verdict with
+  | [] -> "[]"
+  | entries ->
+      String.concat "; "
+        (List.map
+           (fun (severity, message) ->
+             Printf.sprintf "%s %S"
+               (match severity with
+               | Jide_lang.Diagnostic.Error -> "error"
+               | Jide_lang.Diagnostic.Warning -> "warning"
+               | Jide_lang.Diagnostic.Information -> "information"
+               | Jide_lang.Diagnostic.Hint -> "hint")
+               message)
+           entries)
 
 let test_the_renamed_program_keeps_its_verdict () =
   let file = "/work/verdict.jazz" in
-  match
-    renamed ~file ~text:verdict_program ~within:"fn add" ~name:"add"
-      ~new_name:"plus" ()
-  with
-  | Error reason -> check ("verdict: the rename is refused: " ^ reason) false
-  | Ok edits ->
-      let renamed_text = apply verdict_program edits in
-      check "verdict: the program before the rename has no error"
-        (errors_of verdict_program = []);
-      check "verdict: the program after the rename has no error"
-        (errors_of renamed_text = [])
+  let accepted = `Accepted and refused = `Refused in
+  let cases =
+    [
+      ("a clean name", verdict_program, "fn add", "add", "plus", accepted);
+      ( "a name declared later in the same block",
+        later_variable,
+        "count = a;",
+        "count",
+        "total",
+        refused );
+      ( "a name declared later in a nested block",
+        later_nested,
+        "count = a;",
+        "count",
+        "total",
+        refused );
+      ( "a variable beside a variable in a namespace",
+        namespace_variable_outside,
+        "u32 count = 0;",
+        "count",
+        "total",
+        accepted );
+      ( "a namespace's variable beside a top-level variable",
+        namespace_variable_inside,
+        "u32 count = 0;",
+        "count",
+        "total",
+        accepted );
+      ( "a function under a namespace's own name",
+        namespace_named_like_a_value,
+        "fn g",
+        "g",
+        "A",
+        accepted );
+      ( "a variable under a namespace's own name",
+        namespace_named_like_a_value_variable,
+        "u32 g = 0;",
+        "g",
+        "A",
+        accepted );
+      ( "a qualified declaration's last segment",
+        qualified_declaration,
+        "::e ()",
+        "e",
+        "times",
+        accepted );
+    ]
+  in
+  List.iter
+    (fun (label, text, within, name, new_name, expected) ->
+      let before_check = check_text ~file text in
+      let before = server_verdict ~file ~text before_check in
+      (* A program that does not compile has the same verdict on both sides
+         whatever the rule answers, so each case says first that this is a
+         program the compiler accepts. *)
+      check
+        (Printf.sprintf
+           "verdict: %s: the program compiles before the rename (%s)" label
+           (show_verdict before))
+        (List.for_all
+           (fun (severity, _) -> severity <> Jide_lang.Diagnostic.Error)
+           before);
+      check
+        (Printf.sprintf
+           "verdict: %s: the server publishes the compiler's verdict before \
+            the rename (got %s)"
+           label (show_verdict before))
+        (canonical before = canonical (compiler_verdict ~file before_check));
+      match (expected, renamed ~file ~text ~within ~name ~new_name ()) with
+      | `Refused, Error _ -> ()
+      | `Refused, Ok edits ->
+          (* The rule accepted a rename it refuses: the verdict either changed
+             or it did not, and only the comparison can say. *)
+          let renamed_text = apply text edits in
+          let after_check = check_text ~file renamed_text in
+          let after = server_verdict ~file ~text:renamed_text after_check in
+          check
+            (Printf.sprintf
+               "verdict: %s: accepted, and the renamed program keeps the \
+                verdict (before %s, after %s)"
+               label (show_verdict before) (show_verdict after))
+            (canonical before = canonical after)
+      | `Accepted, Error reason ->
+          check (Printf.sprintf "verdict: %s: refused: %s" label reason) false
+      | `Accepted, Ok edits ->
+          let renamed_text = apply text edits in
+          let after_check = check_text ~file renamed_text in
+          let after = server_verdict ~file ~text:renamed_text after_check in
+          check
+            (Printf.sprintf
+               "verdict: %s: the server publishes the compiler's verdict after \
+                the rename (got %s)"
+               label (show_verdict after))
+            (canonical after = canonical (compiler_verdict ~file after_check));
+          check
+            (Printf.sprintf
+               "verdict: %s: the renamed program keeps the verdict (before %s, \
+                after %s)"
+               label (show_verdict before) (show_verdict after))
+            (canonical before = canonical after))
+    cases
 
 let () =
   test_a_variable_renamed_across_its_uses ();
@@ -857,11 +1683,24 @@ let () =
   test_an_annotation_label_is_refused ();
   test_an_include_path_is_refused ();
   test_a_qualified_name_renames_its_last_segment ();
+  test_a_qualified_declaration_renames_its_last_segment ();
   test_a_namespace_name_is_refused ();
   test_a_namespace_prefix_is_refused ();
   test_a_spaced_qualified_name_is_refused ();
   test_an_invalid_identifier_is_refused ();
   test_a_collision_with_a_visible_declaration_is_refused ();
+  test_a_later_declaration_in_the_same_block_is_refused ();
+  test_a_later_function_in_the_same_file_is_refused ();
+  test_a_later_declaration_in_a_nested_block_is_refused ();
+  test_a_later_declaration_in_a_required_file_is_refused ();
+  test_a_name_in_a_file_two_requires_bring_in_is_refused ();
+  test_a_global_read_by_a_shared_file_is_renamed_once ();
+  test_a_name_a_required_file_declares_is_refused ();
+  test_a_name_a_project_file_declares_after_the_require_is_refused ();
+  test_a_name_in_another_namespace_is_not_a_collision ();
+  test_a_variable_in_another_namespace_is_not_a_collision ();
+  test_a_function_in_another_namespace_is_a_collision ();
+  test_a_namespace_name_is_not_a_value_collision ();
   test_a_name_out_of_scope_is_not_a_collision ();
   test_rename_and_rename_back_restores_the_text ();
   test_two_same_named_declarations_are_not_conflated ();

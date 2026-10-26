@@ -5,17 +5,19 @@
    declaration being renamed. Nothing is matched by name alone, so a
    same-named declaration in another block, another file or another namespace
    keeps its own occurrences, and a name the resolver never reached is left
-   alone.
+   alone. A declaration is its text: a file read into two namespaces declares
+   two instances of each name it holds, and both are renamed together,
+   because one edit of the file renames both.
 
-   The collision rule is asked at both ends of the scope relation. At each
-   occurrence, the name it would be written with after the rename must not
-   already name a different declaration there: that is the environment the
-   walk built at the occurrence's byte, which is the view pretyping takes. The
-   walk is define-before-use, so a declaration written later in the same
-   block is invisible there; the rule's other end asks, at the declaration
-   each occurrence would duplicate, whether the declaration being renamed is
-   already in scope. Between them a rename cannot declare one name twice in
-   one scope, which is the one rule that keeps a rename safe. *)
+   Whether the rename is safe is not predicted from scope rules. The edit is
+   made in memory, every resolution that reads an edited file is walked again
+   over the edited texts, and the rename is answered only when every
+   occurrence in every file means the declaration it meant before, at every
+   site it is read at, and the compiler would report the same declarations as
+   declared twice. The walk is the resolver's, which is pretyping's naming
+   rules, so a name the compiler would bind to another declaration after the
+   rename, a declaration that would shadow one a later use reaches, or a
+   second function of one name are all seen as what they are: a change. *)
 
 type edit = { span : Jide_lang.Span.t; new_text : string }
 type edits = (string * edit list) list
@@ -45,6 +47,33 @@ let valid_name (name : string) =
       in
       loop 1)
   && not (is_keyword name)
+
+(* The names a call is read as something other than a function call by: the
+   compiler's flag combinations ([_EQ], [_uLT], ...), which it refuses as a
+   function's name and reads a call to as the combination, and the three
+   predicates of an assertion. The first list is the compiler's own printer
+   over its own type; the second is [safety_map] in [Pretyping.tt_assert],
+   which the library does not export. *)
+let combine_flag_names =
+  let open Jasmin.Operators in
+  List.map Jasmin.Printer.string_of_combine_flags
+    [
+      CF_LT Jasmin.Wsize.Signed;
+      CF_LT Jasmin.Wsize.Unsigned;
+      CF_LE Jasmin.Wsize.Signed;
+      CF_LE Jasmin.Wsize.Unsigned;
+      CF_EQ;
+      CF_NEQ;
+      CF_GE Jasmin.Wsize.Signed;
+      CF_GE Jasmin.Wsize.Unsigned;
+      CF_GT Jasmin.Wsize.Signed;
+      CF_GT Jasmin.Wsize.Unsigned;
+    ]
+
+let assertion_predicates = [ "is_mem_init"; "is_arr_init"; "is_var_init" ]
+
+let reserved_function_name name =
+  List.mem name combine_flag_names || List.mem name assertion_predicates
 
 (* The identifier holding [byte], or the one ending at it: a client sends the
    position just past the name it offers when the user clicks at its edge. *)
@@ -102,11 +131,37 @@ let prefix_reason =
 let invalid_reason name =
   Printf.sprintf "%s is not a valid Jasmin identifier" name
 
+let reserved_reason name =
+  Printf.sprintf
+    "%s is a name the compiler reads as a built-in where it is called, so no \
+     function can take it"
+    name
+
 let broken_reason path =
   Printf.sprintf
     "a file the document requires has recovered syntax errors, so no rename is \
      offered: %s"
     path
+
+let reparse_reason path =
+  Printf.sprintf
+    "the renamed text of %s would not parse into the same names, so no rename \
+     is offered"
+    path
+
+let unbound_reason name path =
+  Printf.sprintf
+    "%s is used in %s with no declaration, and the rename would give it one"
+    name path
+
+let changed_reason name path =
+  Printf.sprintf "the rename would change what %s in %s names" name path
+
+let undone_duplicate_reason name (other : Index.declaration) =
+  Printf.sprintf
+    "%s is declared twice in one scope (the other is in %s), which the \
+     compiler reports, and the rename would change that report"
+    name other.Index.file
 
 let collision_reason key (other : Index.declaration) =
   Printf.sprintf "%s already names a different declaration (%s in %s)" key
@@ -130,7 +185,33 @@ let writable_span (occurrence : Index.occurrence) =
     else Some occurrence.Index.last
   else Some occurrence.Index.span
 
-let locate ~(index : Index.t) ~(resolve : Resolve.t) ~(byte : int) :
+(* What the name at the occurrence names: the first of the resolutions that
+   read this file, with these bytes, and resolved it. The document's own
+   resolution comes first; a file checked in the context of an entry has names
+   only that entry's walk gives it, so the others are asked after it. *)
+let answer_of ~(index : Index.t) ~(resolutions : Resolve.t list) ~(at : int) =
+  let path = Index.normalise index.Index.file in
+  let readers =
+    List.filter
+      (fun resolution ->
+        match Resolve.file resolution path with
+        | Some read -> String.equal read.Index.text index.Index.text
+        | None -> false)
+      resolutions
+  in
+  let answers =
+    List.filter_map
+      (fun resolution ->
+        Option.map snd (Resolve.answer_at resolution ~file:path ~byte:at))
+      readers
+  in
+  match
+    List.find_opt (function Resolve.Resolved _ -> true | _ -> false) answers
+  with
+  | Some answer -> Some answer
+  | None -> ( match answers with answer :: _ -> Some answer | [] -> None)
+
+let locate ~(index : Index.t) ~(resolutions : Resolve.t list) ~(byte : int) :
     (subject, string) result =
   if is_keyword (word_at index.Index.text byte) then Error keyword_reason
   else
@@ -151,21 +232,108 @@ let locate ~(index : Index.t) ~(resolve : Resolve.t) ~(byte : int) :
           | Index.Include_path -> Error include_reason
           | _ -> (
               let at = occurrence.Index.span.Jide_lang.Span.start_byte in
-              match
-                Resolve.answer_at resolve ~file:index.Index.file ~byte:at
-              with
+              match answer_of ~index ~resolutions ~at with
               | None -> Error undeclared_reason
-              | Some (_, Resolve.Intrinsic) -> Error intrinsic_reason
-              | Some (_, Resolve.Annotation) -> Error annotation_reason
-              | Some (_, Resolve.Include_path) -> Error include_reason
-              | Some (_, Resolve.Unresolved) -> Error undeclared_reason
-              | Some (_, Resolve.Resolved declaration) -> (
+              | Some Resolve.Intrinsic -> Error intrinsic_reason
+              | Some Resolve.Annotation -> Error annotation_reason
+              | Some Resolve.Include_path -> Error include_reason
+              | Some Resolve.Unresolved -> Error undeclared_reason
+              | Some (Resolve.Resolved declaration) -> (
                   if declaration.Index.kind = Index.Namespace then
                     Error namespace_reason
                   else
                     match writable_span occurrence with
                     | None -> Error spaced_reason
                     | Some writable -> Ok { declaration; writable })))
+
+(* ------------------------------------------------------------------ *)
+(* What each occurrence means at every require site of its file *)
+
+exception Refused of string
+
+(* The namespace a site was read into, for a reason a client shows: the
+   document's own walk has no namespace. *)
+let read_into (site : string) =
+  match String.index_opt site '@' with
+  | None | Some 0 -> "the document"
+  | Some index -> "namespace " ^ String.sub site 0 index
+
+(* What an occurrence means at each site its file was read at. A file read into
+   two namespaces is one text read twice, and each reading declares its own
+   instances of the names in it. *)
+let meanings (resolution : Resolve.t) ~(file : string)
+    (occurrence : Index.occurrence) =
+  let byte = occurrence.Index.span.Jide_lang.Span.start_byte in
+  List.map
+    (fun site -> (site, Resolve.answer_at_site resolution ~site ~file ~byte))
+    (Resolve.sites resolution file)
+
+(* The target is the declaration's text: every instance a reading of its file
+   makes is renamed by the one edit of that file. *)
+let is_target (target : Index.declaration) (answer : Resolve.answer) =
+  match answer with
+  | Resolve.Resolved declaration -> Index.equal_declaration declaration target
+  | Resolve.Intrinsic | Resolve.Annotation | Resolve.Include_path
+  | Resolve.Unresolved ->
+      false
+
+type occurrence_plan =
+  | Skip  (** the occurrence means something else at some site, never this *)
+  | Unbound  (** the occurrence names no declaration at any site *)
+  | Edit
+      (** the occurrence is the target at some site, and at every other one it
+          names nothing: a reading that leaves a name unbound stays unbound
+          once it is renamed, which the comparison after the edit checks *)
+  | Shared of string
+      (** the target at some site and another declaration at another: the one
+          text cannot change one of them alone *)
+
+(* The name a lookup of the occurrence is by: its last segment. Only an
+   occurrence written with the declaration's own name can resolve to it, so
+   every other one is passed over without asking the walks. *)
+let last_segment (name : string) =
+  match String.rindex_opt name ':' with
+  | None -> name
+  | Some index ->
+      String.trim (String.sub name (index + 1) (String.length name - index - 1))
+
+let classify (resolution : Resolve.t) ~(file : string)
+    (target : Index.declaration) (occurrence : Index.occurrence) =
+  if
+    not
+      (String.equal
+         (last_segment occurrence.Index.name)
+         (last_segment target.Index.name))
+  then Skip
+  else
+    let meanings = meanings resolution ~file occurrence in
+    let hits =
+      List.filter (fun (_site, answer) -> is_target target answer) meanings
+    in
+    let others =
+      List.filter
+        (fun (_site, answer) ->
+          (not (is_target target answer)) && answer <> Resolve.Unresolved)
+        meanings
+    in
+    match (hits, others) with
+    | [], [] -> Unbound
+    | [], _ :: _ -> Skip
+    | _ :: _, [] -> Edit
+    | (hit_site, _) :: _, (other_site, other) :: _ ->
+        let meaning =
+          match other with
+          | Resolve.Resolved declaration -> declaration.Index.name
+          | Resolve.Intrinsic | Resolve.Annotation | Resolve.Include_path
+          | Resolve.Unresolved ->
+              "no declaration"
+        in
+        Shared
+          (Printf.sprintf
+             "%s in %s means %s when it is read into %s and %s when it is read \
+              into %s, so an edit of that file would change both"
+             occurrence.Index.name file target.Index.name (read_into hit_site)
+             meaning (read_into other_site))
 
 (* ------------------------------------------------------------------ *)
 (* The occurrences of one identity, grouped by file *)
@@ -179,43 +347,44 @@ type searched = {
 let compare_occurrence (left : Index.occurrence) (right : Index.occurrence) =
   Jide_lang.Span.compare left.Index.span right.Index.span
 
-let belongs (index : Index.t) (resolve : Resolve.t) (target : Index.declaration)
-    (occurrence : Index.occurrence) =
-  match
-    Resolve.answer_at resolve ~file:index.Index.file
-      ~byte:occurrence.Index.span.Jide_lang.Span.start_byte
-  with
-  | Some (_, Resolve.Resolved declaration) ->
-      Index.equal_declaration declaration target
-  | _ -> false
+(* Every file the resolutions read, once each, through the first resolution that
+   reached it: the document first, then the files its resolution read, then each
+   project file's own resolution in the order the caller gave them. *)
+let reached ~(resolve : Resolve.t) ~(files : Resolve.t list) =
+  let seen = Hashtbl.create 16 in
+  let found = ref [] in
+  let add (resolution : Resolve.t) (index : Index.t) =
+    let path = Index.normalise index.Index.file in
+    if not (Hashtbl.mem seen path) then (
+      Hashtbl.add seen path ();
+      found := (resolution, path, index) :: !found)
+  in
+  List.iter (fun index -> add resolve index) (Resolve.files resolve);
+  List.iter
+    (fun (other : Resolve.t) ->
+      List.iter (fun index -> add other index) (Resolve.files other))
+    files;
+  List.rev !found
 
-let group_of (index : Index.t) (resolve : Resolve.t)
-    (target : Index.declaration) =
-  List.sort compare_occurrence
-    (List.filter (belongs index resolve target) index.Index.occurrences)
-
-(* The document first, then the files its resolution read, then each project
-   file's own resolution in the order the caller gave them. A file reached by
-   two resolutions is searched once, through the first one that reached it. *)
+(* The occurrences of the identity in every reached file. A file with none is
+   not a group, but it is still asked the rule's second end. *)
 let search ~(resolve : Resolve.t) ~(files : Resolve.t list)
     ~(target : Index.declaration) =
-  let seen = Hashtbl.create 16 in
-  let groups = ref [] in
-  let add (resolution : Resolve.t) (index : Index.t) =
-    let key = Index.normalise index.Index.file in
-    if not (Hashtbl.mem seen key) then (
-      Hashtbl.add seen key ();
-      match group_of index resolution target with
-      | [] -> ()
-      | occurrences ->
-          groups :=
-            { path = index.Index.file; resolution; occurrences } :: !groups)
-  in
-  List.iter (add resolve) (Resolve.files resolve);
-  List.iter
-    (fun (other : Resolve.t) -> List.iter (add other) (Resolve.files other))
-    files;
-  List.rev !groups
+  List.filter_map
+    (fun (resolution, path, (index : Index.t)) ->
+      let occurrences =
+        List.filter_map
+          (fun occurrence ->
+            match classify resolution ~file:path target occurrence with
+            | Skip -> None
+            | Edit -> Some occurrence
+            | Shared reason -> raise (Refused reason))
+          (List.sort compare_occurrence index.Index.occurrences)
+      in
+      match occurrences with
+      | [] -> None
+      | _ -> Some { path; resolution; occurrences })
+    (reached ~resolve ~files)
 
 (* ------------------------------------------------------------------ *)
 (* The collision rule *)
@@ -229,18 +398,28 @@ let visible_of (scope : Resolve.scope) (kind : Index.kind) =
   | Index.Type_alias -> scope.Resolve.types
   | _ -> scope.Resolve.vars
 
-(* The name an occurrence would be written with after the rename: a qualified
-   name keeps its qualification and replaces its last segment. *)
-let renamed_written (occurrence : Index.occurrence) (new_name : string) =
-  match String.rindex_opt occurrence.Index.name ':' with
-  | None -> new_name
-  | Some index -> String.sub occurrence.Index.name 0 (index + 1) ^ new_name
+(* The name spaces the scope keeps apart: a function and a type alias live in
+   their own lists, and every other declaration an index holds (a parameter, a
+   variable, a global) lives in the variables' list. A namespace's own name is
+   in none of the three, so a rename to it is not a collision with it. *)
+let same_name_space (left : Index.kind) (right : Index.kind) =
+  match (left, right) with
+  | Index.Namespace, _ | _, Index.Namespace -> false
+  | Index.Function, Index.Function -> true
+  | Index.Type_alias, Index.Type_alias -> true
+  | (Index.Function | Index.Type_alias), _ -> false
+  | _, (Index.Function | Index.Type_alias) -> false
+  | _ -> true
 
 type clash = Free | Taken of Index.declaration | Unknown
 
-let clash_at (resolve : Resolve.t) ~(file : string) ~(byte : int)
-    ~(key : string) ~(kind : Index.kind) ~(target : Index.declaration) =
-  match Resolve.scope_at resolve ~file ~byte with
+(* The name the occurrence is written with after the rename, at one site: the
+   scope the walk of that site built at the occurrence, so a name is compared
+   with the declarations that walk sees. *)
+let clash_at (resolve : Resolve.t) ~(file : string) ~(site : string)
+    ~(byte : int) ~(key : string) ~(kind : Index.kind)
+    ~(target : Index.declaration) =
+  match Resolve.scope_at_site resolve ~site ~file ~byte with
   | None -> Unknown
   | Some scope -> (
       match
@@ -251,57 +430,83 @@ let clash_at (resolve : Resolve.t) ~(file : string) ~(byte : int)
       with
       | None -> Free
       | Some binding ->
-          if Index.equal_declaration binding.Resolve.declaration target then
-            Free
+          if Index.same_instance binding.Resolve.declaration target then Free
           else Taken binding.Resolve.declaration)
 
-(* The name spaces the scope keeps apart: a function and a type alias live in
-   their own lists, and every other declaration an index holds (a parameter, a
-   variable, a global) lives in the variables' list. *)
-let same_name_space (left : Index.kind) (right : Index.kind) =
-  match (left, right) with
-  | Index.Function, Index.Function -> true
-  | Index.Type_alias, Index.Type_alias -> true
-  | (Index.Function | Index.Type_alias), _ -> false
-  | _, (Index.Function | Index.Type_alias) -> false
-  | _ -> true
-
-(* Whether [target] is one of the declarations in scope at [byte], under the
-   name the declaration is written with. A name a namespace merged into its
-   parent is listed with its qualification, which is not the name its own
-   scope declares, so the binding's name is compared as well as its identity:
-   a declaration of another scope that happens to be visible here is not the
-   declaration a later name would duplicate. *)
-let in_scope (resolve : Resolve.t) ~(file : string) ~(byte : int)
-    ~(target : Index.declaration) =
-  match Resolve.scope_at resolve ~file ~byte with
+(* Whether [target] is one of the declarations in scope at [byte] at one site,
+   under the name the declaration is written with. A name a namespace merged
+   into its parent is listed with its qualification, so the binding's name is
+   compared as well as its identity. *)
+let in_scope (resolve : Resolve.t) ~(file : string) ~(site : string)
+    ~(byte : int) ~(target : Index.declaration) =
+  match Resolve.scope_at_site resolve ~site ~file ~byte with
   | None -> false
   | Some (scope : Resolve.scope) ->
       let holds (binding : Resolve.binding) =
         String.equal binding.Resolve.name target.Index.name
-        && Index.equal_declaration binding.Resolve.declaration target
+        && Index.same_instance binding.Resolve.declaration target
       in
       List.exists holds scope.Resolve.types
       || List.exists holds scope.Resolve.funs
       || List.exists holds scope.Resolve.vars
 
-(* The other end of the collision rule. The scope at an occurrence is the scope
-   before it, so a declaration written later in the same block is invisible
-   there, though renaming to its name would declare that name twice in one
-   scope: an error for a function or a type alias, a warning for a variable.
-   The question is therefore asked at the declaration the new name would
-   duplicate: when the declaration being renamed is already in scope where that
-   one is written, the renamed program has two declarations of one name. *)
-let later_clash (group : searched) (index : Index.t)
-    (target : Index.declaration) (new_name : string) =
-  List.find_opt
-    (fun (declaration : Index.declaration) ->
-      String.equal declaration.Index.name new_name
-      && same_name_space declaration.Index.kind target.Index.kind
-      && (not (Index.equal_declaration declaration target))
-      && in_scope group.resolution ~file:group.path
-           ~byte:declaration.Index.name_span.Jide_lang.Span.start_byte ~target)
+(* The namespaces a declaration is written inside, outermost first: every
+   namespace item of the file whose range holds the declaration's name. *)
+let namespace_path (index : Index.t) (declaration : Index.declaration) =
+  List.filter_map
+    (fun (item : Index.declaration) ->
+      if
+        item.Index.kind = Index.Namespace
+        && item.Index.item_span.Jide_lang.Span.start_byte
+           <= declaration.Index.name_span.Jide_lang.Span.start_byte
+        && declaration.Index.name_span.Jide_lang.Span.end_byte
+           <= item.Index.item_span.Jide_lang.Span.end_byte
+      then Some item.Index.name
+      else None)
     index.Index.declarations
+
+(* Whether two declarations land in one frame once the namespaces around them
+   close. A variable is pushed into the frame of the namespace it is written
+   in, and a namespace merges its contents into its parent under its own name,
+   so [A::total] and [total] are two names in one frame. A function or a type
+   alias is looked up by its unqualified name in every enclosing frame, so
+   visibility alone answers for it. A declaration of another file is left to
+   that answer too. *)
+let one_frame (index : Index.t) (target : Index.declaration)
+    (declaration : Index.declaration) =
+  match target.Index.kind with
+  | Index.Function | Index.Type_alias -> true
+  | _ ->
+      if
+        String.equal
+          (Index.normalise target.Index.file)
+          (Index.normalise index.Index.file)
+      then namespace_path index target = namespace_path index declaration
+      else true
+
+(* The other end of the collision rule: a declaration the new name would
+   duplicate, in the file the group is searched in, where the declaration being
+   renamed is in scope at one of the file's sites. *)
+let later_clash (resolution : Resolve.t) ~(path : string) (index : Index.t)
+    (target : Index.declaration) (new_name : string) =
+  (* A rename to the name the declaration already has writes every occurrence
+     as itself: no declaration of the program changes, so nothing can collide. *)
+  if String.equal new_name target.Index.name then None
+  else
+    let sites = Resolve.sites resolution path in
+    List.find_opt
+      (fun (declaration : Index.declaration) ->
+        String.equal declaration.Index.name new_name
+        && same_name_space declaration.Index.kind target.Index.kind
+        && (not (Index.equal_declaration declaration target))
+        && one_frame index target declaration
+        && List.exists
+             (fun site ->
+               in_scope resolution ~file:path ~site
+                 ~byte:declaration.Index.name_span.Jide_lang.Span.start_byte
+                 ~target)
+             sites)
+      index.Index.declarations
 
 (* ------------------------------------------------------------------ *)
 
@@ -315,57 +520,69 @@ let broken_files ~(resolve : Resolve.t) ~(broken : string -> bool) =
    the same words: a [prepareRename] that offered a name the following [rename]
    would not write shows its input box for a reason the user cannot see yet.
    The position's own refusals come from the same [locate], so they are shared
-   too. *)
+   too. The sharing refusal is the plan's: it does not depend on the new name. *)
 let subject_or_refusal ~(index : Index.t) ~(resolve : Resolve.t) ~(byte : int)
     ~(broken : string -> bool) =
   match broken_files ~resolve ~broken with
   | path :: _ -> Error (broken_reason path)
   | [] -> locate ~index ~resolve ~byte
 
-let prepare ~(index : Index.t) ~(resolve : Resolve.t) ~(byte : int)
-    ~(broken : string -> bool) =
+(* The subject, and every group the rename would edit, or the refusal that no
+   edit can make without changing another meaning. None of it depends on the
+   new name. *)
+let plan ~(index : Index.t) ~(resolve : Resolve.t) ~(files : Resolve.t list)
+    ~(byte : int) ~(broken : string -> bool) =
   match subject_or_refusal ~index ~resolve ~byte ~broken with
   | Error reason -> Error reason
-  | Ok subject -> Ok (subject.writable, subject.declaration.Index.kind)
+  | Ok subject -> (
+      try
+        let groups = search ~resolve ~files ~target:subject.declaration in
+        (* A qualified occurrence with no range of its own cannot be written. *)
+        List.iter
+          (fun (group : searched) ->
+            List.iter
+              (fun occurrence ->
+                match writable_span occurrence with
+                | None -> raise (Refused spaced_reason)
+                | Some _ -> ())
+              group.occurrences)
+          groups;
+        Ok (subject, groups)
+      with Refused reason -> Error reason)
+
+let prepare ~(index : Index.t) ~(resolve : Resolve.t) ~(byte : int)
+    ~(broken : string -> bool) =
+  match plan ~index ~resolve ~files:[] ~byte ~broken with
+  | Error reason -> Error reason
+  | Ok (subject, _groups) ->
+      Ok (subject.writable, subject.declaration.Index.kind)
+
+let renamed_written (occurrence : Index.occurrence) (new_name : string) =
+  match String.rindex_opt occurrence.Index.name ':' with
+  | None -> new_name
+  | Some index -> String.sub occurrence.Index.name 0 (index + 1) ^ new_name
 
 let rename ~(files : Resolve.t list) ~(index : Index.t) ~(resolve : Resolve.t)
     ~(byte : int) ~(new_name : string) ~(broken : string -> bool) =
   if not (valid_name new_name) then Error (invalid_reason new_name)
   else
-    match subject_or_refusal ~index ~resolve ~byte ~broken with
+    match plan ~index ~resolve ~files ~byte ~broken with
     | Error reason -> Error reason
-    | Ok subject -> (
+    | Ok (subject, groups) -> (
         let target = subject.declaration in
-        let groups = search ~resolve ~files ~target in
         (* The rule's other end, once per file searched: a declaration the new
            name already has there, when the declaration being renamed is in
            scope where that one is written. *)
         let rec check_declarations = function
           | [] -> Ok ()
-          | (group : searched) :: rest -> (
-              match Resolve.file group.resolution group.path with
-              | None -> check_declarations rest
-              | Some index -> (
-                  match later_clash group index target new_name with
-                  | Some other -> Error (collision_reason new_name other)
-                  | None -> check_declarations rest))
+          | (resolution, path, index) :: rest -> (
+              match later_clash resolution ~path index target new_name with
+              | Some other -> Error (collision_reason new_name other)
+              | None -> check_declarations rest)
         in
-        (* Every occurrence is checked before the rename is answered: a
-           partial edit set would leave the program naming two declarations,
-           and an occurrence whose last segment has no range cannot be
-           rewritten at all. The check and the edit are made together, so no
-           range is ever written that was not checked, and one refusal refuses
-           the whole rename. *)
-        let rec check_groups = function
-          | [] -> Ok []
-          | (group : searched) :: rest -> (
-              match check_group group with
-              | Error _ as error -> error
-              | Ok edits -> (
-                  match check_groups rest with
-                  | Error _ as error -> error
-                  | Ok groups -> Ok ((group.path, edits) :: groups)))
-        and check_group (group : searched) =
+        (* Every occurrence is checked at every site of its file before the
+           rename is answered, so one refusal refuses the whole rename. *)
+        let check_group (group : searched) =
           let rec loop acc = function
             | [] -> Ok (List.rev acc)
             | (occurrence : Index.occurrence) :: rest -> (
@@ -374,10 +591,18 @@ let rename ~(files : Resolve.t list) ~(index : Index.t) ~(resolve : Resolve.t)
                 | Some span -> (
                     let at = occurrence.Index.span.Jide_lang.Span.start_byte in
                     let key = renamed_written occurrence new_name in
-                    match
-                      clash_at group.resolution ~file:group.path ~byte:at ~key
-                        ~kind:target.Index.kind ~target
-                    with
+                    let clash =
+                      List.fold_left
+                        (fun found site ->
+                          match found with
+                          | Taken _ | Unknown -> found
+                          | Free ->
+                              clash_at group.resolution ~file:group.path ~site
+                                ~byte:at ~key ~kind:target.Index.kind ~target)
+                        Free
+                        (Resolve.sites group.resolution group.path)
+                    in
+                    match clash with
                     | Free -> loop ({ span; new_text = new_name } :: acc) rest
                     | Unknown ->
                         Error
@@ -386,6 +611,13 @@ let rename ~(files : Resolve.t list) ~(index : Index.t) ~(resolve : Resolve.t)
           in
           loop [] group.occurrences
         in
-        match check_declarations groups with
+        let rec check_groups acc = function
+          | [] -> Ok (List.rev acc)
+          | (group : searched) :: rest -> (
+              match check_group group with
+              | Error _ as error -> error
+              | Ok edits -> check_groups ((group.path, edits) :: acc) rest)
+        in
+        match check_declarations (reached ~resolve ~files) with
         | Error _ as error -> error
-        | Ok () -> check_groups groups)
+        | Ok () -> check_groups [] groups)

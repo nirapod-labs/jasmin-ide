@@ -1,7 +1,7 @@
 (** Rename a symbol, by identity.
 
     The identity of a symbol is the absolute file and the byte offset of its
-    declaration's name, never a compiler unique id (design section 9). Both
+    declaration's name, never a compiler unique id. Both
     functions here read the index of the file the client is in, the
     resolution over that file and, for the project's other files, a
     resolution per file; neither parses, resolves or checks anything itself,
@@ -38,17 +38,27 @@ val prepare :
   index:Index.t ->
   resolve:Resolve.t ->
   byte:int ->
-  (Jide_lang.Span.t * Index.kind) option
-(** [prepare ~index ~resolve ~byte] is the range a rename at [byte] would
-    rewrite and the kind of the declaration it belongs to, or [None].
+  broken:(string -> bool) ->
+  (Jide_lang.Span.t * Index.kind, string) result
+(** [prepare ~index ~resolve ~byte ~broken] is the range a rename at [byte]
+    would rewrite and the kind of the declaration it belongs to, or the reason
+    no rename is offered.
 
-    [None] for a position that holds no identifier (a keyword, a literal, the
-    inside of a comment or a string, blank space), for an intrinsic, for an
-    annotation label, for an include path, for a name the resolver found no
-    declaration for, for a namespace's own name, for the namespace part of a
-    qualified name (the [A] of [A::x], whose last segment is the name a
-    rename would rewrite), and for a qualified name written with spaces
-    around [::], whose last segment has no range.
+    It refuses with the same reasons and the same words as {!rename}, in the
+    same order, for everything but the new name: a file in the require closure
+    that has recovered syntax errors (see {!rename}'s [broken]), a position
+    that holds no identifier (a keyword, a literal, the inside of a comment or
+    a string, blank space), an intrinsic, an annotation label, an include
+    path, a name the resolver found no declaration for, an occurrence that
+    means different declarations at the require sites of its file (see below), a namespace's own
+    name, the namespace part of a qualified name (the [A] of [A::x], whose
+    last segment is the name a rename would rewrite), and a qualified name
+    written with spaces around [::], whose last segment has no range. A
+    caller that offers a rename only when this answers [Ok] never shows its
+    input box for a refusal that does not depend on the new name. The two
+    that do, an invalid identifier and a collision, are decided by
+    {!rename}, which is the first to hold the name: a client sees those two
+    reasons after its input box, never before it.
 
     The range is the last segment of a qualified name when no space surrounds
     its [::], and the whole identifier otherwise, which is the rule the index
@@ -77,9 +87,8 @@ val rename :
     guessed would rename a stranger's declaration.
 
     [broken path] is true when [path] has recovered syntax errors. The rename
-    is refused when any file in [resolve]'s require closure is broken, which
-    is design section 10's rule: the index of a file recovery rewrote is not
-    one to edit other files from.
+    is refused when any file in [resolve]'s require closure is broken: the
+    index of a file that recovery rewrote is not one to edit other files from.
 
     The refusals are, in this order:
 
@@ -90,14 +99,27 @@ val rename :
       intrinsic, an annotation label, an include path or a namespace's own
       name, or it is the namespace part of a qualified name, or it names no
       declaration;
+    - an occurrence in a file that more than one [require] brings in means
+      the declaration at one require site and another at a second. Such a
+      file has one text, so an edit of it would change both meanings; the
+      refusal names them. An occurrence that means the same declaration at
+      every site is an edit, once;
     - an occurrence of the symbol is a qualified name written with spaces
       around [::], whose last segment has no range of its own, so rewriting
       it would delete the qualification;
     - the new name is already the name of a different declaration in the
-      scope of one of the occurrences. That is the rule that keeps a rename
-      safe: the scope the resolver built at that byte is asked whether
-      [new_name] names something else there, and a qualified occurrence is
+      scope of one of the occurrences, or the declaration being renamed would
+      land in the frame of a declaration of [new_name] once the namespaces
+      around them close. That is the rule that keeps a rename safe, and it is
+      asked at both ends of the scope relation: the scope the resolver built
+      at an occurrence is the scope before it, so it cannot see a declaration
+      written later in the same block, while the other question is asked
+      where that later declaration is written. A qualified occurrence is
       asked about the qualified name it would become ([A::new], not [new]).
+      The frame is not the scope: a namespace merges its contents into its
+      parent under its own name, so a variable declared inside one is
+      [A::new] in the frame the merge fills, while a function or a type alias
+      of that name is one name to the compiler wherever its namespaces nest.
 
     A rename to the name the symbol already has is answered with the edits it
     would make, which replace each occurrence with itself. *)
