@@ -340,173 +340,301 @@ let classify (resolution : Resolve.t) ~(file : string)
 
 type searched = {
   path : string;
-  resolution : Resolve.t;  (** the resolution whose answers cover [path] *)
+  index : Index.t;  (** the file as the searching resolution read it *)
   occurrences : Index.occurrence list;  (** the identity's own, in order *)
 }
 
 let compare_occurrence (left : Index.occurrence) (right : Index.occurrence) =
   Jide_lang.Span.compare left.Index.span right.Index.span
 
+(* Every resolution once, by its entry, the document's own first. *)
+let distinct (resolutions : Resolve.t list) =
+  let seen = Hashtbl.create 16 in
+  List.filter
+    (fun resolution ->
+      let entry = Index.normalise (Resolve.entry resolution) in
+      if Hashtbl.mem seen entry then false
+      else (
+        Hashtbl.add seen entry ();
+        true))
+    resolutions
+
 (* Every file the resolutions read, once each, through the first resolution that
    reached it: the document first, then the files its resolution read, then each
    project file's own resolution in the order the caller gave them. *)
-let reached ~(resolve : Resolve.t) ~(files : Resolve.t list) =
+let reached (resolutions : Resolve.t list) =
   let seen = Hashtbl.create 16 in
   let found = ref [] in
-  let add (resolution : Resolve.t) (index : Index.t) =
-    let path = Index.normalise index.Index.file in
-    if not (Hashtbl.mem seen path) then (
-      Hashtbl.add seen path ();
-      found := (resolution, path, index) :: !found)
-  in
-  List.iter (fun index -> add resolve index) (Resolve.files resolve);
   List.iter
-    (fun (other : Resolve.t) ->
-      List.iter (fun index -> add other index) (Resolve.files other))
-    files;
+    (fun (resolution : Resolve.t) ->
+      List.iter
+        (fun (index : Index.t) ->
+          let path = Index.normalise index.Index.file in
+          if not (Hashtbl.mem seen path) then (
+            Hashtbl.add seen path ();
+            found := (resolution, path, index) :: !found))
+        (Resolve.files resolution))
+    resolutions;
   List.rev !found
 
-(* The occurrences of the identity in every reached file. A file with none is
-   not a group, but it is still asked the rule's second end. *)
-let search ~(resolve : Resolve.t) ~(files : Resolve.t list)
-    ~(target : Index.declaration) =
+(* The occurrences of the identity in every reached file. Every resolution that
+   reads a file is asked about it, not only the first: a file read at the top
+   level by one entry and inside a namespace by another means what each walk
+   says, and an occurrence is an edit only where every walk agrees. *)
+let search ~(resolutions : Resolve.t list) ~(target : Index.declaration) =
   List.filter_map
-    (fun (resolution, path, (index : Index.t)) ->
+    (fun (_first, path, (index : Index.t)) ->
+      let readers =
+        List.filter
+          (fun resolution ->
+            match Resolve.file resolution path with
+            | Some read -> String.equal read.Index.text index.Index.text
+            | None -> false)
+          resolutions
+      in
+      let plan occurrence =
+        let plans =
+          List.map
+            (fun resolution -> classify resolution ~file:path target occurrence)
+            readers
+        in
+        match
+          List.find_opt (function Shared _ -> true | _ -> false) plans
+        with
+        | Some shared -> shared
+        | None ->
+            if not (List.mem Edit plans) then Skip
+            else if
+              List.for_all (fun plan -> plan = Edit || plan = Unbound) plans
+            then Edit
+            else
+              Shared
+                (Printf.sprintf
+                   "%s in %s means %s for one file that reads it and something \
+                    else for another, so an edit of that file would change \
+                    both"
+                   occurrence.Index.name path target.Index.name)
+      in
       let occurrences =
         List.filter_map
           (fun occurrence ->
-            match classify resolution ~file:path target occurrence with
-            | Skip -> None
+            match plan occurrence with
+            | Skip | Unbound -> None
             | Edit -> Some occurrence
             | Shared reason -> raise (Refused reason))
           (List.sort compare_occurrence index.Index.occurrences)
       in
       match occurrences with
       | [] -> None
-      | _ -> Some { path; resolution; occurrences })
-    (reached ~resolve ~files)
+      | _ -> Some { path; index; occurrences })
+    (reached resolutions)
 
 (* ------------------------------------------------------------------ *)
-(* The collision rule *)
+(* The rename made in memory, and the meaning of every name compared *)
 
-(* The name space of the declaration decides which list of the scope the
-   question is asked of: a variable and a function of one name are different
-   symbols in Jasmin, so one never collides with the other. *)
-let visible_of (scope : Resolve.scope) (kind : Index.kind) =
-  match kind with
-  | Index.Function -> scope.Resolve.funs
-  | Index.Type_alias -> scope.Resolve.types
-  | _ -> scope.Resolve.vars
+(* One edit as a byte range and the length it changes the text by. *)
+type shift = { stop : int; delta : int }
 
-(* The name spaces the scope keeps apart: a function and a type alias live in
-   their own lists, and every other declaration an index holds (a parameter, a
-   variable, a global) lives in the variables' list. A namespace's own name is
-   in none of the three, so a rename to it is not a collision with it. *)
-let same_name_space (left : Index.kind) (right : Index.kind) =
-  match (left, right) with
-  | Index.Namespace, _ | _, Index.Namespace -> false
-  | Index.Function, Index.Function -> true
-  | Index.Type_alias, Index.Type_alias -> true
-  | (Index.Function | Index.Type_alias), _ -> false
-  | _, (Index.Function | Index.Type_alias) -> false
-  | _ -> true
+let shifts_of (edits : edit list) =
+  List.map
+    (fun (edit : edit) ->
+      let start = edit.span.Jide_lang.Span.start_byte in
+      let stop = edit.span.Jide_lang.Span.end_byte in
+      { stop; delta = String.length edit.new_text - (stop - start) })
+    edits
 
-type clash = Free | Taken of Index.declaration | Unknown
+(* Where a byte that starts a name lands once the file's edits are made: every
+   edit that ends at or before it moves it by its own change of length. An
+   edit never cuts a name in two, so a name's start is never inside one. *)
+let moved (shifts : shift list) byte =
+  List.fold_left
+    (fun byte_after shift ->
+      if shift.stop <= byte then byte_after + shift.delta else byte_after)
+    byte shifts
 
-(* The name the occurrence is written with after the rename, at one site: the
-   scope the walk of that site built at the occurrence, so a name is compared
-   with the declarations that walk sees. *)
-let clash_at (resolve : Resolve.t) ~(file : string) ~(site : string)
-    ~(byte : int) ~(key : string) ~(kind : Index.kind)
-    ~(target : Index.declaration) =
-  match Resolve.scope_at_site resolve ~site ~file ~byte with
-  | None -> Unknown
-  | Some scope -> (
-      match
-        List.find_opt
-          (fun (binding : Resolve.binding) ->
-            String.equal binding.Resolve.name key)
-          (visible_of scope kind)
-      with
-      | None -> Free
-      | Some binding ->
-          if Index.same_instance binding.Resolve.declaration target then Free
-          else Taken binding.Resolve.declaration)
+let apply_edits (text : string) (edits : edit list) =
+  let buffer = Buffer.create (String.length text + 64) in
+  let cursor =
+    List.fold_left
+      (fun cursor (edit : edit) ->
+        let start = edit.span.Jide_lang.Span.start_byte in
+        let stop = edit.span.Jide_lang.Span.end_byte in
+        Buffer.add_string buffer (String.sub text cursor (start - cursor));
+        Buffer.add_string buffer edit.new_text;
+        stop)
+      0 edits
+  in
+  Buffer.add_string buffer
+    (String.sub text cursor (String.length text - cursor));
+  Buffer.contents buffer
 
-(* Whether [target] is one of the declarations in scope at [byte] at one site,
-   under the name the declaration is written with. A name a namespace merged
-   into its parent is listed with its qualification, so the binding's name is
-   compared as well as its identity. *)
-let in_scope (resolve : Resolve.t) ~(file : string) ~(site : string)
-    ~(byte : int) ~(target : Index.declaration) =
-  match Resolve.scope_at_site resolve ~site ~file ~byte with
-  | None -> false
-  | Some (scope : Resolve.scope) ->
-      let holds (binding : Resolve.binding) =
-        String.equal binding.Resolve.name target.Index.name
-        && Index.same_instance binding.Resolve.declaration target
-      in
-      List.exists holds scope.Resolve.types
-      || List.exists holds scope.Resolve.funs
-      || List.exists holds scope.Resolve.vars
+type world = {
+  shifts : (string * shift list) list;  (** by normalised path *)
+  target : Index.declaration;
+}
 
-(* The namespaces a declaration is written inside, outermost first: every
-   namespace item of the file whose range holds the declaration's name. *)
-let namespace_path (index : Index.t) (declaration : Index.declaration) =
-  List.filter_map
-    (fun (item : Index.declaration) ->
+let shifts_in world path =
+  Option.value ~default:[] (List.assoc_opt (Index.normalise path) world.shifts)
+
+(* A declaration before the rename, at its place after it. *)
+let key_before world (declaration : Index.declaration) =
+  let file = Index.normalise declaration.Index.file in
+  ( file,
+    moved (shifts_in world file)
+      declaration.Index.name_span.Jide_lang.Span.start_byte,
+    declaration.Index.site )
+
+let key_after (declaration : Index.declaration) =
+  ( Index.normalise declaration.Index.file,
+    declaration.Index.name_span.Jide_lang.Span.start_byte,
+    declaration.Index.site )
+
+let is_target_after world (declaration : Index.declaration) =
+  let file, byte, _site = key_after declaration in
+  let target_file, target_byte, _ = key_before world world.target in
+  String.equal file target_file && byte = target_byte
+
+let same_meaning world (before : Resolve.answer) (after : Resolve.answer) =
+  match (before, after) with
+  | Resolve.Resolved left, Resolve.Resolved right ->
+      key_before world left = key_after right
+  | Resolve.Intrinsic, Resolve.Intrinsic
+  | Resolve.Annotation, Resolve.Annotation
+  | Resolve.Include_path, Resolve.Include_path
+  | Resolve.Unresolved, Resolve.Unresolved ->
+      true
+  | _ -> false
+
+(* The reason a changed meaning is refused with, in the words of the
+   collision: the name the occurrence is written with after the rename, and
+   the declaration it would mean or the one it would stop meaning. *)
+let changed world ~path ~(written : string) (before : Resolve.answer)
+    (after : Resolve.answer) =
+  match (before, after) with
+  | Resolve.Resolved left, Resolve.Resolved right ->
+      if Index.equal_declaration left world.target then
+        collision_reason written right
+      else if is_target_after world right then collision_reason written left
+      else changed_reason written path
+  | Resolve.Unresolved, Resolve.Resolved _ -> unbound_reason written path
+  | _ -> changed_reason written path
+
+let check_file world ~(before : Resolve.t) ~(after : Resolve.t) path =
+  match (Resolve.file before path, Resolve.file after path) with
+  | Some old_index, Some new_index ->
+      let old_occurrences = old_index.Index.occurrences in
+      let new_occurrences = new_index.Index.occurrences in
+      let shifts = shifts_in world path in
       if
-        item.Index.kind = Index.Namespace
-        && item.Index.item_span.Jide_lang.Span.start_byte
-           <= declaration.Index.name_span.Jide_lang.Span.start_byte
-        && declaration.Index.name_span.Jide_lang.Span.end_byte
-           <= item.Index.item_span.Jide_lang.Span.end_byte
-      then Some item.Index.name
-      else None)
-    index.Index.declarations
+        List.length old_occurrences <> List.length new_occurrences
+        || Resolve.sites before path <> Resolve.sites after path
+        || not
+             (List.for_all2
+                (fun (old_one : Index.occurrence) (new_one : Index.occurrence) ->
+                  moved shifts old_one.Index.span.Jide_lang.Span.start_byte
+                  = new_one.Index.span.Jide_lang.Span.start_byte)
+                old_occurrences new_occurrences)
+      then raise (Refused (reparse_reason path));
+      List.iter2
+        (fun (old_one : Index.occurrence) (new_one : Index.occurrence) ->
+          List.iter
+            (fun site ->
+              let was =
+                Resolve.answer_at_site before ~site ~file:path
+                  ~byte:old_one.Index.span.Jide_lang.Span.start_byte
+              in
+              let now =
+                Resolve.answer_at_site after ~site ~file:path
+                  ~byte:new_one.Index.span.Jide_lang.Span.start_byte
+              in
+              if not (same_meaning world was now) then
+                raise
+                  (Refused
+                     (changed world ~path ~written:new_one.Index.name was now)))
+            (Resolve.sites before path))
+        old_occurrences new_occurrences
+  | None, None -> ()
+  | _ -> raise (Refused (reparse_reason path))
 
-(* Whether two declarations land in one frame once the namespaces around them
-   close. A variable is pushed into the frame of the namespace it is written
-   in, and a namespace merges its contents into its parent under its own name,
-   so [A::total] and [total] are two names in one frame. A function or a type
-   alias is looked up by its unqualified name in every enclosing frame, so
-   visibility alone answers for it. A declaration of another file is left to
-   that answer too. *)
-let one_frame (index : Index.t) (target : Index.declaration)
-    (declaration : Index.declaration) =
-  match target.Index.kind with
-  | Index.Function | Index.Type_alias -> true
-  | _ ->
-      if
-        String.equal
-          (Index.normalise target.Index.file)
-          (Index.normalise index.Index.file)
-      then namespace_path index target = namespace_path index declaration
-      else true
+(* The compiler's reports of a name declared twice, as places after the
+   rename, in one order: a rename moves names, so the walk's own order of a
+   namespace's merge, which follows the names, is not kept. *)
+let duplicate_keys keys pairs =
+  List.sort compare
+    (List.map (fun (later, earlier) -> (keys later, keys earlier)) pairs)
 
-(* The other end of the collision rule: a declaration the new name would
-   duplicate, in the file the group is searched in, where the declaration being
-   renamed is in scope at one of the file's sites. *)
-let later_clash (resolution : Resolve.t) ~(path : string) (index : Index.t)
-    (target : Index.declaration) (new_name : string) =
-  (* A rename to the name the declaration already has writes every occurrence
-     as itself: no declaration of the program changes, so nothing can collide. *)
-  if String.equal new_name target.Index.name then None
-  else
-    let sites = Resolve.sites resolution path in
-    List.find_opt
-      (fun (declaration : Index.declaration) ->
-        String.equal declaration.Index.name new_name
-        && same_name_space declaration.Index.kind target.Index.kind
-        && (not (Index.equal_declaration declaration target))
-        && one_frame index target declaration
-        && List.exists
-             (fun site ->
-               in_scope resolution ~file:path ~site
-                 ~byte:declaration.Index.name_span.Jide_lang.Span.start_byte
-                 ~target)
-             sites)
-      index.Index.declarations
+let check_duplicates world ~new_name ~(before : Resolve.t) ~(after : Resolve.t)
+    =
+  let old_pairs = Resolve.duplicates before in
+  let new_pairs = Resolve.duplicates after in
+  let old_keys = duplicate_keys (key_before world) old_pairs in
+  let new_keys = duplicate_keys key_after new_pairs in
+  if old_keys <> new_keys then (
+    (* A pair the rename adds names the renamed declaration and another one:
+       the other one is the collision. *)
+    (match
+       List.find_opt
+         (fun (later, earlier) ->
+           not (List.mem (key_after later, key_after earlier) old_keys))
+         new_pairs
+     with
+    | Some (later, earlier) ->
+        let other = if is_target_after world later then earlier else later in
+        raise (Refused (collision_reason new_name other))
+    | None -> ());
+    match
+      List.find_opt
+        (fun (later, earlier) ->
+          not
+            (List.mem
+               (key_before world later, key_before world earlier)
+               new_keys))
+        old_pairs
+    with
+    | Some (later, earlier) ->
+        let other =
+          if Index.equal_declaration later world.target then earlier else later
+        in
+        raise (Refused (undone_duplicate_reason world.target.Index.name other))
+    | None -> raise (Refused (changed_reason new_name world.target.Index.file)))
+
+let verify ~(resolutions : Resolve.t list) ~(target : Index.declaration)
+    ~(new_name : string) (groups : (searched * edit list) list) =
+  let texts =
+    List.map
+      (fun ((group : searched), edits) ->
+        (group.path, apply_edits group.index.Index.text edits))
+      groups
+  in
+  let world =
+    {
+      shifts =
+        List.map
+          (fun ((group : searched), edits) -> (group.path, shifts_of edits))
+          groups;
+      target;
+    }
+  in
+  let edited path = List.mem_assoc (Index.normalise path) texts in
+  List.iter
+    (fun (before : Resolve.t) ->
+      let files = Resolve.files before in
+      if List.exists (fun (index : Index.t) -> edited index.Index.file) files
+      then (
+        (match Resolve.unparsed before with
+        | path :: _ -> raise (Refused (broken_reason path))
+        | [] -> ());
+        let after = Resolve.replay before ~edited:texts in
+        let paths (resolution : Resolve.t) =
+          List.map
+            (fun (index : Index.t) -> Index.normalise index.Index.file)
+            (Resolve.files resolution)
+        in
+        if paths before <> paths after then
+          raise (Refused (reparse_reason (Resolve.entry before)));
+        List.iter (check_file world ~before ~after) (paths before);
+        check_duplicates world ~new_name ~before ~after))
+    resolutions
 
 (* ------------------------------------------------------------------ *)
 
@@ -515,28 +643,30 @@ let broken_files ~(resolve : Resolve.t) ~(broken : string -> bool) =
     (fun (index : Index.t) ->
       if broken index.Index.file then Some index.Index.file else None)
     (Resolve.files resolve)
+  @ Resolve.unparsed resolve
 
 (* Both entry points refuse a recovered require closure the same way and with
    the same words: a [prepareRename] that offered a name the following [rename]
    would not write shows its input box for a reason the user cannot see yet.
    The position's own refusals come from the same [locate], so they are shared
    too. The sharing refusal is the plan's: it does not depend on the new name. *)
-let subject_or_refusal ~(index : Index.t) ~(resolve : Resolve.t) ~(byte : int)
-    ~(broken : string -> bool) =
+let subject_or_refusal ~(index : Index.t) ~(resolutions : Resolve.t list)
+    ~(resolve : Resolve.t) ~(byte : int) ~(broken : string -> bool) =
   match broken_files ~resolve ~broken with
   | path :: _ -> Error (broken_reason path)
-  | [] -> locate ~index ~resolve ~byte
+  | [] -> locate ~index ~resolutions ~byte
 
 (* The subject, and every group the rename would edit, or the refusal that no
    edit can make without changing another meaning. None of it depends on the
    new name. *)
 let plan ~(index : Index.t) ~(resolve : Resolve.t) ~(files : Resolve.t list)
     ~(byte : int) ~(broken : string -> bool) =
-  match subject_or_refusal ~index ~resolve ~byte ~broken with
+  let resolutions = distinct (resolve :: files) in
+  match subject_or_refusal ~index ~resolutions ~resolve ~byte ~broken with
   | Error reason -> Error reason
   | Ok subject -> (
       try
-        let groups = search ~resolve ~files ~target:subject.declaration in
+        let groups = search ~resolutions ~target:subject.declaration in
         (* A qualified occurrence with no range of its own cannot be written. *)
         List.iter
           (fun (group : searched) ->
@@ -547,20 +677,15 @@ let plan ~(index : Index.t) ~(resolve : Resolve.t) ~(files : Resolve.t list)
                 | Some _ -> ())
               group.occurrences)
           groups;
-        Ok (subject, groups)
+        Ok (subject, resolutions, groups)
       with Refused reason -> Error reason)
 
-let prepare ~(index : Index.t) ~(resolve : Resolve.t) ~(byte : int)
-    ~(broken : string -> bool) =
-  match plan ~index ~resolve ~files:[] ~byte ~broken with
+let prepare ~(files : Resolve.t list) ~(index : Index.t) ~(resolve : Resolve.t)
+    ~(byte : int) ~(broken : string -> bool) =
+  match plan ~index ~resolve ~files ~byte ~broken with
   | Error reason -> Error reason
-  | Ok (subject, _groups) ->
+  | Ok (subject, _resolutions, _groups) ->
       Ok (subject.writable, subject.declaration.Index.kind)
-
-let renamed_written (occurrence : Index.occurrence) (new_name : string) =
-  match String.rindex_opt occurrence.Index.name ':' with
-  | None -> new_name
-  | Some index -> String.sub occurrence.Index.name 0 (index + 1) ^ new_name
 
 let rename ~(files : Resolve.t list) ~(index : Index.t) ~(resolve : Resolve.t)
     ~(byte : int) ~(new_name : string) ~(broken : string -> bool) =
@@ -568,56 +693,32 @@ let rename ~(files : Resolve.t list) ~(index : Index.t) ~(resolve : Resolve.t)
   else
     match plan ~index ~resolve ~files ~byte ~broken with
     | Error reason -> Error reason
-    | Ok (subject, groups) -> (
+    | Ok (subject, resolutions, groups) -> (
         let target = subject.declaration in
-        (* The rule's other end, once per file searched: a declaration the new
-           name already has there, when the declaration being renamed is in
-           scope where that one is written. *)
-        let rec check_declarations = function
-          | [] -> Ok ()
-          | (resolution, path, index) :: rest -> (
-              match later_clash resolution ~path index target new_name with
-              | Some other -> Error (collision_reason new_name other)
-              | None -> check_declarations rest)
-        in
-        (* Every occurrence is checked at every site of its file before the
-           rename is answered, so one refusal refuses the whole rename. *)
-        let check_group (group : searched) =
-          let rec loop acc = function
-            | [] -> Ok (List.rev acc)
-            | (occurrence : Index.occurrence) :: rest -> (
-                match writable_span occurrence with
-                | None -> Error spaced_reason
-                | Some span -> (
-                    let at = occurrence.Index.span.Jide_lang.Span.start_byte in
-                    let key = renamed_written occurrence new_name in
-                    let clash =
-                      List.fold_left
-                        (fun found site ->
-                          match found with
-                          | Taken _ | Unknown -> found
-                          | Free ->
-                              clash_at group.resolution ~file:group.path ~site
-                                ~byte:at ~key ~kind:target.Index.kind ~target)
-                        Free
-                        (Resolve.sites group.resolution group.path)
-                    in
-                    match clash with
-                    | Free -> loop ({ span; new_text = new_name } :: acc) rest
-                    | Unknown ->
-                        Error
-                          "the names in scope at one occurrence are not known"
-                    | Taken other -> Error (collision_reason key other)))
+        if target.Index.kind = Index.Function && reserved_function_name new_name
+        then Error (reserved_reason new_name)
+        else
+          let groups =
+            List.map
+              (fun (group : searched) ->
+                ( group,
+                  List.filter_map
+                    (fun occurrence ->
+                      Option.map
+                        (fun span -> { span; new_text = new_name })
+                        (writable_span occurrence))
+                    group.occurrences ))
+              groups
           in
-          loop [] group.occurrences
-        in
-        let rec check_groups acc = function
-          | [] -> Ok (List.rev acc)
-          | (group : searched) :: rest -> (
-              match check_group group with
-              | Error _ as error -> error
-              | Ok edits -> check_groups ((group.path, edits) :: acc) rest)
-        in
-        match check_declarations (reached ~resolve ~files) with
-        | Error _ as error -> error
-        | Ok () -> check_groups [] groups)
+          (* A rename to the name the declaration already has writes every
+             occurrence as itself, so there is nothing to compare. *)
+          match
+            if String.equal new_name target.Index.name then ()
+            else verify ~resolutions ~target ~new_name groups
+          with
+          | () ->
+              Ok
+                (List.map
+                   (fun ((group : searched), edits) -> (group.path, edits))
+                   groups)
+          | exception Refused reason -> Error reason)
