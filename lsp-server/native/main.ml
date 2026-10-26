@@ -127,10 +127,15 @@ let serve () =
              ~facts:snapshot.facts ~byte ())
     | None -> None
   in
+  let prepare_rename ~uri ~byte =
+    Jide_controller.Rename_features.prepare engine ~uri ~byte
+  in
+  let rename ~uri ~byte ~new_name =
+    Jide_controller.Rename_features.rename engine ~uri ~byte ~new_name
+  in
   let features =
-    Jide_controller.Features.make ~completion ~signature_help
-      ~prepare_rename:(fun ~uri:_ ~byte:_ -> None)
-      ~rename:(fun ~uri:_ ~byte:_ ~new_name:_ -> None)
+    Jide_controller.Features.make ~completion ~signature_help ~prepare_rename
+      ~rename
       ~workspace_symbols:(fun ~query:_ -> None)
       ~highlights:(fun ~uri:_ ~byte:_ -> None)
       ~semantic_tokens:(fun ~uri:_ -> None)
