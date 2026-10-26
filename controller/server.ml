@@ -674,9 +674,10 @@ let answer_prepare_rename t (request : Jsonrpc.Request.t)
   editing_answer_at_position t request ~feature:"prepare rename" ~uri
     ~position:params.position ~empty:(Answer `Null) (fun document byte ->
       match Features.prepare_rename t.features ~uri ~byte with
-      | Some span ->
+      | Some (Ok span) ->
           Answer
             (Json_conv.range_json (Jide_engine.Document.lines document) span)
+      | Some (Error reason) -> Refused reason
       | None -> Answer `Null)
 
 let is_blank = function ' ' | '\t' | '\n' | '\r' -> true | _ -> false

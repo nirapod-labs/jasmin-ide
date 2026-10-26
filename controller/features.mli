@@ -61,7 +61,8 @@ val make :
     (uri:string -> byte:int -> Jide_engine.Types.completion_item list option) ->
   signature_help:
     (uri:string -> byte:int -> Jide_engine.Types.signature_help option) ->
-  prepare_rename:(uri:string -> byte:int -> Jide_lang.Span.t option) ->
+  prepare_rename:
+    (uri:string -> byte:int -> (Jide_lang.Span.t, string) result option) ->
   rename:
     (uri:string ->
     byte:int ->
@@ -89,9 +90,12 @@ val signature_help :
 (** The signatures of the call holding [byte], with the argument the cursor
     is in. *)
 
-val prepare_rename : t -> uri:string -> byte:int -> Jide_lang.Span.t option
-(** The name a rename would rewrite, [None] where a rename is refused: a
-    keyword, an intrinsic, or a position that holds no name. *)
+val prepare_rename :
+  t -> uri:string -> byte:int -> (Jide_lang.Span.t, string) result option
+(** The name a rename would rewrite, or the reason a rename is refused there
+    (a keyword, an intrinsic, a position that holds no name, ...), which the
+    server answers as an error so the client can show it. [None] when there
+    is no answer at all, which the server answers with [null]. *)
 
 val rename :
   t ->

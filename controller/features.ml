@@ -8,7 +8,8 @@ type t = {
     uri:string -> byte:int -> Jide_engine.Types.completion_item list option;
   signature_help :
     uri:string -> byte:int -> Jide_engine.Types.signature_help option;
-  prepare_rename : uri:string -> byte:int -> Jide_lang.Span.t option;
+  prepare_rename :
+    uri:string -> byte:int -> (Jide_lang.Span.t, string) result option;
   rename :
     uri:string ->
     byte:int ->
