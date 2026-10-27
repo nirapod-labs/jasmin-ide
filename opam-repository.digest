@@ -2,8 +2,7 @@
 # https://opam.ocaml.org and keeps it as one tarball, ~/.opam/repo/default.tar.gz;
 # that archive carries a repository format version and no commit, and
 # `opam repository list --all` prints no revision for it. The SHA-256 below
-# identifies the exact archive the lock file was solved against. docs/deps.md
-# says why the file holds a digest and what the digest is good for.
+# identifies the exact archive the lock file was solved against.
 #
 # archive:  the file opam writes when it fetches or updates the repository.
 # url:      the registration the archive comes from.

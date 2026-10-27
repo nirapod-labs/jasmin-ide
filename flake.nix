@@ -13,8 +13,7 @@
   #
   # once on a host with `nix` and commit what it writes. Until then a Nix
   # command reads the branch named here, which is a floating tree, and this
-  # file is the only place that says so. docs/nix.md records what the lock
-  # is for, and what a host with `nix` has to check.
+  # file is the only place that says so.
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
