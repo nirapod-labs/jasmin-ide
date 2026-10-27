@@ -9,7 +9,7 @@
 ; implementation that matches the Jasmin library the tree is built against:
 ; channel_release.ml for the release tarball, which is the default and the
 ; build `make ci` runs, and channel_main.ml for upstream main, which the edge
-; channel vendors (`scripts/edge.sh`) and names with JIDE_JASMIN_CHANNEL=edge.
+; channel vendors and names with JIDE_JASMIN_CHANNEL=edge.
 ;
 ; Both candidate files are kept out of (modules), so only the copy is
 ; compiled: the release build never reads main's API and the edge build never

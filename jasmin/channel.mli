@@ -19,8 +19,8 @@
 
    [channel.ml] is generated at build time from an implementation of this
    interface: `jasmin/channel_release.ml` by default, and
-   `jasmin/channel_main.ml` when JIDE_JASMIN_CHANNEL is `edge`, which
-   `scripts/edge.sh` sets for the edge build. Neither implementation is
+   `jasmin/channel_main.ml` when JIDE_JASMIN_CHANNEL is `edge`, as the edge
+   build sets it (docs/development.md). Neither implementation is
    compiled except as the copy, so the release build never reads main's API
    and the edge build never reads the release's. *)
 

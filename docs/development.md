@@ -47,6 +47,47 @@ their input isn't set: `oracle` without `JASMINC`, `editor-code` without
 `editor-vscode` downloads a VS Code build and never skips, unless
 `JASMIN_ALLOWED_SKIPS=editor-vscode` says so.
 
+## Comparing with the compiler
+
+The compiler is the specification. These targets compare the server with it
+over a corpus that isn't in this repository, usually the `compiler/tests`
+directory of the Jasmin release the server is built against (a release root
+works too). Each target prints a skip when a variable it needs is empty, and
+fails when one is set but wrong.
+
+| Target | Needs | Compares |
+|---|---|---|
+| `parity` | `CORPUS`, `JASMINC` | the verdict and first error of `jasmin-lsp check` with `jasminc -until_cstexp`, for every file on every architecture its path names |
+| `parity-tree` | `CORPUS`, `JASMIN2TEX` | the parse tree of the server's driver with the compiler's, and its printing with the release's `jasmin2tex` |
+| `parity-uses` | `CORPUS` | the declaration every typed variable use resolves to with the one the compiler's typing names |
+| `parity-mutants` | `CORPUS`, `JASMINC` | the first error on one-token mutants of every file; `test/parity/compiler-defects.tsv` lists the mutants on which the compiler itself is wrong |
+| `calls` | `CORPUS` | that every typed call has exactly one reference to its callee |
+| `completion-scope` | `CORPUS`, `JASMINC` | completion with the resolver's scope, and after `#` with `jasminc -help-intrinsics` |
+| `intrinsics` | `JASMINC` | the server's intrinsic table with the compiler's list |
+| `intrinsic-arity` | `CORPUS`, `JASMINC` | signature help for every intrinsic with the compiler's argument counts |
+| `rename` | `CORPUS`, `JASMINC` | rename and rename back, with the compiler's verdict before and after |
+| `mutation` | `CORPUS` | recovery on mutated files: no hang, the outline away from the edit, at most two errors |
+
+For example:
+
+```
+make parity CORPUS=~/src/jasmin/compiler/tests JASMINC=$(command -v jasminc)
+```
+
+`CHECKS` names a list of checks (label, path, architecture, tab separated) to
+use instead of walking the corpus, for `parity`, `parity-tree` and
+`parity-uses`. The programs behind the targets live in `test/parity/`,
+`test/intrinsic/` and `test/mutation/`, and each prints its usage with
+`--help`. Without `--jasminc`, `parity.exe` compares with the release's own
+`negative.expected`, which records whole compilations, so it reports the
+cases a later pass rejects as differences.
+
+Each comparison has a negative control that plants a defect and must fail.
+`make test` runs them all against small corpora the tests write. Some also run
+during the corpus run itself: `parity-uses` and `intrinsic-arity` fail unless
+their planted control is caught, and `rename_trip.exe --plant skip` is the
+rename control.
+
 ## Fuzzing and benchmarks
 
 `make fuzz` runs both fuzzing surfaces for `FUZZ_SECONDS` (120) with
