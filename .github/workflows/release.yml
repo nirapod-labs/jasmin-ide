@@ -1,8 +1,7 @@
 # Build, attest and draft a release from a signed tag.
 #
 # Nothing here has ever run. The project is private and has no remote, so this
-# file is written and checked by inspection only: `docs/edge.md` says what that
-# means, and `scripts/check-workflows.sh` is the check.
+# file is checked by inspection only, with `scripts/check-workflows.sh`.
 #
 # The gate is the `release` environment. It carries a protection rule whose
 # reviewer is the person who decides that a release happens, so no job below
@@ -25,7 +24,7 @@
 # The attestation job is the one place the design's "`id-token: write` only in
 # the publishing jobs" is read wider than its words: an attestation is itself a
 # publication, to the transparency log, so the job takes the same release gate
-# and no other job may hold either scope. `docs/edge.md` records the choice.
+# and no other job may hold either scope.
 
 name: release
 
