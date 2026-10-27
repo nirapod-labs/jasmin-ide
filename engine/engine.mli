@@ -169,6 +169,17 @@ val resolution : t -> uri:string -> Resolve.t option
     names no file, in which case there is nothing to read a [require]
     relative to and the navigation answers about it are the empty answer. *)
 
+val project_resolutions : t -> uri:string -> Resolve.t list
+(** [project_resolutions t ~uri] is the resolution of every entry file of the
+    project the open document [uri] is under, the document itself left out:
+    the entries the context rule uses ({!context_entry} when the client chose
+    one, the project's list otherwise, and every [.jazz] file under the root
+    when the project lists none). Each is read like {!resolution}, from the
+    open buffers first, under the document's include paths, and kept until
+    something it was built from changes. A rename reads them, because a
+    declaration a document holds may be used by any entry that reads it. The
+    empty list when the document is not open. *)
+
 val max_bytes : int
 (** The largest text that is analysed: 8 MiB. A larger one is not parsed and
     gets one diagnostic that says so. *)
