@@ -27,7 +27,17 @@ type answer =
 
 type t
 
+type cache
+(** Parsed files, by path, shared between resolutions: a file whose bytes
+    are the bytes a resolution reads now is not parsed again. An index is an
+    immutable value, so two resolutions that share one cannot disturb each
+    other. *)
+
+val cache : unit -> cache
+(** An empty cache. *)
+
 val of_text :
+  ?cache:cache ->
   idirs:(string * string) list ->
   read:(string -> string option) ->
   file:string ->
@@ -36,10 +46,12 @@ val of_text :
 (** [of_text ~idirs ~read ~file text] resolves [text] as [file] and every
     file it requires, through [read]. [idirs] are the named include paths a
     [from NAME] require uses. Every [byte] below is a byte of the document as
-    the caller holds it, a leading byte-order mark included. Nothing here
-    raises. *)
+    the caller holds it, a leading byte-order mark included. With [cache],
+    a file parsed before from the same bytes is reused, and every file parsed
+    now is added to it. Nothing here raises. *)
 
 val of_file :
+  ?cache:cache ->
   idirs:(string * string) list ->
   read:(string -> string option) ->
   string ->
@@ -48,6 +60,28 @@ val of_file :
     [file], and [None] when it has none. *)
 
 val entry : t -> string
+
+val replay : t -> edited:(string * string) list -> t
+(** [replay t ~edited] is the resolution of the same entry over the same files
+    with the texts [edited] gives in place of theirs, by path. A file not in
+    [edited] is read from the bytes [t] holds, and its index is reused rather
+    than parsed again; a file [t] could not read is not read now. It is how a
+    caller asks what an edit would do to the meaning of every name without
+    touching a file. *)
+
+val duplicates : t -> (Index.declaration * Index.declaration) list
+(** The declarations the compiler reports as declared twice, in walk order,
+    each with the declaration it duplicates: a function or a type alias whose
+    name is already in scope (an error), a variable whose name the frame it is
+    pushed into already holds (the [DuplicateVar] warning, which is on by
+    default), and a name a namespace merges into a parent that already holds
+    it qualified. The walk itself goes on as the library's does: a second
+    function or alias is not pushed, a second variable shadows the first. *)
+
+val unparsed : t -> string list
+(** The files of the resolution whose parse reported an error, in the order
+    they were read. Their index holds what recovery kept, which is not a text
+    to rewrite other files from. *)
 
 val files : t -> Index.t list
 (** Every file the resolution reached, entry first and in the order it was
@@ -113,5 +147,22 @@ val scope_at : t -> file:string -> byte:int -> scope option
     scope is the resolver's own, read from the environment it built as it
     walked: it is not computed again from the declarations. A file read into
     more than one namespace answers from the last visit. *)
+
+val sites : t -> string -> string list
+(** [sites t path] is the require sites [path] was read at, in walk order: one
+    per namespace the resolution read it into. A file required from two
+    namespaces has two, and each names its own instances of the declarations
+    in it. The empty list when the resolution never reached the file. *)
+
+val answer_at_site : t -> site:string -> file:string -> byte:int -> answer
+(** [answer_at_site t ~site ~file ~byte] is what the walk at [site] answers for
+    the occurrence that starts at [byte] of [file]: {!Unresolved} when that walk
+    never met it. [site] is one of {!sites}. A declared name answers with its own
+    instance, whose [site] is that walk's site. *)
+
+val scope_at_site : t -> site:string -> file:string -> byte:int -> scope option
+(** [scope_at_site t ~site ~file ~byte] is {!scope_at} for the walk at [site],
+    so a file read into two namespaces answers each of its sites from its own
+    walk. [None] when that walk never reached [file]. *)
 
 val declaration_of_answer : answer -> Index.declaration option
