@@ -38,6 +38,7 @@ type declaration = {
   name_span : Jide_lang.Span.t;
   item_span : Jide_lang.Span.t;
   detail : string option;
+  site : string;
   annotations : (string * string option) list;
       (* The annotations written on the thing that declares this name, in
          source order and each with the string it carries: a function's,
@@ -198,13 +199,22 @@ let add_declaration state ~(kind : kind) ?detail ?(annotations = [])
   let name_span = span_of_ident ident in
   let name = Location.unloc ident in
   let declaration =
-    { kind; name; file = state.file; name_span; item_span; detail; annotations }
+    {
+      kind;
+      name;
+      file = state.file;
+      name_span;
+      item_span;
+      detail;
+      annotations;
+      site = "";
+    }
   in
   state.declarations := declaration :: !(state.declarations);
   add_occurrence state
     {
       span = name_span;
-      last = name_span;
+      last = last_segment state.text name_span name;
       name;
       role = Declared kind;
       value = None;
@@ -653,6 +663,9 @@ let equal_declaration (left : declaration) (right : declaration) =
   String.equal (normalise left.file) (normalise right.file)
   && left.name_span.Jide_lang.Span.start_byte
      = right.name_span.Jide_lang.Span.start_byte
+
+let same_instance (left : declaration) (right : declaration) =
+  equal_declaration left right && String.equal left.site right.site
 
 let find_occurrence (index : t) ~(byte : int) =
   List.fold_left

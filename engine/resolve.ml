@@ -40,6 +40,9 @@ type env = {
   index : Index.t;
   dir : string;
   chain : string list;
+  site : string; (* the walk: the namespace it was read into, and the file *)
+  in_function : bool;
+      (* inside a function body, whose own frame sits on the namespace frame *)
 }
 
 type t = {
@@ -50,10 +53,17 @@ type t = {
   readings : (string, string list) Hashtbl.t;
       (* The namespaces each file was walked in, in the order the walk met
          them. *)
+  site_answers : (string * string * int, answer) Hashtbl.t;
+      (* (site, file, start byte): what each walk of a file answers *)
   order : Index.t list; (* entry first *)
   loaded : (string * string) list;
   snapshots : (string, (int * frame list) array) Hashtbl.t;
       (* The environment each file's walk met, by byte, in walk order. *)
+  site_snapshots : (string * string, (int * frame list) array) Hashtbl.t;
+  file_sites : (string, string list) Hashtbl.t; (* sites, in walk order *)
+  idirs : (string * string) list;
+  duplicates : (Index.declaration * Index.declaration) list; (* walk order *)
+  unparsed : string list; (* files whose parse reported an error *)
 }
 
 type session = {
@@ -62,10 +72,24 @@ type session = {
   indexes : (string, Index.t) Hashtbl.t;
   answers : (string * int * string, answer) Hashtbl.t;
   readings : (string, string list) Hashtbl.t; (* reversed *)
+  site_answers : (string * string * int, answer) Hashtbl.t;
   snapshots : (string, (int * frame list) list) Hashtbl.t; (* reversed *)
+  site_snapshots : (string * string, (int * frame list) list) Hashtbl.t;
+  file_sites : (string, string list) Hashtbl.t; (* reversed *)
+  prepared : (string, Index.t * bool) Hashtbl.t;
+      (* indexes parsed before, by path, with whether the parse reported an
+         error: one is reused when its bytes are the bytes read now *)
   mutable order_rev : Index.t list;
   mutable loaded : (string * string) list;
+  mutable duplicates_rev : (Index.declaration * Index.declaration) list;
+  mutable unparsed_rev : string list;
 }
+
+(* The site of a walk: the namespace it was read into and the file it reads.
+   A file read into two namespaces has two sites and two instances of every
+   name it declares. *)
+let site_of ~(namespace : string list) (file : string) =
+  String.concat "::" namespace ^ "@" ^ file
 
 let normalise = Index.normalise
 
@@ -115,7 +139,12 @@ let mark session env (byte : int) =
   let previous =
     Option.value ~default:[] (Hashtbl.find_opt session.snapshots env.file)
   in
-  Hashtbl.replace session.snapshots env.file ((byte, env.frames) :: previous)
+  Hashtbl.replace session.snapshots env.file ((byte, env.frames) :: previous);
+  let key = (env.site, env.file) in
+  let previous =
+    Option.value ~default:[] (Hashtbl.find_opt session.site_snapshots key)
+  in
+  Hashtbl.replace session.site_snapshots key ((byte, env.frames) :: previous)
 
 let mark_start session env (span : Jide_lang.Span.t) =
   mark session env span.Jide_lang.Span.start_byte;
@@ -125,7 +154,32 @@ let mark_end session env (span : Jide_lang.Span.t) =
   mark session env span.Jide_lang.Span.end_byte;
   env
 
-let push_var env declaration =
+(* A declaration the compiler reports as declared twice, with the one it
+   finds already there: an error for a function and a type alias, the
+   DuplicateVar warning (on by default) for a variable. The pair is recorded,
+   not acted on: the walk goes on as the library's environment does. *)
+let duplicate session ~(later : Index.declaration)
+    ~(earlier : Index.declaration) =
+  session.duplicates_rev <- (later, earlier) :: session.duplicates_rev
+
+(* The frame the library pushes a variable into is the innermost namespace's
+   (or the bottom one), and a function's parameters and locals go into that
+   same frame: [tt_fundef] starts from the environment around the function.
+   The walk keeps a function's names in a frame of their own on top, so the
+   library's frame is that one and the namespace frame under it together. *)
+let frame_var env name =
+  match env.frames with
+  | local :: outer :: _ when env.in_function -> (
+      match Names.find_opt name local.vars with
+      | Some declaration -> Some declaration
+      | None -> Names.find_opt name outer.vars)
+  | frame :: _ -> Names.find_opt name frame.vars
+  | [] -> None
+
+let push_var session env declaration =
+  (match frame_var env declaration.Index.name with
+  | Some earlier -> duplicate session ~later:declaration ~earlier
+  | None -> ());
   let frame = current env in
   replace_current env
     {
@@ -133,11 +187,13 @@ let push_var env declaration =
       vars = Names.add declaration.Index.name declaration frame.vars;
     }
 
-let push_fun env declaration =
+let push_fun session env declaration =
   (* The library refuses a second function of a name anywhere in scope and
      keeps the first, so a later call still resolves to it. *)
   match find_fun env declaration.Index.name with
-  | Some _ -> env
+  | Some earlier ->
+      duplicate session ~later:declaration ~earlier;
+      env
   | None ->
       let frame = current env in
       replace_current env
@@ -146,9 +202,11 @@ let push_fun env declaration =
           funs = Names.add declaration.Index.name declaration frame.funs;
         }
 
-let push_type env declaration =
+let push_type session env declaration =
   match find_type env declaration.Index.name with
-  | Some _ -> env
+  | Some earlier ->
+      duplicate session ~later:declaration ~earlier;
+      env
   | None ->
       let frame = current env in
       replace_current env
@@ -160,14 +218,21 @@ let push_type env declaration =
 (* A declaration that is in scope from where it is written: the mark is the
    end of the name, and the environment after it is what completion sees. *)
 let push_marked session push env declaration =
-  let env = push env declaration in
+  let env = push session env declaration in
   mark_end session env declaration.Index.name_span
 
-let merge_frame prefix frame parent =
+(* A namespace's names reach its parent qualified with its name, and the
+   library reports a name the parent already holds: [merge_bindings] errs for
+   a function and a type alias and warns for a variable. *)
+let merge_frame session prefix frame parent =
   let merge prefix_map parent_map =
     Names.fold
       (fun key declaration map ->
-        Names.add (prefix ^ "::" ^ key) declaration map)
+        let name = prefix ^ "::" ^ key in
+        (match Names.find_opt name map with
+        | Some earlier -> duplicate session ~later:declaration ~earlier
+        | None -> ());
+        Names.add name declaration map)
       prefix_map parent_map
   in
   {
@@ -183,12 +248,12 @@ let push_namespace env name =
     namespace = env.namespace @ [ name ];
   }
 
-let exit_namespace env =
+let exit_namespace session env =
   match (env.frames, List.rev env.namespace) with
   | frame :: parent :: rest, name :: outer ->
       {
         env with
-        frames = merge_frame name frame parent :: rest;
+        frames = merge_frame session name frame parent :: rest;
         namespace = List.rev outer;
       }
   | _ -> env
@@ -214,13 +279,32 @@ let record session env span answer =
   let key = (env.file, span.Jide_lang.Span.start_byte, reading) in
   if not (Hashtbl.mem session.answers key) then (
     Hashtbl.add session.answers key answer;
-    note_reading session env.file reading)
+    note_reading session env.file reading);
+  let key = (env.site, env.file, span.Jide_lang.Span.start_byte) in
+  if not (Hashtbl.mem session.site_answers key) then
+    Hashtbl.add session.site_answers key answer
+
+let has_error (diagnostics : Jide_lang.Diagnostic.t list) =
+  List.exists
+    (fun (diagnostic : Jide_lang.Diagnostic.t) ->
+      diagnostic.Jide_lang.Diagnostic.severity = Jide_lang.Diagnostic.Error)
+    diagnostics
 
 let index_of session file text =
   match Hashtbl.find_opt session.indexes file with
   | Some index -> index
   | None ->
-      let index, _diagnostics = Index.of_text ~file text in
+      let index, failed =
+        match Hashtbl.find_opt session.prepared file with
+        | Some (index, failed) when String.equal index.Index.text text ->
+            (index, failed)
+        | Some _ | None ->
+            let index, diagnostics = Index.of_text ~file text in
+            let failed = has_error diagnostics in
+            Hashtbl.replace session.prepared file (index, failed);
+            (index, failed)
+      in
+      if failed then session.unparsed_rev <- file :: session.unparsed_rev;
       Hashtbl.add session.indexes file index;
       session.order_rev <- index :: session.order_rev;
       index
@@ -241,6 +325,7 @@ let declaration_at env span =
         item_span = span;
         detail = None;
         annotations = [];
+        site = "";
       }
 
 let declare session env (kind : Index.kind) ident ~item_span =
@@ -251,6 +336,7 @@ let declare session env (kind : Index.kind) ident ~item_span =
       { declaration with Index.kind; name = Location.unloc ident; item_span }
     else declaration
   in
+  let declaration = { declaration with Index.site = env.site } in
   record session env span (Resolved declaration);
   declaration
 
@@ -494,7 +580,7 @@ let rec item session env (located : Syntax.pitem Location.located) : env =
         let declaration =
           declare session env Index.Parameter pp.ppa_name ~item_span
         in
-        push_var env declaration
+        push_var session env declaration
     | PGlobal global ->
         let env = annotations session env global.pgd_annot in
         let env = ptype session env global.pgd_type in
@@ -506,7 +592,7 @@ let rec item session env (located : Syntax.pitem Location.located) : env =
         let declaration =
           declare session env Index.Global global.pgd_name ~item_span
         in
-        push_var env declaration
+        push_var session env declaration
     | Pexec exec ->
         ignore (use session env Use_call exec.pex_name);
         env
@@ -516,7 +602,7 @@ let rec item session env (located : Syntax.pitem Location.located) : env =
         let declaration =
           declare session env Index.Type_alias name ~item_span
         in
-        push_type env declaration
+        push_type session env declaration
     | Prequire (from, files) ->
         let env =
           match from with
@@ -534,10 +620,12 @@ let rec item session env (located : Syntax.pitem Location.located) : env =
         let inner = push_namespace env namespace in
         let inner = mark_end session inner (span_of_ident name) in
         let resolved = List.fold_left (item session) inner items in
-        exit_namespace resolved
+        exit_namespace session resolved
     | PFundef function_ ->
         let env = annotations session env function_.pdf_annot in
-        let local = { env with frames = empty_frame :: env.frames } in
+        let local =
+          { env with frames = empty_frame :: env.frames; in_function = true }
+        in
         let local = mark_end session local (span_of_ident function_.pdf_name) in
         let local =
           List.fold_left
@@ -581,7 +669,7 @@ let rec item session env (located : Syntax.pitem Location.located) : env =
         let declaration =
           declare session env Index.Function function_.pdf_name ~item_span
         in
-        push_fun env declaration
+        push_fun session env declaration
   in
   mark_end session env item_span
 
@@ -596,6 +684,7 @@ and require_file session env ~from written =
     | None -> env
     | Some text ->
         let index = index_of session path text in
+        let site = site_of ~namespace:env.namespace path in
         note_reading session path (reading_of env);
         let inner =
           {
@@ -604,12 +693,19 @@ and require_file session env ~from written =
             index;
             dir = Filename.dirname path;
             chain = path :: env.chain;
+            site;
           }
         in
         (* A file read into a namespace holds that namespace's names: the
-           marks of this reading replace the ones an earlier reading left, so the
-           last reading is the one a scope question answers from. *)
+           marks of this visit replace the ones an earlier visit left, so the
+           last visit is the one a scope question answers from. The site's own
+           marks are new: each site keeps its walk. *)
         Hashtbl.replace session.snapshots path [];
+        Hashtbl.replace session.site_snapshots (site, path) [];
+        let earlier =
+          Option.value ~default:[] (Hashtbl.find_opt session.file_sites path)
+        in
+        Hashtbl.replace session.file_sites path (site :: earlier);
         let resolved = List.fold_left (item session) inner index.Index.items in
         (* The frames the included file built stay; the file it came from is
            back for everything after the require. *)
@@ -619,21 +715,32 @@ and require_file session env ~from written =
           index = env.index;
           dir = env.dir;
           chain = env.chain;
+          site = env.site;
         })
 
 (* ------------------------------------------------------------------ *)
 
-let of_text ~idirs ~read ~file text : t =
+type cache = (string, Index.t * bool) Hashtbl.t
+
+let cache () : cache = Hashtbl.create 64
+
+let run ~idirs ~read ~(prepared : cache) ~file text : t =
   let session =
     {
       idirs;
       read;
       indexes = Hashtbl.create 16;
       answers = Hashtbl.create 256;
+      site_answers = Hashtbl.create 256;
       readings = Hashtbl.create 16;
       snapshots = Hashtbl.create 16;
+      site_snapshots = Hashtbl.create 16;
+      file_sites = Hashtbl.create 16;
+      prepared;
       order_rev = [];
       loaded = [];
+      duplicates_rev = [];
+      unparsed_rev = [];
     }
   in
   let file = normalise file in
@@ -641,6 +748,7 @@ let of_text ~idirs ~read ~file text : t =
   (* The document itself is loaded in its own namespace, as the adapter's
      [enter_file] does before it types the first item. *)
   session.loaded <- [ ("", file) ];
+  let site = site_of ~namespace:[] file in
   note_reading session file "";
   let env =
     {
@@ -650,15 +758,28 @@ let of_text ~idirs ~read ~file text : t =
       index;
       dir = Filename.dirname file;
       chain = [ file ];
+      site;
+      in_function = false;
     }
   in
   Hashtbl.replace session.snapshots file [];
+  Hashtbl.replace session.site_snapshots (site, file) [];
+  Hashtbl.replace session.file_sites file [ site ];
   mark session env 0;
   ignore (List.fold_left (item session) env index.Index.items);
+  let reversed table =
+    Hashtbl.fold
+      (fun key marks acc ->
+        Hashtbl.add acc key (Array.of_list (List.rev marks));
+        acc)
+      table
+      (Hashtbl.create (Hashtbl.length table))
+  in
   {
     entry = file;
     indexes = session.indexes;
     answers = session.answers;
+    site_answers = session.site_answers;
     readings =
       Hashtbl.fold
         (fun file readings all ->
@@ -668,7 +789,9 @@ let of_text ~idirs ~read ~file text : t =
         (Hashtbl.create (Hashtbl.length session.readings));
     order = List.rev session.order_rev;
     loaded = List.rev session.loaded;
-    snapshots =
+    snapshots = reversed session.snapshots;
+    site_snapshots = reversed session.site_snapshots;
+    file_sites =
       Hashtbl.fold
         (fun file marks snapshots ->
           Hashtbl.add snapshots file (Array.of_list (List.rev marks));

@@ -60,6 +60,12 @@ type declaration = {
   detail : string option;
       (** A signature or a type, rendered from the source bytes, for hover.
           It is a substring of the file, never invented text. *)
+  site : string;
+      (** The require site the resolver read the declaration at. A file
+          required from two namespaces is read twice, and each reading
+          declares its own instances of the names in it; the index itself
+          holds the empty string, and {!Resolve} sets the site on every
+          declaration a resolution names. *)
   annotations : (string * string option) list;
       (** The annotations written on the declaration, in source order: the
           label and the string it carries, as {!occurrence.value} gives them.
@@ -116,6 +122,11 @@ val equal_declaration : declaration -> declaration -> bool
 (** [equal_declaration a b] is the identity of design section 9: the same
     absolute file and the same declaration byte offset. A compiler unique id
     is never part of it. *)
+
+val same_instance : declaration -> declaration -> bool
+(** [same_instance a b] is {!equal_declaration} and the same require site: the
+    identity of one instance of a declaration. Two readings of one shared file
+    give the same declaration at two sites, which are two symbols. *)
 
 val find_occurrence : t -> byte:int -> occurrence option
 (** [find_occurrence t ~byte] is the occurrence whose span holds [byte],

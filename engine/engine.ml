@@ -76,6 +76,10 @@ type t = {
          is kept rather than a [Locate.t] because [Locate] reads [Engine] and
          not the other way round; wrapping one costs a table of the typed
          facts, and no parse. *)
+  parsed : Resolve.cache;
+      (* Every file a resolution parsed, by path: a file whose bytes have not
+         changed is not parsed again by the next resolution that reads it,
+         whichever entry it is read from. *)
   mutable root : string option;
   mutable base : settings;
   mutable project : Project.loaded option;
@@ -106,6 +110,7 @@ let create ?(check = adapter_check) ?(context = Context.of_file) () =
     documents = Hashtbl.create 16;
     analyses = Hashtbl.create 16;
     resolutions = Hashtbl.create 16;
+    parsed = Resolve.cache ();
     root = None;
     base = default_settings;
     project = None;
@@ -576,11 +581,41 @@ let resolution t ~uri =
           | Some resolved -> Some resolved
           | None ->
               let resolved =
-                Resolve.of_text ~idirs:(settings_for t document).idirs
-                  ~read:(read_file t) ~file (Document.text document)
+                Resolve.of_text ~cache:t.parsed
+                  ~idirs:(settings_for t document).idirs ~read:(read_file t)
+                  ~file (Document.text document)
               in
               Hashtbl.replace t.resolutions file resolved;
               Some resolved))
+
+(* The resolution of a file read as an entry, from the editor's buffer when it
+   is open and the disk otherwise, kept with the documents' own. *)
+let file_resolution t ~idirs path =
+  let file = Index.normalise path in
+  match Hashtbl.find_opt t.resolutions file with
+  | Some resolved -> Some resolved
+  | None -> (
+      match read_file t file with
+      | None -> None
+      | Some text ->
+          let resolved =
+            Resolve.of_text ~cache:t.parsed ~idirs ~read:(read_file t) ~file
+              text
+          in
+          Hashtbl.replace t.resolutions file resolved;
+          Some resolved)
+
+let project_resolutions t ~uri =
+  match Hashtbl.find_opt t.documents (key_of uri) with
+  | None -> []
+  | Some document ->
+      let idirs = (settings_for t document).idirs in
+      let own = Option.map Index.normalise (Document.path document) in
+      List.filter_map
+        (fun entry ->
+          if Some (Index.normalise entry) = own then None
+          else file_resolution t ~idirs entry)
+        (entries t document)
 
 (* The context a document is checked in, or the file alone when the stage that
    works it out fails: an analysis still has to have one. *)
@@ -644,7 +679,9 @@ let blank_snapshot_for ~(file : string) ~(arch : Jide_jasmin.Adapter.arch) =
 let snapshot_of t ~idirs ~(file : string) ~(text : string)
     ~(facts : Jide_jasmin.Facts.t) ~(arch : Jide_jasmin.Adapter.arch) =
   let build () =
-    let resolve = Resolve.of_text ~idirs ~read:(read_file t) ~file text in
+    let resolve =
+      Resolve.of_text ~cache:t.parsed ~idirs ~read:(read_file t) ~file text
+    in
     let index =
       match Resolve.file resolve file with
       | Some index -> index

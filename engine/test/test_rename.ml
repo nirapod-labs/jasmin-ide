@@ -1759,8 +1759,8 @@ let test_positions_that_hold_no_name_are_refused () =
   let file = "/work/variables.jazz" in
   let at text ~within ~name =
     let resolved = resolve file text in
-    Jide_engine.Rename.prepare ~index:(index_of resolved file) ~resolve:resolved
-      ~byte:(byte text ~within ~name) ~broken:nothing_broken
+    Jide_engine.Rename.prepare ~files:[] ~index:(index_of resolved file)
+      ~resolve:resolved ~byte:(byte text ~within ~name) ~broken:nothing_broken
   in
   check "no name: a byte inside the return keyword is refused, saying why"
     (match at variables ~within:"return count;" ~name:"return" with
@@ -2059,12 +2059,20 @@ let () =
   test_a_name_out_of_scope_is_not_a_collision ();
   test_rename_and_rename_back_restores_the_text ();
   test_two_same_named_declarations_are_not_conflated ();
+  test_ending_a_duplicate_declaration_is_refused ();
   test_a_function_name_is_another_name_space ();
   test_a_broken_file_in_the_require_closure_refuses ();
   test_a_rename_reaches_a_required_file ();
   test_a_rename_reaches_a_project_file ();
   test_positions_that_hold_no_name_are_refused ();
   test_a_rename_to_the_same_name_changes_nothing ();
+  test_a_declaration_in_a_shared_file_is_renamed_for_both_readings ();
+  test_a_use_the_new_name_would_capture_is_refused ();
+  test_a_rename_that_would_declare_an_unbound_name_is_refused ();
+  test_a_reserved_function_name_is_refused ();
+  test_a_syntax_error_in_a_required_file_refuses ();
+  test_a_name_from_the_context_entry_is_renamed_from_the_required_file ();
+  test_a_rename_follows_from_require_and_a_file_required_twice ();
   test_the_renamed_program_keeps_its_verdict ();
   if !failures = 0 then print_endline "all rename tests passed"
   else (
