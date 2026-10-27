@@ -16,13 +16,12 @@
 # broken by upstream must not be able to turn the release channel's build red.
 # It cannot, because a red workflow here is a red workflow here.
 #
-# A failure here does not block a release (docs/edge.md). The run's own history
+# A failure here does not block a release. The run's own history
 # is the record of it: this workflow writes nothing, so it opens no issue and
 # publishes nothing.
 #
 # Nothing here has ever run. The project is private and has no remote, so this
-# file is written and checked by inspection only. `docs/edge.md` says what that
-# means, and `scripts/check-workflows.sh` is the check.
+# file is checked by inspection only, with `scripts/check-workflows.sh`.
 
 name: edge
 
@@ -160,8 +159,9 @@ jobs:
           digest=$(sha256sum "$RUNNER_TEMP/edge/jasmin-compiler.tgz" | cut -d' ' -f1)
           sh vendor/fetch.sh "$RUNNER_TEMP/edge/jasmin-compiler.tgz" "$digest"
 
+      # Not `make build`: its vendor step would put the release tarball back.
       - name: Build
-        run: make build
+        run: JIDE_JASMIN_CHANNEL=edge opam exec -- dune build --root . @install -j 4
 
       # The corpus of that same upstream commit, not of the release: the two
       # Jasmin versions do not share a syntax, so the comparison is only
