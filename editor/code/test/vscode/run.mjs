@@ -97,7 +97,7 @@ await writeFile(
 const entrySource = `require "lib.jinc"
 
 export
-fn load(reg ptr u32[4] source) -> reg u32 {
+fn load(reg u64 source) -> reg u32 {
   reg u32 value;
   value = [#aligned :u32 source + 0];
   value = twice(value);
@@ -106,13 +106,18 @@ fn load(reg ptr u32[4] source) -> reg u32 {
 `;
 
 const librarySource = `fn twice(reg u32 value) -> reg u32 {
-  return value + value;
+  reg u32 result;
+  result = value;
+  result += value;
+  return result;
 }
 `;
 
-const projectSource = `${JSON.stringify({version: 1, arch: "x86-64", entries: ["main.jazz"]}, null, 2)}\n`;
+// Both files type with the compiler (jasminc -until_cstexp exits 0), so a
+// rename refused for an error in them is a failure of the check.
+const projectSource = "[jasmin]\narch = x86-64\nentry = main.jazz\n";
 
-await writeFile(join(workspace, "jasmin-project.json"), projectSource, "utf8");
+await writeFile(join(workspace, "jasmin.project"), projectSource, "utf8");
 await writeFile(join(workspace, "main.jazz"), entrySource, "utf8");
 await writeFile(join(workspace, "lib.jinc"), librarySource, "utf8");
 

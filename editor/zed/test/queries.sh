@@ -15,22 +15,19 @@
 #
 # Zed loads the grammar from the commit `extension.toml` pins, so that commit
 # is the grammar the query files have to compile against, and a checkout at
-# the pin passes. The lab's grammar clone is normally ahead of the pin — the
-# fixes this lab needs land there first — so a work tree at another commit is
-# a warning, not a failure: the run proves the queries against the checkout it
+# the pin passes. A checkout with grammar fixes not yet upstream is ahead of
+# the pin, so a work tree at another commit is a warning, not a failure: the run proves the queries against the checkout it
 # was given, and both revisions are printed so the line cannot be mistaken for
 # a run at the pin. A directory that cannot be asked its revision (an unpacked
 # archive, say) warns as well.
 #
-# Two statements only the lab's grammar has — `#spill(x);`
-# (`intrinsic_instr`) and `assert("message", condition);`
-# (`assert_statement`) — cannot be named in a file Zed reads while the pin is
-# upstream: Zed drops the whole file, and every highlight with it. Their
+# Two statements the pinned grammar lacks, `#spill(x);` (`intrinsic_instr`)
+# and `assert("message", condition);` (`assert_statement`), cannot be named in
+# a file Zed reads: Zed drops the whole file, and every highlight with it. Their
 # patterns are kept in `highlights.local.scm`, which Zed does not read, and
 # this job runs that file against `fixtures/sample-local.jazz` only when the
-# grammar's `src/node-types.json` has both nodes: the clone. Against the pin
-# it says the file is skipped, and the patterns are still exercised against
-# the clone by the run `JASMIN_GRAMMAR_DIR` at the clone makes.
+# grammar's `src/node-types.json` has both nodes. Against the pin it says the
+# file is skipped.
 #
 # For each file the job prints the capture names it produced, and it checks
 # every capture name written in a query against the names Zed gives a style
@@ -50,8 +47,8 @@ query_dir="$extension/languages/jasmin"
 fixture="$here/fixtures/sample.jazz"
 local_fixture="$here/fixtures/sample-local.jazz"
 files=(highlights brackets outline indents textobjects)
-# The patterns for the two nodes only the lab's clone has, in a file Zed does
-# not read, and the nodes it names.
+# The patterns for the two nodes the pin lacks, in a file Zed does not read,
+# and the nodes it names.
 local_file=highlights.local.scm
 local_name=local
 local_nodes="assert_statement intrinsic_instr"
@@ -127,7 +124,7 @@ elif [ "$worktree" = no ]; then
     "$grammar" "$pin" >&2
 fi
 
-# The parser's own list of node types answers whether the two clone-only nodes
+# The parser's own list of node types answers whether the two newer nodes
 # exist here without compiling a query to find out. A grammar without the list
 # is asked nothing, and the local file is skipped as it is against the pin.
 missing=
@@ -213,7 +210,7 @@ check() {
 for name in "${files[@]}"; do
   check "$name" "$query_dir/$name.scm" "$fixture"
 done
-# The patterns the pin cannot take, against the sample only the clone parses.
+# The patterns the pin cannot take, against the sample only a newer grammar parses.
 if [ -z "$missing" ]; then
   check "$local_name" "$query_dir/$local_file" "$local_fixture"
 fi
@@ -222,8 +219,7 @@ fi
 # exercised: a pattern for a node the sample never uses compiles and then
 # matches nothing, so nobody notices it is wrong. Each entry below is
 # `<query file>:<text the sample must capture through it>`, covering the six
-# things the outline lists and the two statements only the clone's grammar
-# has; the second pair has no output file against the pin, and is skipped.
+# things the outline lists and the two statements the pin lacks; the second pair has no output file against the pin, and is skipped.
 required=(
   "outline:lane"
   "outline:CRYPTO"

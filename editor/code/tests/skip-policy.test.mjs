@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import {spawnSync} from "node:child_process";
-import {readFileSync} from "node:fs";
-import {join} from "node:path";
 import {describe, test} from "node:test";
 import {fileURLToPath} from "node:url";
 import {allowedSkips, expectedChecks, judgeEditingHelp} from "../test/vscode/skips.mjs";
@@ -11,8 +9,8 @@ import {allowedSkips, expectedChecks, judgeEditingHelp} from "../test/vscode/ski
 // printed as `skip editor-vscode`. Both have to be allowed by name, or the
 // gate reports green over a measurement nobody made. These cases pin both
 // decisions without starting a window: the check-level allowlist in
-// `test/vscode/skips.mjs`, and the step-level decision in
-// `scripts/skip-allowed.sh` that the Makefile calls.
+// `test/vscode/skips.mjs`, and the step-level decision the Makefile's
+// `editor-vscode` target makes.
 
 /** One recorded check, as `suite.js` writes it. */
 function record(check, status) {
@@ -69,63 +67,34 @@ describe("the editing-help skip allowlist", () => {
 
 describe("the step skip the gate allows", () => {
   const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
-  const script = join(repositoryRoot, "scripts", "skip-allowed.sh");
 
-  /** Runs the decision the way the Makefile does, with only its own variable set. */
-  function decide(environment, step = "editor-vscode") {
-    const result = spawnSync("sh", [script, step, "VS Code cannot be downloaded"], {
+  /** What `make editor-vscode` would run, with only its own variable set. */
+  function decide(allowed) {
+    const variables = allowed === undefined ? [] : [`JASMIN_ALLOWED_SKIPS=${allowed}`];
+    const result = spawnSync("make", ["-s", "-n", "-C", repositoryRoot, "editor-vscode", ...variables], {
       encoding: "utf8",
-      env: {PATH: process.env.PATH, ...environment}
+      env: {PATH: process.env.PATH}
     });
-    return {status: result.status, stdout: result.stdout, stderr: result.stderr};
+    return {status: result.status, stdout: result.stdout};
   }
 
-  test("a step that cannot run fails unless the skip is allowed", () => {
-    const result = decide({});
-    assert.equal(result.status, 1, "a gate line that says skip must not be the default");
-    assert.match(result.stdout, /^fail editor-vscode \(VS Code cannot be downloaded\)/mu);
-    assert.match(result.stdout, /JASMIN_ALLOWED_SKIPS=editor-vscode/u, "the failure says how to allow it");
+  test("the step runs the window unless the skip is allowed", () => {
+    const result = decide();
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /pnpm run test:vscode/u, "a gate line that says skip must not be the default");
+    assert.doesNotMatch(result.stdout, /skip editor-vscode/u);
   });
 
-  test("an allowed skip prints the reason and passes", () => {
-    const result = decide({JASMIN_ALLOWED_SKIPS: "editor-vscode"});
+  test("an allowed skip says so and runs nothing", () => {
+    const result = decide("editor-vscode");
     assert.equal(result.status, 0);
-    assert.match(
-      result.stdout,
-      /^skip editor-vscode \(VS Code cannot be downloaded; allowed by JASMIN_ALLOWED_SKIPS\)$/mu
-    );
+    assert.match(result.stdout, /skip editor-vscode \(allowed by JASMIN_ALLOWED_SKIPS\)/u);
+    assert.doesNotMatch(result.stdout, /test:vscode/u);
   });
 
   test("the list may be comma-separated, and another step's name allows nothing", () => {
-    assert.equal(decide({JASMIN_ALLOWED_SKIPS: "editor-zed,editor-vscode"}).status, 0);
-    assert.equal(decide({JASMIN_ALLOWED_SKIPS: "editor-zed"}).status, 1);
-    assert.equal(
-      decide({JASMIN_ALLOWED_SKIPS: "editor-vscode-legacy"}).status,
-      1,
-      "a name matches whole, not as a prefix"
-    );
-  });
-
-  test("the gate step routes its skip through the decision", () => {
-    const makefile = readFileSync(join(repositoryRoot, "Makefile"), "utf8");
-    const lines = makefile.split("\n");
-    const start = lines.findIndex((line) => line.startsWith("editor-vscode:"));
-    assert.notEqual(start, -1, "the Makefile defines no editor-vscode target");
-
-    const body = [];
-    for (const line of lines.slice(start + 1)) {
-      if (/^[A-Za-z][A-Za-z0-9_.-]*:/u.test(line)) {
-        break;
-      }
-      body.push(line);
-    }
-    const target = body.join("\n");
-
-    assert.match(target, /sh scripts\/skip-allowed\.sh editor-vscode/u, "the step must ask before it skips");
-    assert.doesNotMatch(
-      target,
-      /printf 'skip editor-vscode \(VS Code cannot be downloaded\)/u,
-      "the unconditional skip this fix removes must not come back"
-    );
+    assert.match(decide("editor-zed,editor-vscode").stdout, /skip editor-vscode/u);
+    assert.match(decide("editor-zed").stdout, /test:vscode/u);
+    assert.match(decide("editor-vscode-legacy").stdout, /test:vscode/u, "a name matches whole, not as a prefix");
   });
 });

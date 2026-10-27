@@ -1,7 +1,7 @@
 // Sample input for the query job. MIT, see LICENSE.
-// It has to parse on the pinned upstream grammar as well as on the lab's
-// clone, so it carries no construct only one of them understands; the two
-// clone-only statements live in `sample-local.jazz`.
+// It has to parse on the pinned upstream grammar as well as on a newer one,
+// so it carries no construct only one of them understands; the two newer
+// statements live in `sample-local.jazz`.
 from CRYPTO require "crypto.jinc"
 
 type lane = u32;

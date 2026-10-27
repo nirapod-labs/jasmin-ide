@@ -9,14 +9,11 @@ repository = "https://github.com/jasmin-lang/tree-sitter-jasmin"
 # `commit` is an alias of `rev`; naming the same commit in both keys makes Zed
 # reject this file as a duplicate field, so the commit is written once.
 #
-# The pin is the official upstream `jasmin-lang/tree-sitter-jasmin`, and it
-# stays upstream: a commit that exists only in the lab's grammar clone can
-# never be fetched from this repository, so a released extension would find no
-# grammar at all and break for every user. The fixes in the clone reach users
-# only once the project goes public, which waits on the user. Until then they
-# are checked through `JASMIN_GRAMMAR_DIR`, which names a checkout of the
-# clone to `editor/zed/test/queries.sh` and `make zed-queries`, never by
-# changing this pin.
+# The pin is a commit of the upstream `jasmin-lang/tree-sitter-jasmin`. A
+# commit that exists only in a fork cannot be fetched from this repository, so
+# an extension pinned to one would find no grammar at all. Grammar fixes not
+# yet upstream are checked by pointing `JASMIN_GRAMMAR_DIR` at a checkout that
+# has them (`make zed-queries`), never by changing this pin.
 rev = "4e678d93d80f4e698a540981008bb44c105ffeff"
 
 [language_servers.jasmin-lsp]

@@ -90,19 +90,15 @@ describe("the corpus step", () => {
 describe("the wiring that makes the corpus step a gate", () => {
   const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
 
-  /** One Makefile target's lines: the definition up to the next target. */
-  function makefileTarget(makefile, name) {
-    const lines = makefile.split("\n");
-    const start = lines.findIndex((line) => line.startsWith(`${name}:`));
-    assert.notEqual(start, -1, `the Makefile defines no ${name} target`);
-    const body = [];
-    for (const line of lines.slice(start + 1)) {
-      if (/^[A-Za-z][A-Za-z0-9_.-]*:/u.test(line)) {
-        break;
-      }
-      body.push(line);
-    }
-    return body.join("\n");
+  /** What `make editor-code` would run, with the corpus named or not. */
+  function dryRun(corpus) {
+    const variables = corpus === undefined ? [] : [`JASMIN_TM_CORPUS=${corpus}`];
+    const result = spawnSync("make", ["-s", "-n", "-C", repositoryRoot, "editor-code", ...variables], {
+      encoding: "utf8",
+      env: {PATH: process.env.PATH}
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
   }
 
   test("pnpm run validate runs the corpus step, not the bare tokenizer", () => {
@@ -118,21 +114,12 @@ describe("the wiring that makes the corpus step a gate", () => {
   });
 
   test("make ci's editor-code step requires the corpus", () => {
-    const makefile = readFileSync(join(repositoryRoot, "Makefile"), "utf8");
-    const target = makefileTarget(makefile, "editor-code");
+    const named = dryRun("/corpus/tree");
+    assert.match(named, /JASMIN_TM_CORPUS_REQUIRED=1/u, "a gate run has to make an absent corpus a failure, not a skip");
+    assert.match(named, /JASMIN_TM_CORPUS="\/corpus\/tree"/u, "the gate run has to pass the named tree through, or it tokenizes nothing");
     assert.match(
-      target,
-      /JASMIN_TM_CORPUS_REQUIRED=1/u,
-      "a gate run has to make an absent corpus a failure, not a skip"
-    );
-    assert.match(
-      target,
-      /JASMIN_TM_CORPUS="\$\(TM_CORPUS\)"/u,
-      "the gate run has to pass the named tree through, or it tokenizes nothing"
-    );
-    assert.match(
-      target,
-      /skip editor-code \(/u,
+      dryRun(),
+      /skip editor-code \(needs JASMIN_TM_CORPUS\)/u,
       "a run with no corpus has to print a skip, not run the step and pass"
     );
   });

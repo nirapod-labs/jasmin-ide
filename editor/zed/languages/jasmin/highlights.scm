@@ -59,8 +59,8 @@
   "#" @punctuation.special)
 
 ; An intrinsic instruction such as `#spill(x);` and the compiler's
-; `assert("message", condition);` are nodes only the lab's grammar clone has:
-; the pinned upstream grammar has neither, so a pattern for them here would
+; `assert("message", condition);` are nodes the pinned upstream grammar does
+; not have yet, so a pattern for them here would
 ; stop this whole file compiling and Zed would drop every highlight. They are
 ; kept in `highlights.local.scm` beside this file, which Zed does not read and
 ; `test/queries.sh` checks against the clone.

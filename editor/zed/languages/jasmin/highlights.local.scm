@@ -1,4 +1,4 @@
-; Highlights for the nodes only the lab's grammar clone has. MIT, see LICENSE.
+; Highlights for two nodes the pinned grammar does not have yet. MIT, see LICENSE.
 ;
 ; This file is not one of the five query files Zed reads (`highlights.scm`,
 ; `brackets.scm`, `outline.scm`, `indents.scm`, `textobjects.scm`), and it must
