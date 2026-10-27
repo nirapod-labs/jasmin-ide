@@ -7,8 +7,7 @@
 # and must not run on a push.
 #
 # Nothing here has ever run. The project is private and has no remote, so this
-# file is written and checked by inspection only. `docs/edge.md` says what that
-# means, and `scripts/check-workflows.sh` is the check.
+# file is checked by inspection only, with `scripts/check-workflows.sh`.
 
 name: build
 
