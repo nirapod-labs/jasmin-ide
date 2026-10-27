@@ -365,7 +365,10 @@ async function checkRename(document, positions, capabilities) {
     failCheck(check, `the prepareRename range covers ${JSON.stringify(covered)}, not the declared name "load"`);
   }
 
-  const beforeRename = count(renameRequest);
+  // With prepareProvider the client asks textDocument/prepareRename first, and
+  // a server that refuses there is never sent textDocument/rename; either
+  // request reaching the server and being refused is the refusal.
+  const beforeRename = count(renameRequest) + count(prepareRenameRequest);
   let edit;
   let refusal;
   try {
@@ -373,8 +376,8 @@ async function checkRename(document, positions, capabilities) {
   } catch (error) {
     refusal = messageOf(error);
   }
-  if (count(renameRequest) <= beforeRename) {
-    failCheck(check, "the client sent no textDocument/rename request for the keyword");
+  if (count(renameRequest) + count(prepareRenameRequest) <= beforeRename) {
+    failCheck(check, "the client sent no textDocument/prepareRename or textDocument/rename request for the keyword");
   }
   if (refusal === undefined) {
     failCheck(check, `renaming the keyword "fn" did not refuse: the command returned ${JSON.stringify(edit)}`);
@@ -387,7 +390,7 @@ async function checkRename(document, positions, capabilities) {
     check,
     "PASS",
     `textDocument/prepareRename returned ${range.start.line + 1}:${range.start.character + 1}-${range.end.line + 1}:${range.end.character + 1} for "load"; ` +
-      `textDocument/rename refused the keyword "fn" with ${JSON.stringify(refusal)}`
+      `the rename of the keyword "fn" was refused with ${JSON.stringify(refusal)}`
   );
 }
 
