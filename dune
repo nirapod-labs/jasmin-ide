@@ -1,0 +1,13 @@
+(env
+ (_
+  (flags
+   (:standard -w +a-4-9-27-32-33-35-39-40-41-42-44-45-70))))
+
+; `make test` gives JIDE_TEST_RUN a new value on every run. As a dependency of
+; every cram test it makes each one run again rather than be replayed from
+; _build or the cache.
+
+(cram
+ (applies_to :whole_subtree)
+ (deps
+  (env_var JIDE_TEST_RUN)))
