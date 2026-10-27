@@ -26,3 +26,21 @@ The pieces that matter for a threat model:
 - **It sends no telemetry.** Nothing is reported anywhere, ever. The log goes
   to standard error, which the editor keeps for the user.
 
+## What is in scope
+
+Source files may come from a repository nobody has read. A file that is
+hostile, enormous, deeply nested, full of a million small items or broken in a
+way nobody has thought of should be analysed, reported and survived:
+
+- **Memory safety.** No out-of-bounds read, no use after free, no crash that
+  is not a caught exception.
+- **Bounded work.** A file larger than 8 MiB is refused with one diagnostic and
+  not parsed. A malformed input should not make the server use time or memory
+  out of proportion to its size.
+- **Availability.** A failure inside one analysis is caught, becomes an
+  internal diagnostic or a logged line for that document, and leaves the
+  server serving other documents.
+- **The protocol boundary.** No exception may leave a request handler, and
+  stdout carries protocol frames only. A crafted frame must not desynchronise
+  the stream or reach the editor as corrupt output.
+
