@@ -1,0 +1,5 @@
+; controller/build-route.sh over the three vendor layouts it tells apart. The
+; script is the one input; every layout is made inside the test.
+
+(cram
+ (deps ../../build-route.sh))
