@@ -744,6 +744,34 @@ let answer_of_response (response : Jsonrpc.Response.t) =
       | Jsonrpc.Response.Error.Code.MethodNotFound -> `Unavailable
       | _ -> `Refused error.message)
 
+(* The response to request [id] among the packets a server returned. *)
+let response_to ~id packets =
+  List.find_map
+    (function
+      | Jsonrpc.Packet.Response response
+        when Jsonrpc.Id.equal response.Jsonrpc.Response.id (`Int id) ->
+          Some response
+      | _ -> None)
+    packets
+
+(* The capabilities an initialize response advertises, or [`Null] when the
+   response is missing or an error: a server that answers nothing advertises
+   nothing, so every request is then not measured. *)
+let advertised_capabilities packets =
+  match response_to ~id:1 packets with
+  | Some { Jsonrpc.Response.result = Ok json; _ } -> (
+      match Yojson.Safe.Util.member "capabilities" json with
+      | `Assoc _ as capabilities -> capabilities
+      | _ -> `Null)
+  | Some { Jsonrpc.Response.result = Error _; _ } | None -> `Null
+
+let advertises capabilities feature =
+  match
+    Yojson.Safe.Util.member (capability_of_feature feature) capabilities
+  with
+  | `Null | `Bool false -> false
+  | _ -> true
+
 let measure_requests ~runs unit_ =
   let text = read_file unit_.file in
   let uri = Jide_lang.Uri.to_string (Jide_lang.Uri.of_path unit_.file) in
@@ -752,11 +780,14 @@ let measure_requests ~runs unit_ =
   let server =
     Jide_controller.Server.create
       ~log:(fun _ -> ())
-      ~engine ~analysis:(engine_analysis engine) ()
+      ~engine ~features:(engine_features engine)
+      ~analysis:(engine_analysis engine) ()
   in
-  ignore
-    (Jide_controller.Server.handle_packet server
-       (request 1 "initialize" (initialize_params_at directory)));
+  let initialized =
+    Jide_controller.Server.handle_packet server
+      (request 1 "initialize" (initialize_params_at directory))
+  in
+  let capabilities = advertised_capabilities initialized in
   (match Jide_controller.Server.state server with
   | Jide_controller.Server.Running -> ()
   | _ -> die (unit_.label ^ ": the server did not reach the running state"));
@@ -791,15 +822,7 @@ let measure_requests ~runs unit_ =
            (method_of_feature feature)
            (request_params feature ~uri ~position))
     in
-    match
-      List.find_map
-        (function
-          | Jsonrpc.Packet.Response response
-            when Jsonrpc.Id.equal response.Jsonrpc.Response.id (`Int id) ->
-              Some response
-          | _ -> None)
-        packets
-    with
+    match response_to ~id packets with
     | Some response -> response
     | None ->
         die
@@ -821,28 +844,33 @@ let measure_requests ~runs unit_ =
         sizes
   in
   let measure feature =
-    match request_byte index feature with
-    | None ->
-        (* No declaration and no call: there is no position an editor would
-           ask from, so the row is unavailable rather than a measurement of
-           byte 0, and no request is made. A project row opens nothing either,
-           so [project_files] stays 0: a size printed beside no number would
-           describe a project request that never happened. The tally counts
-           the row with the unanswered rows. *)
-        { feature; status = No_position; samples = [] }
-    | Some byte -> (
-        if over_project feature then ignore (open_the_project ());
-        let position = Jide_engine.Document.position_of_byte document byte in
-        match answer_of_response (ask ~position feature) with
-        | `Unavailable -> { feature; status = Unavailable; samples = [] }
-        | `Refused message ->
-            { feature; status = Refused message; samples = [] }
-        | `Answered ->
-            let samples =
-              List.init runs (fun _ ->
-                  fst (time (fun () -> ignore (ask ~position feature))))
-            in
-            { feature; status = Answered; samples })
+    if not (advertises capabilities feature) then
+      (* Not sent: the server does not advertise the request, so there is
+         nothing to time and no project to open for it. *)
+      { feature; status = Not_advertised; samples = [] }
+    else
+      match request_byte index feature with
+      | None ->
+          (* No declaration and no call: there is no position an editor would
+             ask from, so the row is unavailable rather than a measurement of
+             byte 0, and no request is made. A project row opens nothing either,
+             so [project_files] stays 0: a size printed beside no number would
+             describe a project request that never happened. The tally counts
+             the row with the unanswered rows. *)
+          { feature; status = No_position; samples = [] }
+      | Some byte -> (
+          if over_project feature then ignore (open_the_project ());
+          let position = Jide_engine.Document.position_of_byte document byte in
+          match answer_of_response (ask ~position feature) with
+          | `Unavailable -> { feature; status = Unavailable; samples = [] }
+          | `Refused message ->
+              { feature; status = Refused message; samples = [] }
+          | `Answered ->
+              let samples =
+                List.init runs (fun _ ->
+                    fst (time (fun () -> ignore (ask ~position feature))))
+              in
+              { feature; status = Answered; samples })
   in
   let rows = List.map measure features in
   let project_files, project_bytes =
