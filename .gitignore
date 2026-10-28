@@ -2,8 +2,10 @@ _build/
 *.install
 .merlin
 result
-vendor/jasmin/
+vendor/jasmin
 node_modules/
 pnpm-debug.log
 *.vsix
 .DS_Store
+.artifacts/
+coverage/
