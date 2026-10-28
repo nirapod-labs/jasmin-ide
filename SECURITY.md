@@ -91,3 +91,16 @@ own version in its manifest, so the three numbers can differ until a release
 sets them to the same one. The VS Code extension warns when its number and the
 server's differ.
 
+## Release downloads
+
+A release file is safe only if it is the file the project published. No
+release file exists yet. Two checks apply once one does:
+
+- every release file will carry a SHA-256 file beside it, and a build
+  attestation that verifies against the signed tag;
+- the Zed extension refuses to run a server it downloaded unless the file's
+  SHA-256 equals the digest compiled into the extension. A file that does not
+  match is deleted and the failure is reported, not run.
+
+A server that is on `PATH` or named by a setting is outside both checks, and
+that is the user's own choice.
