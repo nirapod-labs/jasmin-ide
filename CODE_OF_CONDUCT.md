@@ -19,3 +19,15 @@ the other person is trying to help.
 - **Respect the process.** A decision that took a discussion is not reopened
   because one person did not like it.
 
+## What is not acceptable
+
+- Insults, personal attacks, and remarks about someone's ability, appearance,
+  background or identity.
+- Harassment of any kind, in the repository, in reviews or in private messages
+  that come out of work here.
+- Sexual attention or imagery, in any project space.
+- Publishing someone's private information without their clear permission.
+- Deliberately derailing a discussion, or repeating an argument that has been
+  settled.
+- Anything that would make a reasonable person not want to take part.
+
