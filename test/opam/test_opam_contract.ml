@@ -503,8 +503,7 @@ let () =
      `jasmin.jasmin`, the dune files here ask for `jasmin`, and a build with
      the tree removed therefore fails with `Library "jasmin" not found`. The
      tree `vendor/fetch.sh` assembles is what supplies the library to every
-     build this repository runs, and no opam install of this package builds.
-     docs/nix.md records what is measured about that and what is not. *)
+     build this repository runs, and no opam install of this package builds. *)
   case "installs";
   let installed_paths =
     [

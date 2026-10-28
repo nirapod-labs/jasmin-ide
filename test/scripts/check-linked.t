@@ -38,7 +38,7 @@ the passing path as it is on the failing one.
 
   $ printf '\317\372\355\376' > ok
   $ printf '\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1359.0.0)\n' > ok.deps
-  $ bash ../../scripts/check-linked.sh ok macos
+  $ sh ../../scripts/check-linked.sh ok macos
   check-linked.sh: ok
   check-linked.sh: size 4 bytes (0.0 MiB)
   check-linked.sh:   allowed: /usr/lib/libSystem.B.dylib
@@ -49,7 +49,7 @@ says how many of how many, and the status is 1.
 
   $ printf '\317\372\355\376' > extra
   $ printf '\t/usr/lib/libz.1.dylib (compatibility version 1.0.0, current version 1.2.11)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1359.0.0)\n' > extra.deps
-  $ bash ../../scripts/check-linked.sh extra macos
+  $ sh ../../scripts/check-linked.sh extra macos
   check-linked.sh: extra
   check-linked.sh: size 4 bytes (0.0 MiB)
   check-linked.sh:   not allowed: /usr/lib/libz.1.dylib
@@ -63,7 +63,7 @@ answer.
 
   $ printf '\177ELF' > static
   $ printf 'static\n' > static.ldd
-  $ bash ../../scripts/check-linked.sh static linux
+  $ sh ../../scripts/check-linked.sh static linux
   check-linked.sh: static
   check-linked.sh: size 4 bytes (0.0 MiB)
   check-linked.sh: static: the binary names no dynamic dependency
@@ -74,7 +74,7 @@ counted, not deduplicated: the count is of what the tool printed.
 
   $ printf '\177ELF' > musl
   $ printf '\tlibc.musl-x86_64.so.1 => /lib/ld-musl-x86_64.so.1 (0x7f2a)\n\t/lib/ld-musl-x86_64.so.1 (0x7f2a)\n' > musl.deps
-  $ bash ../../scripts/check-linked.sh musl linux
+  $ sh ../../scripts/check-linked.sh musl linux
   check-linked.sh: musl
   check-linked.sh: size 4 bytes (0.0 MiB)
   check-linked.sh:   allowed: ld-musl-x86_64.so.1
@@ -86,7 +86,7 @@ with it.
 
   $ printf '\177ELF' > glibc
   $ printf '\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x7f1b)\n\t/lib64/ld-linux-x86-64.so.2 (0x7f1c)\n' > glibc.deps
-  $ bash ../../scripts/check-linked.sh glibc linux
+  $ sh ../../scripts/check-linked.sh glibc linux
   check-linked.sh: glibc
   check-linked.sh: size 4 bytes (0.0 MiB)
   check-linked.sh:   allowed: libc.so.6
@@ -102,7 +102,7 @@ said "not allowed", which is a finding about a binary that has none.
 
   $ printf '\177ELF' > broken
   $ printf 'broken\n' > broken.ldd
-  $ bash ../../scripts/check-linked.sh broken linux
+  $ sh ../../scripts/check-linked.sh broken linux
   check-linked.sh: broken
   check-linked.sh: size 4 bytes (0.0 MiB)
   ldd: broken: cannot read file data
@@ -114,7 +114,7 @@ than a pass with nothing to check.
 
   $ printf '\317\372\355\376' > empty
   $ : > empty.deps
-  $ bash ../../scripts/check-linked.sh empty macos
+  $ sh ../../scripts/check-linked.sh empty macos
   check-linked.sh: empty
   check-linked.sh: size 4 bytes (0.0 MiB)
   check-linked.sh: the listing is empty, which is not a static binary and not a linked one
@@ -125,7 +125,7 @@ A file of the other platform's kind is refused before any tool is asked, and
 the four bytes it read are printed so the refusal can be checked.
 
   $ printf 'not a program\n' > text
-  $ bash ../../scripts/check-linked.sh text macos
+  $ sh ../../scripts/check-linked.sh text macos
   check-linked.sh: text
   check-linked.sh: size 14 bytes (0.0 MiB)
   check-linked.sh: error: not a macos executable: the first four bytes are 6e6f7420
@@ -134,14 +134,14 @@ the four bytes it read are printed so the refusal can be checked.
 The refusals that are not a measurement are all 2: no such file, an unknown
 platform name, and no argument.
 
-  $ bash ../../scripts/check-linked.sh nope macos
+  $ sh ../../scripts/check-linked.sh nope macos
   check-linked.sh: error: no such file: nope
   [2]
 
-  $ bash ../../scripts/check-linked.sh ok windows
+  $ sh ../../scripts/check-linked.sh ok windows
   check-linked.sh: error: unknown platform: windows (macos or linux)
   [2]
 
-  $ bash ../../scripts/check-linked.sh
+  $ sh ../../scripts/check-linked.sh
   usage: check-linked.sh <binary> [macos|linux]
   [2]
