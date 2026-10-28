@@ -44,3 +44,14 @@ way nobody has thought of should be analysed, reported and survived:
   stdout carries protocol frames only. A crafted frame must not desynchronise
   the stream or reach the editor as corrupt output.
 
+## What is out of scope
+
+- The Jasmin compiler library itself, which the server links. A bug there is a
+  bug in Jasmin; please report it to the Jasmin project. This policy covers
+  what the server does around that library: the recovery driver, the index and
+  resolver, the framing and the state machine.
+- Either editor and its extension host.
+- A binary a user chose to run. Release files are meant to be checked against
+  their digests and attestations, and that is the defence.
+- Anything that needs the user to run an untrusted binary deliberately.
+
