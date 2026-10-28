@@ -653,8 +653,10 @@ let engine_features engine : Jide_controller.Features.t =
     | None -> None
   in
   Jide_controller.Features.make ~completion ~signature_help
-    ~prepare_rename:(fun ~uri:_ ~byte:_ -> None)
-    ~rename:(fun ~uri:_ ~byte:_ ~new_name:_ -> None)
+    ~prepare_rename:(fun ~uri ~byte ->
+      Jide_controller.Rename_features.prepare engine ~uri ~byte)
+    ~rename:(fun ~uri ~byte ~new_name ->
+      Jide_controller.Rename_features.rename engine ~uri ~byte ~new_name)
     ~workspace_symbols:(fun ~query:_ -> None)
     ~highlights:(fun ~uri:_ ~byte:_ -> None)
     ~semantic_tokens:(fun ~uri:_ -> None)

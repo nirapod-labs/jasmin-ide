@@ -64,12 +64,12 @@ window=${JASMIN_BENCH_WINDOW:-}
 #    is a refusal rather than a measurement: a number taken beside a build is
 #    a measurement of the build. JASMIN_BENCH_NO_WINDOW is the one explicit
 #    way past this, and it says on stderr that the numbers are not window
-#    evidence. docs/bench.md has the recipe: open the window, then name it.
+#    evidence. docs/development.md says how to run it.
 if [ -z "$window" ]; then
 	if [ -n "${JASMIN_BENCH_NO_WINDOW:-}" ]; then
 		printf 'bench: measuring outside a timing window (JASMIN_BENCH_NO_WINDOW is set); the numbers are not window evidence\n' >&2
 	else
-		refuse "no timing window: open one and set JASMIN_BENCH_WINDOW to the path it creates, or set JASMIN_BENCH_NO_WINDOW=1 to measure anyway (not window evidence); docs/bench.md"
+		refuse "no timing window: open one and set JASMIN_BENCH_WINDOW to the path it creates, or set JASMIN_BENCH_NO_WINDOW=1 to measure anyway (not window evidence)"
 	fi
 elif [ ! -e "$window" ]; then
 	refuse "no timing window: $window does not exist (open one first, or set JASMIN_BENCH_NO_WINDOW=1)"
