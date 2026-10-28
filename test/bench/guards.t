@@ -9,7 +9,7 @@ happened to export: a corpus, a slots directory or a binary left over in the
 shell would otherwise decide what a case proves.
 
   $ env -i PATH="$PATH" JASMIN_BENCH_WINDOW= JASMIN_BENCH_NO_WINDOW= sh ../../bench/run.sh
-  bench: no timing window: open one and set JASMIN_BENCH_WINDOW to the path it creates, or set JASMIN_BENCH_NO_WINDOW=1 to measure anyway (not window evidence); docs/bench.md
+  bench: no timing window: open one and set JASMIN_BENCH_WINDOW to the path it creates, or set JASMIN_BENCH_NO_WINDOW=1 to measure anyway (not window evidence)
   [2]
 
 A window that was named and is not open is the same refusal.
