@@ -470,6 +470,61 @@ let test_identity_across_files () =
     | Some declaration -> String.equal declaration.file library_file
     | None -> false)
 
+(* A library required from two namespaces is read twice: each reading declares
+   its own instance of [lib], and a qualified call names the instance of the
+   namespace it is written in. *)
+let shared_entry =
+  "namespace Short {\n\
+  \  require \"lib.jinc\"\n\
+   }\n\
+   namespace Long {\n\
+  \  require \"lib.jinc\"\n\
+   }\n\
+   fn use(reg u32 a) -> reg u32 {\n\
+  \  reg u32 x;\n\
+  \  x = Short::lib(a);\n\
+  \  x = Long::lib(a);\n\
+  \  return x;\n\
+   }\n"
+
+let shared_lib = "fn lib(reg u32 a) -> reg u32 { return a; }\n"
+
+let test_a_file_read_into_two_namespaces_has_two_sites () =
+  let file = "/work/shared-entry.jazz" in
+  let lib_path = "/work/lib.jinc" in
+  let resolved =
+    resolve ~files:[ ("lib.jinc", shared_lib) ] file shared_entry
+  in
+  let short = "Short@" ^ lib_path and long = "Long@" ^ lib_path in
+  check "sites: the library is read at its two namespaces, in walk order"
+    (Jide_engine.Resolve.sites resolved lib_path = [ short; long ]);
+  check "sites: the entry is read at its own site only"
+    (Jide_engine.Resolve.sites resolved file = [ "@" ^ file ]);
+  match byte_of_in shared_lib ~within:"fn lib" ~name:"lib" with
+  | None -> check "sites: test bug, lib is not in the library" false
+  | Some byte ->
+      (let at site =
+         Jide_engine.Resolve.answer_at_site resolved ~site ~file:lib_path ~byte
+       in
+       match (at short, at long) with
+       | ( Jide_engine.Resolve.Resolved in_short,
+           Jide_engine.Resolve.Resolved in_long ) ->
+           check "sites: each reading declares its own instance of lib"
+             (Jide_engine.Index.equal_declaration in_short in_long
+             && not (Jide_engine.Index.same_instance in_short in_long));
+           check "sites: an instance names the site that declared it"
+             (String.equal in_short.Jide_engine.Index.site short
+             && String.equal in_long.Jide_engine.Index.site long)
+       | _ -> check "sites: each reading answers the declaration" false);
+      check "sites: the call into a namespace names that namespace's instance"
+        (match
+           answer_of resolved ~file ~text:shared_entry
+             ~within:"x = Short::lib(a);" ~name:"Short::lib"
+         with
+        | Some (Jide_engine.Resolve.Resolved declaration) ->
+            String.equal declaration.Jide_engine.Index.site short
+        | _ -> false)
+
 (* A flag group [?{...}] names a variable: a label with no attribute is the
    variable that receives the flag, and an attribute is the variable of a
    labelled flag. The label of a labelled flag names the flag, not a symbol. *)
@@ -591,6 +646,7 @@ let () =
   test_a_file_read_twice_answers_per_reading ();
   test_the_entry_path_is_normalised ();
   test_identity_across_files ();
+  test_a_file_read_into_two_namespaces_has_two_sites ();
   if !failures = 0 then print_endline "all resolve tests passed"
   else (
     Printf.printf "%d resolve test(s) failed\n" !failures;
