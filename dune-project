@@ -12,6 +12,9 @@
  (depends
   (ocaml (>= 4.14))
   dune
+  (jasmin (>= 2026.09.0))
+  menhirLib
   lsp
   jsonrpc
-  yojson))
+  yojson
+  zarith))
