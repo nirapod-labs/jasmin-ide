@@ -55,3 +55,39 @@ way nobody has thought of should be analysed, reported and survived:
   their digests and attestations, and that is the defence.
 - Anything that needs the user to run an untrusted binary deliberately.
 
+## Reporting
+
+**The repository is private until the first public release, and there is no
+security contact address yet.** A placeholder address is worse than none,
+because mail sent to it would silently go nowhere, so this file names no
+address at all.
+
+The security contact is published with the first public release, in this file.
+Once the repository is public, report a suspected vulnerability privately
+through the repository's own private reporting channel rather than in a public
+issue, and include the version of the server, the Jasmin version it was built
+against, the input that triggers the problem, and what you saw.
+
+Please do not open a public issue for a security problem. Do not send a proof
+of concept to anyone else before there has been a chance to look at it.
+
+## What to expect
+
+The project is small and maintained in spare time. There is no paid support
+and no guaranteed response time, so this file promises no deadline. What it
+does promise:
+
+- a report that arrives through the published channel is read and answered;
+- a fix ships in the next release, and the release notes say what was fixed,
+  in terms that do not make the problem easier to exploit before users have
+  updated;
+- a reporter is credited in the release notes if they want to be.
+
+## Supported versions
+
+Only the latest release is supported, and an older server is not patched. The
+server reports its own version in `serverInfo`, and each extension carries its
+own version in its manifest, so the three numbers can differ until a release
+sets them to the same one. The VS Code extension warns when its number and the
+server's differ.
+

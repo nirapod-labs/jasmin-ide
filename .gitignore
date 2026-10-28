@@ -8,3 +8,4 @@ pnpm-debug.log
 *.vsix
 .DS_Store
 .artifacts/
+coverage/
