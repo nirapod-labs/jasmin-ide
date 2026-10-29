@@ -31,3 +31,19 @@ the other person is trying to help.
   settled.
 - Anything that would make a reasonable person not want to take part.
 
+## Where this applies
+
+Everywhere this project happens: issues, pull requests, reviews, commit
+messages, documentation, and any channel where someone is speaking for the
+project.
+
+## Reporting a problem
+
+The repository is private until the first public release, and there is no
+conduct contact published yet. The contact is published with the first public
+release, in this file. Until then, raise a conduct problem directly with the
+person who maintains the repository.
+
+Report what happened, where, and who was involved. A report is read by the
+maintainer and is not shared more widely than it needs to be.
+
