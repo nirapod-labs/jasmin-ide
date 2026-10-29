@@ -1101,11 +1101,328 @@ let arch_of_name name =
   | None ->
       Error (Printf.sprintf "%S is not an architecture of the adapter" name)
 
+(* ------------------------------------------------------------------ *)
+(* The corpus run *)
+
+module H = Jide_harness.Harness
+
+(* What one check left: its answer, or why it gave none. *)
+type checked = {
+  relative : string;
+  arch_name : string;
+  result : (answer, string) result;
+}
+
+(* The distinct typed uses of the run. A use is keyed by its architecture,
+   file, byte, reading and occurrence, so a library two checks reach is
+   counted once; two checks that judge one use differently are a conflict. *)
+type distinct = {
+  by_class : (string, int) Hashtbl.t;
+  by_group : (string * string, int) Hashtbl.t;
+  typed : int;
+  conflicts : int;
+  required_uses : int;
+  required_files : int;
+  only_files : int;
+  only_uses : int;
+}
+
+let distinct ~root (checks : checked list) =
+  let answers =
+    List.filter_map
+      (fun c -> match c.result with Ok a -> Some (c, a) | Error _ -> None)
+      checks
+  in
+  let documents =
+    List.map
+      (fun (c, _) -> I.normalise (Filename.concat root c.relative))
+      answers
+  in
+  let lines =
+    List.concat_map
+      (fun (c, a) ->
+        List.map
+          (fun line -> (c.arch_name, String.split_on_char '\t' line))
+          a.ledger)
+      answers
+  in
+  let reached = Hashtbl.create 16 in
+  List.iter
+    (function
+      | _, _ :: "required" :: file :: _ -> Hashtbl.replace reached file ()
+      | _ -> ())
+    lines;
+  let seen = Hashtbl.create 4096 in
+  let by_class = Hashtbl.create 8 and by_group = Hashtbl.create 64 in
+  let bump table key =
+    Hashtbl.replace table key
+      (1 + Option.value ~default:0 (Hashtbl.find_opt table key))
+  in
+  let typed = ref 0 and conflicts = ref 0 in
+  let required_uses = ref 0 and only_uses = ref 0 in
+  let only = Hashtbl.create 16 in
+  List.iter
+    (fun (arch, fields) ->
+      match fields with
+      | cls :: _origin :: file :: start :: reading :: index :: _ -> (
+          let key = (arch, file, start, reading, index) in
+          match Hashtbl.find_opt seen key with
+          | Some known -> if known <> cls then incr conflicts
+          | None ->
+              Hashtbl.add seen key cls;
+              incr typed;
+              bump by_class cls;
+              let relative =
+                if String.length file > String.length root then
+                  String.sub file
+                    (String.length root + 1)
+                    (String.length file - String.length root - 1)
+                else file
+              in
+              let group =
+                match String.split_on_char '/' relative with
+                | _ :: second :: _ -> second
+                | _ -> ""
+              in
+              bump by_group (group, "typed");
+              bump by_group (group, cls);
+              if Hashtbl.mem reached file then (
+                incr required_uses;
+                if not (List.mem file documents) then (
+                  incr only_uses;
+                  Hashtbl.replace only file ())))
+      | _ -> ())
+    lines;
+  {
+    by_class;
+    by_group;
+    typed = !typed;
+    conflicts = !conflicts;
+    required_uses = !required_uses;
+    required_files = Hashtbl.length reached;
+    only_files = Hashtbl.length only;
+    only_uses = !only_uses;
+  }
+
+let corpus_usage =
+  "usage: typed_uses --corpus <dir> [--checks <list>] [--jobs N] \
+   [--negative-control]\n\n\
+   Every .jazz under <dir>/success (a release root, its compiler or its tests \
+   directory),\n\
+   once per architecture its path names, or the checks of <list>."
+
+let corpus_run ~negative (args : H.args) =
+  H.name := "uses";
+  let root = H.tests_root (Option.value ~default:"" (args.value "--corpus")) in
+  let checks =
+    match args.value "--checks" with
+    | Some list -> H.read_checks list
+    | None ->
+        List.concat_map
+          (fun relative ->
+            List.map
+              (fun arch -> { H.label = "accept"; path = relative; arch })
+              (H.arches_of relative))
+          (List.map (( ^ ) "success/")
+             (H.files (Filename.concat root "success")))
+  in
+  if checks = [] then
+    H.die "no checks: the corpus holds no .jazz under its success folder";
+  List.iter
+    (fun (c : H.check) ->
+      if not (Sys.file_exists (Filename.concat root c.path)) then
+        H.die "no such file under %s: %s" root c.path)
+    checks;
+  let results =
+    H.parallel ~jobs:(H.jobs args)
+      (fun (c : H.check) ->
+        match arch_of_name c.arch with
+        | Error message -> failwith message
+        | Ok arch -> (
+            let path = Filename.concat root c.path in
+            match read path with
+            | None -> failwith ("cannot read " ^ path)
+            | Some text -> compare_text ~plant:negative ~arch ~file:path text))
+      checks
+  in
+  let checked =
+    List.map2
+      (fun (c : H.check) result ->
+        { relative = c.path; arch_name = c.arch; result })
+      checks results
+  in
+  let d = distinct ~root:(I.normalise root) checked in
+  let class_count cls =
+    Option.value ~default:0 (Hashtbl.find_opt d.by_class cls)
+  in
+  let same = class_count "same" and elsewhere = class_count "elsewhere" in
+  let unresolved = class_count "unresolved"
+  and other = class_count "other-name" in
+  let misplaced = class_count "misplaced"
+  and unchecked = class_count "unchecked" in
+  let flag = class_count "excluded-flag"
+  and temporary = class_count "excluded-temporary" in
+  let measured = same + elsewhere + unresolved + other + misplaced in
+  let excluded = flag + temporary in
+  (* Every check's own verdict, and the lines it adds to the report. *)
+  let accepted = ref 0 and rejected = ref 0 and broken = ref 0 in
+  let measurable = ref 0 and detected = ref 0 in
+  let mismatches = ref [] and excluded_lines = ref [] and undetected = ref [] in
+  let add list line = if not (List.mem line !list) then list := line :: !list in
+  List.iter
+    (fun c ->
+      let where = Printf.sprintf "%s (%s)" c.relative c.arch_name in
+      match c.result with
+      | Error why ->
+          incr broken;
+          add mismatches
+            (Printf.sprintf "%s: the comparison answered nothing (%s)" where why)
+      | Ok a ->
+          let differences =
+            List.length a.elsewhere + List.length a.unresolved
+            + List.length a.other_name + List.length a.misplaced
+          in
+          if a.accepted then (
+            incr accepted;
+            if a.measured > 0 then (
+              incr measurable;
+              if a.planted && differences > 0 then incr detected
+              else
+                add undetected
+                  (Printf.sprintf "%s: planted %s, %d difference(s) reported"
+                     where
+                     (if a.planted then "yes" else "no")
+                     differences)))
+          else (
+            incr rejected;
+            add mismatches
+              (Printf.sprintf "%s: the check does not accept it: %s" where
+                 (Option.value ~default:"no error printed" a.first_diagnostic)));
+          let lines kind list messages =
+            List.iter
+              (fun m -> add list (Printf.sprintf "%s %s %s" where kind m))
+              messages
+          in
+          lines "elsewhere" mismatches a.elsewhere;
+          lines "unresolved" mismatches a.unresolved;
+          lines "other-name" mismatches a.other_name;
+          lines "misplaced" mismatches a.misplaced;
+          lines "excluded-flag" excluded_lines a.excluded_flag;
+          lines "excluded-temporary" excluded_lines a.excluded_temporary)
+    checked;
+  let files =
+    List.length
+      (List.sort_uniq compare (List.map (fun c -> c.relative) checked))
+  in
+  if args.value "--checks" <> None then
+    H.say "the check list names %d checks" (List.length checks);
+  H.say "%d files, %d checks; the check accepts %d, refuses %d" files
+    (List.length checks) !accepted !rejected;
+  H.say
+    "distinct typed variable uses per architecture: %d; measured: %d; the \
+     compiler's declaration in its namespace: %d; elsewhere: %d; unresolved: \
+     %d; other-name: %d; misplaced: %d; excluded: %d (flag %d, temporary %d); \
+     unchecked: %d"
+    d.typed measured same elsewhere unresolved other misplaced excluded flag
+    temporary unchecked;
+  H.say
+    "uses of files a top-level require reaches: %d (in %d distinct files; %d \
+     of them are not checked directly, with %d uses)"
+    d.required_uses d.required_files d.only_files d.only_uses;
+  if measured + excluded + unchecked <> d.typed then
+    H.die
+      "the counts do not add up: %d measured + %d excluded + %d unchecked = \
+       %d, not %d"
+      measured excluded unchecked
+      (measured + excluded + unchecked)
+      d.typed;
+  if d.conflicts > 0 then
+    if negative then
+      H.say
+        "negative control: %d use(s) are judged differently by two checks of \
+         one architecture, since a planted use of a file is reached unplanted \
+         from another check"
+        d.conflicts
+    else
+      H.die
+        "%d use(s) are judged differently by two checks of one architecture: \
+         the comparison is not consistent"
+        d.conflicts;
+  if measured > 0 then
+    H.say
+      "the gate's measure: %d of %d measured uses are the compiler's \
+       declaration in their own namespace (%.4f%%)"
+      same measured
+      (100. *. float same /. float measured);
+  if d.typed > 0 then (
+    H.say
+      "by folder: typed, measured, same, elsewhere, unresolved, other-name, \
+       misplaced, excluded, unchecked";
+    let groups =
+      List.sort_uniq compare
+        (Hashtbl.fold (fun (group, _) _ acc -> group :: acc) d.by_group [])
+    in
+    List.iter
+      (fun group ->
+        let n cls =
+          Option.value ~default:0 (Hashtbl.find_opt d.by_group (group, cls))
+        in
+        let g_measured =
+          n "same" + n "elsewhere" + n "unresolved" + n "other-name"
+          + n "misplaced"
+        in
+        H.say
+          "  %s: %d typed, %d measured, %d same, %d elsewhere, %d unresolved, \
+           %d other-name, %d misplaced, %d excluded, %d unchecked"
+          group (n "typed") g_measured (n "same") (n "elsewhere")
+          (n "unresolved") (n "other-name") (n "misplaced")
+          (n "excluded-flag" + n "excluded-temporary")
+          (n "unchecked"))
+      groups);
+  if !excluded_lines <> [] then (
+    H.say
+      "excluded uses: the name is not an identifier token anywhere in the \
+       file, so the compiler made the use up; they are listed, not measured";
+    List.iter (fun line -> H.say "%s" line) (List.rev !excluded_lines));
+  if not negative then
+    List.iter (fun line -> H.say "different %s" line) (List.rev !mismatches);
+  if !broken > 0 then (
+    H.say "%d check(s) gave no answer: the comparison is not working" !broken;
+    2)
+  else if d.typed = 0 || measured = 0 then (
+    H.say
+      "the corpus holds no measured typed variable use: nothing was measured";
+    2)
+  else if negative then
+    if !measurable > 0 && !undetected = [] then (
+      H.say
+        "negative control: a wrong binding was planted in each of the %d \
+         accepted checks that have a measured use, and the comparison reported \
+         it in %d; the run fails, as it must"
+        !measurable !detected;
+      1)
+    else (
+      List.iter (fun line -> H.say "unreported %s" line) (List.rev !undetected);
+      H.say
+        "negative control broken: the planted wrong binding was reported in %d \
+         of %d accepted checks with a measured use"
+        !detected !measurable;
+      2)
+  else if
+    !rejected = 0 && elsewhere = 0 && unresolved = 0 && other = 0
+    && misplaced = 0 && unchecked = 0
+  then (
+    H.say
+      "every measured typed use of every accepted file is the compiler's \
+       declaration in its own namespace";
+    0)
+  else (
+    H.say "the corpus does not agree";
+    1)
+
 let main () =
   let args = List.tl (Array.to_list Sys.argv) in
-  let negative = List.mem "--negative-control" args in
-  let positional = List.filter (fun a -> a <> "--negative-control") args in
-  match positional with
+  match args with
   | [ "--selftest" ] -> check_selftest ()
   | [ "--help" ] | [ "-help" ] ->
       print_endline usage;
