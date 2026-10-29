@@ -15,14 +15,8 @@
 ; dependency is what makes a rebuilt server or client re-run the cram tests
 ; instead of leaving a recorded pass from the previous binary in place.
 ;
-; `make test` runs these tests on every run: `dune runtest --force` does not
-; re-execute a cram test whose record is current (measured, see docs/ci.md
-; "The test step"), so `scripts/runtest.sh` first takes the records back with
-; `dune clean` and then runs the tests. It fails the step when a `.t` file
-; here has no record after a green run. The stanza must never be given
-; `(files ...)`, `(applies_to ...)` or an `(enabled_if false)`: each of those
-; leaves a `.t` file in the tree with no record, which is exactly what the
-; runner refuses.
+; `make test` removes the recorded results first and runs with the cache off,
+; so every test here runs on every `make test`.
 
 (cram
  (deps

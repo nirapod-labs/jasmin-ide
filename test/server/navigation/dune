@@ -13,10 +13,6 @@
 ; `require` open their document at `fixtures/entry.jazz` and pull this file
 ; in, so the server reads it from disk and the declaration it answers with is
 ; the one in this file.
-;
-; The stanza must never be given `(files ...)`, `(applies_to ...)` or
-; `(enabled_if false)`: each of those leaves a `.t` file in the tree with no
-; record, which `scripts/runtest.sh` refuses.
 
 (cram
  (deps

@@ -18,10 +18,6 @@
 ; re-run these tests instead of leaving a recorded pass from the previous
 ; binary in place. A fixture a test reads that is not listed here would not
 ; invalidate its record, so a fixture added later belongs in this list too.
-;
-; The stanza must never be given `(files ...)`, `(applies_to ...)` or
-; `(enabled_if false)`: each of those leaves a `.t` file in the tree with no
-; record, which `scripts/runtest.sh` refuses.
 
 (cram
  (deps
