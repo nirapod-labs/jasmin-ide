@@ -29,6 +29,21 @@
  (libraries jide_engine jide_jasmin jide_lang))
 
 (test
+ (name test_rename)
+ (modules test_rename)
+ (libraries jide_engine jide_jasmin jide_lang))
+
+(test
+ (name test_highlight)
+ (modules test_highlight)
+ (libraries jide_engine jide_jasmin jide_lang))
+
+(test
+ (name test_symbols)
+ (modules test_symbols)
+ (libraries jide_engine jide_jasmin jide_lang))
+
+(test
  (name test_locate)
  (modules test_locate)
  (libraries jide_engine jide_jasmin jide_lang))

@@ -793,19 +793,52 @@ let run ~idirs ~read ~(prepared : cache) ~file text : t =
     site_snapshots = reversed session.site_snapshots;
     file_sites =
       Hashtbl.fold
-        (fun file marks snapshots ->
-          Hashtbl.add snapshots file (Array.of_list (List.rev marks));
-          snapshots)
-        session.snapshots
-        (Hashtbl.create (Hashtbl.length session.snapshots));
+        (fun path sites acc ->
+          Hashtbl.add acc path (List.rev sites);
+          acc)
+        session.file_sites
+        (Hashtbl.create (Hashtbl.length session.file_sites));
+    idirs;
+    duplicates = List.rev session.duplicates_rev;
+    unparsed = List.rev session.unparsed_rev;
   }
 
-let of_file ~idirs ~read file =
+let of_text ?cache:(prepared = cache ()) ~idirs ~read ~file text : t =
+  run ~idirs ~read ~prepared ~file text
+
+(* The same walk over the same files, with some of their texts replaced. A
+   file the edit leaves alone is read from the bytes this resolution holds
+   and its index is reused, so only the edited files are parsed again; a file
+   this resolution could not read stays unread. *)
+let replay (t : t) ~(edited : (string * string) list) : t =
+  let edited = List.map (fun (path, text) -> (normalise path, text)) edited in
+  let read path =
+    let path = normalise path in
+    match List.assoc_opt path edited with
+    | Some text -> Some text
+    | None ->
+        Option.map
+          (fun (index : Index.t) -> index.Index.text)
+          (Hashtbl.find_opt t.indexes path)
+  in
+  let prepared = Hashtbl.create (Hashtbl.length t.indexes) in
+  Hashtbl.iter
+    (fun path index ->
+      if not (List.mem_assoc path edited) then
+        Hashtbl.add prepared path (index, List.mem path t.unparsed))
+    t.indexes;
+  match read t.entry with
+  | None -> t
+  | Some text -> run ~idirs:t.idirs ~read ~prepared ~file:t.entry text
+
+let of_file ?cache ~idirs ~read file =
   match read (normalise file) with
   | None -> None
-  | Some text -> Some (of_text ~idirs ~read ~file:(normalise file) text)
+  | Some text -> Some (of_text ?cache ~idirs ~read ~file:(normalise file) text)
 
 let entry (t : t) = t.entry
+let duplicates (t : t) = t.duplicates
+let unparsed (t : t) = t.unparsed
 let files (t : t) = t.order
 let file (t : t) path = Hashtbl.find_opt t.indexes (normalise path)
 
@@ -899,18 +932,30 @@ let visible (project : frame -> Index.declaration Names.t) frames =
   in
   loop [] frames
 
+let scope_of_marks marks ~byte =
+  let frames = ref [] in
+  Array.iter (fun (at, snapshot) -> if at <= byte then frames := snapshot) marks;
+  let frames = !frames in
+  {
+    types = visible (fun frame -> frame.types) frames;
+    funs = visible (fun frame -> frame.funs) frames;
+    vars = visible (fun frame -> frame.vars) frames;
+  }
+
 let scope_at (t : t) ~file ~byte =
   match Hashtbl.find_opt t.snapshots (normalise file) with
   | None -> None
-  | Some marks ->
-      let frames = ref [] in
-      Array.iter
-        (fun (at, snapshot) -> if at <= byte then frames := snapshot)
-        marks;
-      let frames = !frames in
-      Some
-        {
-          types = visible (fun frame -> frame.types) frames;
-          funs = visible (fun frame -> frame.funs) frames;
-          vars = visible (fun frame -> frame.vars) frames;
-        }
+  | Some marks -> Some (scope_of_marks marks ~byte)
+
+let sites (t : t) path =
+  Option.value ~default:[] (Hashtbl.find_opt t.file_sites (normalise path))
+
+let answer_at_site (t : t) ~site ~file ~byte =
+  match Hashtbl.find_opt t.site_answers (site, normalise file, byte) with
+  | Some answer -> answer
+  | None -> Unresolved
+
+let scope_at_site (t : t) ~site ~file ~byte =
+  match Hashtbl.find_opt t.site_snapshots (site, normalise file) with
+  | None -> None
+  | Some marks -> Some (scope_of_marks marks ~byte)

@@ -669,55 +669,87 @@ let run ~root ~control ~corpus ~jasminc =
     (fun (oracle : Oracle.t) ->
       Printf.printf "compiler probes: %d\n" oracle.Oracle.runs)
     oracle;
-  table_differences + corpus_differences
+  (table_differences, corpus_differences)
 
-(* The command line, then the run. A failure raised anywhere is printed by
-   [main]'s caller, and the exit status follows it. *)
-let main () =
-  let control = ref No_control and corpus = ref None and jasminc = ref None in
-  let rec parse = function
-    | [] -> `Run
-    | ("-h" | "--help") :: _ -> `Help
-    | [ "--control" ] | [ "--jasminc" ] ->
-        die "an option needs a value\n%s" usage
-    | "--control" :: name :: rest ->
-        control := control_of_string name;
-        parse rest
-    | "--jasminc" :: path :: rest ->
-        jasminc := Some path;
-        parse rest
-    | argument :: rest
-      when String.length argument > 0
-           && argument.[0] <> '-'
-           && Option.is_none !corpus ->
-        corpus := Some argument;
-        parse rest
-    | argument :: _ -> die "unexpected argument %s\n%s" argument usage
-  in
-  match parse (List.tl (Array.to_list Sys.argv)) with
-  | `Help ->
-      print_endline usage;
-      0
-  | `Run ->
-      (match !corpus with
-      | Some dir when not (Sys.file_exists dir && Sys.is_directory dir) ->
-          die "%s is not a directory" dir
-      | _ -> ());
-      if Option.is_some !corpus && Option.is_none !jasminc then
-        die "a corpus is compared with the compiler, so --jasminc is needed";
-      let root = make_root () in
-      let total =
+(* One run in a process of its own, with its own document tree, so a control
+   cannot leave anything behind for the next. [quiet] sends its report to
+   /dev/null: a control's verdict is its counts, not its text. *)
+let measure ~quiet ~control ~corpus ~jasminc =
+  match
+    Jide_harness.Harness.parallel ~jobs:1
+      (fun () ->
+        if quiet then
+          Unix.dup2 (Unix.openfile "/dev/null" [ Unix.O_WRONLY ] 0) Unix.stdout;
+        let root = make_root () in
         Fun.protect
           ~finally:(fun () -> remove_tree root)
-          (fun () ->
-            run ~root ~control:!control ~corpus:!corpus ~jasminc:!jasminc)
+          (fun () -> run ~root ~control ~corpus ~jasminc))
+      [ () ]
+  with
+  | [ Ok counts ] -> counts
+  | [ Error why ] -> raise (Run_failed why)
+  | _ -> raise (Run_failed "no result")
+
+(* The command line, then the run, then the two controls. Each control
+   answers wrongly on purpose and must make both parts differ, or the
+   comparison cannot be trusted and the run fails. [--control] runs one
+   control on its own, for a reader who wants its report. *)
+let main () =
+  let module H = Jide_harness.Harness in
+  H.name := "arity";
+  let args =
+    H.parse_args ~usage ~flags:[]
+      ~options:[ "--control"; "--jasminc" ]
+      (List.tl (Array.to_list Sys.argv))
+  in
+  let corpus =
+    match args.positional with
+    | [] -> None
+    | [ dir ] -> Some (H.directory dir)
+    | _ -> die "one corpus directory at most\n%s" usage
+  in
+  let jasminc = args.value "--jasminc" in
+  if Option.is_some corpus && Option.is_none jasminc then
+    die "a corpus is compared with the compiler, so --jasminc is needed";
+  match args.value "--control" with
+  | Some name ->
+      let tables, corpora =
+        measure ~quiet:false ~control:(control_of_string name) ~corpus ~jasminc
       in
-      if total = 0 then (
-        print_endline "result: every comparison agrees";
-        0)
-      else (
-        Printf.printf "result: %d comparisons differ\n" total;
+      if tables + corpora = 0 then 0 else 1
+  | None ->
+      let tables, corpora =
+        measure ~quiet:false ~control:No_control ~corpus ~jasminc
+      in
+      if tables + corpora <> 0 then (
+        Printf.printf "result: %d comparisons differ\n" (tables + corpora);
         1)
+      else (
+        print_endline "result: every comparison agrees";
+        let broken =
+          List.filter_map
+            (fun control ->
+              let name = control_name control in
+              let tables, corpora =
+                measure ~quiet:true ~control ~corpus ~jasminc
+              in
+              if tables + corpora = 0 then (
+                Printf.printf
+                  "control %s: no difference: the comparison cannot be trusted\n"
+                  name;
+                Some name)
+              else if Option.is_some corpus && corpora = 0 then (
+                Printf.printf
+                  "control %s: differs in the table but not in the corpus: the \
+                   corpus comparison cannot be trusted\n"
+                  name;
+                Some name)
+              else (
+                Printf.printf "control %s: differs, as it must (exit 1)\n" name;
+                None))
+            [ Ignore_arch; Drop_parameter ]
+        in
+        if broken = [] then 0 else 1)
 
 let () =
   let code =
