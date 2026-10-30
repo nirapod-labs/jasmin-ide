@@ -47,3 +47,13 @@ person who maintains the repository.
 Report what happened, where, and who was involved. A report is read by the
 maintainer and is not shared more widely than it needs to be.
 
+## What happens next
+
+The maintainer decides what response fits. Depending on what happened, that
+may be a private word, a public correction, a request to step back from a
+thread, or a ban from the project spaces. The person who reported it is told
+what was decided. A reporter is not expected to keep working alongside the
+person they reported while a decision is open.
+
+A maintainer who is the subject of a report does not decide it.
+
