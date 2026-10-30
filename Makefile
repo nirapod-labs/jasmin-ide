@@ -1,10 +1,10 @@
 OPAMJOBS ?= 4
+OPAM ?= opam
+OPAM_SWITCH ?= jasmin-ide
 
 DUNE ?= $(shell if command -v dune >/dev/null 2>&1; then echo dune; \
 	elif command -v opam >/dev/null 2>&1; then \
-		if opam switch list --short 2>/dev/null | grep -qx jasmin-ide; then \
-			echo 'opam exec --switch jasmin-ide -- dune'; \
-		else echo dune; fi; \
+		echo 'opam exec --switch $(OPAM_SWITCH) -- dune'; \
 	else echo dune; fi)
 
 PNPM ?= pnpm
@@ -22,15 +22,20 @@ endif
 
 RUN_DUNE := $(if $(strip $(HEAVY)),$(strip $(HEAVY)) ,)$(DUNE)
 
+RUN_OPAM := $(if $(strip $(HEAVY)),$(strip $(HEAVY)) ,)$(OPAM)
+
 export OPAMJOBS HEAVY
 
 CI := sh scripts/ci.sh
 
-.PHONY: all vendor build fmt test check editor-code editor-zed ci ci-fast
+.PHONY: all deps vendor build fmt test check editor-code editor-zed ci ci-fast
 
 .NOTPARALLEL:
 
 all: build
+
+deps:
+	@$(CI) deps jasmin-lsp.opam.locked '$(RUN_OPAM) install --switch $(OPAM_SWITCH) --locked --deps-only -y ./jasmin-lsp.opam.locked && $(RUN_OPAM) install --switch $(OPAM_SWITCH) --deps-only -y ./vendor/requirements.opam'
 
 vendor:
 	@$(CI) vendor vendor/jasmin.lock 'sh vendor/fetch.sh'
