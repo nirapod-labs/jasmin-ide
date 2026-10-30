@@ -1424,30 +1424,58 @@ let main () =
   let args = List.tl (Array.to_list Sys.argv) in
   match args with
   | [ "--selftest" ] -> check_selftest ()
-  | [ "--help" ] | [ "-help" ] ->
-      print_endline usage;
-      exit 0
-  | path :: rest -> (
-      let name =
-        match rest with [] -> "x86-64" | [ name ] -> name | _ -> ""
+  | _ when List.mem "--corpus" args ->
+      (* The measurement, then the negative control over the same checks,
+         which must fail the way a wrong binding fails; [--negative-control]
+         runs the control alone. *)
+      let args =
+        H.parse_args ~usage:corpus_usage ~flags:[ "--negative-control" ]
+          ~options:[ "--corpus"; "--checks"; "--jobs" ]
+          args
       in
-      match arch_of_name name with
-      | Error message ->
-          Printf.eprintf "typed_uses: %s\n%s\n" message usage;
-          exit 2
-      | Ok arch -> (
-          match read path with
-          | None ->
-              Printf.eprintf "typed_uses: cannot read %s\n" path;
+      if args.flag "--negative-control" then
+        exit (corpus_run ~negative:true args);
+      let measured = corpus_run ~negative:false args in
+      if measured <> 0 then exit measured;
+      let control = corpus_run ~negative:true args in
+      if control <> 1 then (
+        H.say
+          "the negative control exited %d, not 1: the comparison cannot be \
+           trusted"
+          control;
+        exit 1);
+      exit 0
+  | _ -> (
+      let negative = List.mem "--negative-control" args in
+      let positional = List.filter (fun a -> a <> "--negative-control") args in
+      match positional with
+      | [ "--help" ] | [ "-help" ] ->
+          print_endline usage;
+          print_endline corpus_usage;
+          exit 0
+      | path :: rest -> (
+          let name =
+            match rest with [] -> "x86-64" | [ name ] -> name | _ -> ""
+          in
+          match arch_of_name name with
+          | Error message ->
+              Printf.eprintf "typed_uses: %s\n%s\n" message usage;
               exit 2
-          | Some text ->
-              let answer = compare_text ~plant:negative ~arch ~file:path text in
-              List.iter print_endline answer.ledger;
-              say_answer answer;
-              say_differences answer;
-              exit (status answer)))
-  | [] ->
-      prerr_endline usage;
-      exit 2
+          | Ok arch -> (
+              match read path with
+              | None ->
+                  Printf.eprintf "typed_uses: cannot read %s\n" path;
+                  exit 2
+              | Some text ->
+                  let answer =
+                    compare_text ~plant:negative ~arch ~file:path text
+                  in
+                  List.iter print_endline answer.ledger;
+                  say_answer answer;
+                  say_differences answer;
+                  exit (status answer)))
+      | [] ->
+          prerr_endline usage;
+          exit 2)
 
 let () = main ()
