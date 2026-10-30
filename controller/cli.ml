@@ -53,13 +53,16 @@ let server = Version.server_name
 let server_version = Version.version
 let jasmin_version = Jide_jasmin.Adapter.jasmin_version
 
-(** The route phrase, from what the build recorded. Two fixed phrases: a
+(** The route phrase, from what the build recorded. Three fixed phrases: a
     route that cannot be told apart at run time is recorded at build time
-    ({!Build_route.vendored_release}), not guessed here. *)
+    ({!Build_route.vendored_release}, {!Build_route.vendored_tarball}), not
+    guessed here. A vendored tree that is not the pinned release, such as an
+    edge build of upstream's main branch, is named by its tarball's digest. *)
 let route () =
-  match Build_route.vendored_release with
-  | Some release -> "built from vendored release " ^ release
-  | None -> "built from installed library"
+  match (Build_route.vendored_release, Build_route.vendored_tarball) with
+  | Some release, _ -> "built from vendored release " ^ release
+  | None, Some digest -> "built from vendored tarball sha256:" ^ digest
+  | None, None -> "built from installed library"
 
 (** One line, always the same three parts in the same order. The Jasmin
     version is printed as the library reports it — `Jasmin Compiler

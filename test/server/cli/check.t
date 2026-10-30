@@ -15,8 +15,8 @@ adds must not change that.
 
 A file with an error is still the checker's verdict and the checker's exit
 status. The line and column are the compiler's own, which is why this test
-does not restate them: the numbers are the compiler's oracle, and
-`compiler/test/compare.sh` compares them against it over a corpus.
+does not restate them: the numbers are the compiler's, and `make parity`
+compares them with the compiler over a corpus.
 
   $ printf 'fn broken( -> {\n' > bad.jazz
   $ ../../../lsp-server/native/main.exe check bad.jazz > out.txt 2> err.txt; echo "status $?"
