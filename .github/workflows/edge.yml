@@ -176,7 +176,7 @@ jobs:
             git -C "$RUNNER_TEMP/jasmin" sparse-checkout set compiler/tests
             git -C "$RUNNER_TEMP/jasmin" checkout --quiet
           fi
-          sh scripts/corpus-smoke.sh _build/default/lsp-server/native/main.exe "$RUNNER_TEMP/jasmin" | tail -30
+          bash scripts/corpus-smoke.sh _build/default/lsp-server/native/main.exe "$RUNNER_TEMP/jasmin" | tail -30
 
       # The step records what the run built, and fails when the binary the
       # build was for is not there: a step that prints an empty field and exits

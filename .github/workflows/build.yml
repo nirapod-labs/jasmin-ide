@@ -125,7 +125,7 @@ jobs:
           # No compiler is installed here, so this is the smoke test: every
           # file gets a verdict and nothing is internal. Parity against the
           # compiler is `make parity` with JASMINC.
-          sh scripts/corpus-smoke.sh _build/default/lsp-server/native/main.exe "$RUNNER_TEMP/jasmin"
+          bash scripts/corpus-smoke.sh _build/default/lsp-server/native/main.exe "$RUNNER_TEMP/jasmin"
 
   editor-code:
     name: VS Code extension
