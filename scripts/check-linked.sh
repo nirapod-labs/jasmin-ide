@@ -1,58 +1,55 @@
-#!/bin/bash
+#!/bin/sh
 # Check that a release binary links nothing outside its platform's system
 # libraries, and print its size.
 #
 #   scripts/check-linked.sh <binary> [macos|linux]
 #
-#
-#
-#
+# The dependencies come from the platform's own tool, `otool -L` or `ldd`.
+# macOS allows /usr/lib/libSystem.B.dylib alone; Linux allows a static binary
+# or musl's loader and libc. Exit status: 0 allowed, 1 not allowed or nothing
+# listed, 2 the check could not be made.
 
-set -eu -o pipefail
+set -eu
+name=check-linked.sh
+say() { echo "$name: $*"; }
+die() { echo "$name: error: $*" >&2; exit 2; }
 
-usage() {
-	printf 'usage: %s <binary> [macos|linux]\n' "${0##*/}" >&2
-	exit 2
-}
+[ $# -ge 1 ] && [ $# -le 2 ] || { echo "usage: $name <binary> [macos|linux]" >&2; exit 2; }
+binary=$1
+case ${2:-$(uname -s)} in
+macos | Darwin) platform=macos tool=otool ;;
+linux | Linux) platform=linux tool=ldd ;;
+*) die "unknown platform: ${2:-$(uname -s)} (macos or linux)" ;;
+esac
+case $binary in -*) die "a path that starts with a dash is refused: $binary" ;; esac
+[ -f "$binary" ] || die "no such file: $binary"
 
-say() { printf '%s: %s\n' "${0##*/}" "$*"; }
-die() {
-	printf '%s: error: %s\n' "${0##*/}" "$*" >&2
-	exit 2
-}
+say "$binary"
+bytes=$(wc -c <"$binary" | tr -d ' ')
+say "size $bytes bytes ($(awk -v b="$bytes" 'BEGIN { printf "%.1f", b / 1048576 }') MiB)"
 
-magic_of() {
-	od -An -tx1 -N4 "$1" | tr -d ' \n'
-}
+# The first four bytes, so a file that is not this platform's kind of program
+# is refused before its listing is read.
+magic=$(od -An -tx1 -N4 "$binary" | tr -d ' \n')
+case $platform:$magic in
+macos:feedface | macos:cefaedfe | macos:feedfacf | macos:cffaedfe | macos:cafebabe | macos:bebafeca | \
+	macos:cafebabf | macos:bfbafeca | linux:7f454c46) ;;
+*) die "not a $platform executable: the first four bytes are $magic" ;;
+esac
+command -v $tool >/dev/null 2>&1 || die "no $tool on PATH, so the dependencies of $binary cannot be read"
 
-platform_of_host() {
-	case $(uname -s) in
-	Darwin) printf 'macos\n' ;;
-	Linux) printf 'linux\n' ;;
-	*) die "this host is $(uname -s), which has neither otool nor ldd" ;;
-	esac
-}
-
-deps_of_macos() {
-	listing=$("$1" -L "$2") || return 1
-	printf '%s\n' "$listing" | tail -n +2 |
-		awk '{
-			if (substr($0, length($0), 1) == ":") next
-			print $1
-		}'
-}
-
-#
-deps_of_linux() {
-	if listing=$("$1" "$2" 2>&1); then
-		status=0
-	else
-		status=$?
-	fi
+if [ $platform = macos ]; then
+	listing=$(otool -L "$binary") || die "otool -L failed on $binary"
+	# The first line names the file; a line ending in `:` names an architecture.
+	deps=$(echo "$listing" | tail -n +2 | awk 'substr($0, length($0)) != ":" { print $1 }')
+else
+	status=0
+	listing=$(ldd "$binary" 2>&1) || status=$?
 	case $listing in
 	*"not a dynamic executable"* | *"statically linked"*)
-		printf 'static\n'
-		return 0
+		say "static: the binary names no dynamic dependency"
+		say "ok"
+		exit 0
 		;;
 	esac
 	if [ "$status" -ne 0 ]; then
