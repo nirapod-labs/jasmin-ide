@@ -16,3 +16,7 @@ gives the shape of a fragment.
 A fragment says what a user sees, in one or two plain sentences, without
 identifiers or tool names.
 
+## [Unreleased]
+
+No release has been tagged. The fragments in `changes/` are collected here
+when one is.
