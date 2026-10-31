@@ -1,12 +1,15 @@
 #!/bin/sh
+# Check that the four files stating the version state one version:
+# controller/version.ml, editor/code/package.json, editor/zed/extension.toml
+# and editor/zed/Cargo.toml.
 #
 #   scripts/check-version.sh [<version>]
 #
-#
-#
-#
-#
-#
+# The server reports its version to every client and the VS Code extension
+# warns when its own differs, so files that drift apart show every user a
+# warning. With <version> the four must also equal it. Exit status: 0 they
+# agree, 1 they disagree or the version is malformed, 2 a file or its one
+# version line cannot be read.
 
 set -u
 
