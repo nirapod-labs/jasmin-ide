@@ -27,3 +27,8 @@ General Public License, version 3 or later. Each release states the exact
 GMP source it was built from and how to relink the binaries against another
 copy, as that licence requires.
 
+## Jasmin
+
+The language server links the Jasmin compiler library, which is MIT
+licensed. Jasmin is developed by the Jasmin team at Inria and its
+contributors.
