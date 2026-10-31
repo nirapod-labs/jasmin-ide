@@ -2,12 +2,15 @@
 # Build the release artefacts twice, from two clean trees at one commit, and
 # record whether each file matched.
 #
+#   scripts/release-double-build.sh <tree-a> <tree-b> <output> [--require-identical]
 #
-#
-#
-#
-#
-#
+# JIDE_ARTEFACTS picks `server` (the release build of the server, with
+# SOURCE_DATE_EPOCH and JIDE_LINK_FLAGS) and `src.tar.gz` (git archive, with
+# JIDE_SRC_PREFIX); both by default. <output>/double-build.txt records each
+# file's digest and size in both passes and, where they differ, how many
+# bytes, the first offset and whether a tree path is inside. Exit status: 0
+# recorded, 1 a build failed, a tree is unusable, nothing was compared or
+# (with --require-identical) a file differs, 2 a usage error.
 
 set -eu
 if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
@@ -238,7 +241,6 @@ for name in $artefacts; do
 	fi
 
 	differing=$((differing + 1))
-	#
 	set +e
 	n=$(cmp -l "$a" "$b" 2>/dev/null | wc -l | tr -d ' ')
 	first=$(cmp "$a" "$b" 2>&1 |
