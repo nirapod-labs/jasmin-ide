@@ -1,11 +1,15 @@
 #!/bin/bash
+# Run a release binary over a Jasmin corpus, one `check` per .jazz and .jinc
+# file, and fail unless every file gets a verdict.
 #
+#   scripts/corpus-smoke.sh <binary> <corpus> [-j N] [--arch NAME] [--write FILE] [--expect FILE]
 #
-#
-#
-#
-#
-#
+# This is the smoke test of a release binary, not parity: which files ought
+# to pass is the compiler's to say. A file fails when the binary crashes,
+# exits other than 0 or 1, prints no summary line, or reports an internal
+# diagnostic. --write keeps the per-file verdicts and --expect compares them
+# with another platform's, which must be the same table. Exit status: 0 every
+# file got a verdict, 1 one did not or --expect differs, 2 a usage error.
 
 set -eu -o pipefail
 
