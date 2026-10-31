@@ -9,6 +9,8 @@ DUNE ?= $(shell if command -v dune >/dev/null 2>&1; then echo dune; \
 
 PNPM ?= pnpm
 
+REPO_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+
 RUSTUP_BIN := $(HOME)/.cargo/bin
 CARGO ?= $(shell if [ -x $(RUSTUP_BIN)/cargo ]; then echo $(RUSTUP_BIN)/cargo; \
 	else echo cargo; fi)
@@ -28,7 +30,7 @@ export OPAMJOBS HEAVY
 
 CI := sh scripts/ci.sh
 
-.PHONY: all deps vendor build fmt test check editor-code editor-zed ci ci-fast
+.PHONY: all deps vendor build fmt test check editor-code editor-zed zed-queries ci ci-fast
 
 .NOTPARALLEL:
 
@@ -57,6 +59,26 @@ editor-code:
 editor-zed:
 	@$(CI) editor-zed editor/zed/Cargo.toml 'cd editor/zed && $(RUN_CARGO) build --locked --target wasm32-wasip2'
 
-ci: vendor build fmt test editor-code editor-zed
+GRAMMAR_DIR ?= $(if $(strip $(JASMIN_GRAMMAR_DIR)),$(strip $(JASMIN_GRAMMAR_DIR)),$(abspath $(REPO_DIR)/../grammar/tree-sitter-jasmin))
+
+zed-queries:
+	@if [ ! -f editor/zed/test/queries.sh ]; then \
+		printf 'skip zed-queries (not present)\n'; \
+	elif [ ! -f "$(GRAMMAR_DIR)/src/parser.c" ]; then \
+		printf 'skip zed-queries (no grammar)\n'; \
+	else \
+		pin=$$(sed -n 's/^rev = "\([0-9a-f]\{40\}\)"$$/\1/p' editor/zed/extension.toml | head -n 1); \
+		revision=; \
+		if [ -e "$(GRAMMAR_DIR)/.git" ]; then \
+			revision=$$(git -C "$(GRAMMAR_DIR)" rev-parse HEAD 2>/dev/null); \
+		fi; \
+		if [ -n "$$pin" ] && [ -n "$$revision" ] && [ "$$revision" != "$$pin" ]; then \
+			printf 'skip zed-queries (grammar at %.7s, pin %.7s)\n' "$$revision" "$$pin"; \
+		else \
+			$(CI) zed-queries "$(GRAMMAR_DIR)/src/parser.c" 'cd editor/zed && JASMIN_GRAMMAR_DIR="$(GRAMMAR_DIR)" ./test/queries.sh'; \
+		fi; \
+	fi
+
+ci: vendor build fmt test editor-code editor-zed zed-queries
 
 ci-fast: build test
