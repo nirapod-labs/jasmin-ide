@@ -57,3 +57,8 @@ person they reported while a decision is open.
 
 A maintainer who is the subject of a report does not decide it.
 
+## Scope of this document
+
+This is a short, practical code of conduct written for this project. It is not
+adapted from a licensed template, and it grants no rights beyond what the
+project's licence and the rules of the platform it is hosted on already give.
