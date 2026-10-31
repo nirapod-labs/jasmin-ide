@@ -30,7 +30,7 @@ export OPAMJOBS HEAVY
 
 CI := sh scripts/ci.sh
 
-.PHONY: all deps vendor build fmt test check editor-code editor-zed zed-queries ci ci-fast
+.PHONY: all deps vendor build fmt test check bench bench-build editor-code editor-zed zed-queries ci ci-fast
 
 .NOTPARALLEL:
 
@@ -51,6 +51,14 @@ fmt:
 check: fmt
 
 TEST_ARGS := runtest --root . --force -j 4
+
+BENCH_EXE := $(REPO_DIR)/_build/default/bench/bench.exe
+
+bench-build:
+	@$(CI) bench-build bench/dune '$(RUN_DUNE) build --root . bench/bench.exe -j 4'
+
+bench:
+	@JASMIN_BENCH_EXE=$(BENCH_EXE) $(CI) bench bench/run.sh 'sh bench/run.sh'
 
 test:
 	@$(CI) test dune-project 'sh scripts/runtest.sh "$(RUN_DUNE)" $(TEST_ARGS)'
