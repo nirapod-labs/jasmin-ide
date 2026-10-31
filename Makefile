@@ -50,8 +50,10 @@ fmt:
 
 check: fmt
 
+TEST_ARGS := runtest --root . --force -j 4
+
 test:
-	@$(CI) test dune-project '$(RUN_DUNE) runtest --root . -j 4'
+	@$(CI) test dune-project 'sh scripts/runtest.sh "$(RUN_DUNE)" $(TEST_ARGS)'
 
 editor-code:
 	@$(CI) editor-code editor/code/package.json 'cd editor/code && $(HEAVY) $(PNPM) install --frozen-lockfile && $(PNPM) run validate'
