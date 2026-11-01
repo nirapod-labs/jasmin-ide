@@ -306,7 +306,7 @@ jobs:
             https://github.com/jasmin-lang/jasmin.git "$RUNNER_TEMP/jasmin"
           binary=$RUNNER_TEMP/release/jasmin-lsp-${GITHUB_REF_NAME#v}-${{ matrix.platform }}
           chmod 755 "$binary"
-          sh scripts/corpus-smoke.sh "$binary" "$RUNNER_TEMP/jasmin"
+          bash scripts/corpus-smoke.sh "$binary" "$RUNNER_TEMP/jasmin"
 
   # The packages: one VSIX per platform carrying that platform's server, one
   # universal package with no server, the Zed extension's module and manifest,
