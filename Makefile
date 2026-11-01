@@ -30,7 +30,7 @@ export OPAMJOBS HEAVY
 
 CI := sh scripts/ci.sh
 
-.PHONY: all deps vendor build fmt test check bench bench-build editor-code editor-zed zed-queries ci ci-fast
+.PHONY: all deps vendor build fmt test check bench bench-build editor-code editor-vscode editor-zed zed-queries ci ci-fast
 
 .NOTPARALLEL:
 
@@ -66,6 +66,16 @@ test:
 editor-code:
 	@$(CI) editor-code editor/code/package.json 'cd editor/code && $(HEAVY) $(PNPM) install --frozen-lockfile && $(PNPM) run validate'
 
+editor-vscode:
+	@if [ ! -f editor/code/package.json ]; then \
+		printf 'skip editor-vscode (not present)\n'; \
+	elif sh scripts/vscode-available.sh; then \
+		$(CI) editor-vscode editor/code/package.json \
+			'cd editor/code && $(HEAVY) $(PNPM) install --frozen-lockfile && $(HEAVY) $(PNPM) run test:vscode'; \
+	else \
+		printf 'skip editor-vscode (VS Code cannot be downloaded)\n'; \
+	fi
+
 editor-zed:
 	@$(CI) editor-zed editor/zed/Cargo.toml 'cd editor/zed && $(RUN_CARGO) build --locked --target wasm32-wasip2'
 
@@ -89,6 +99,6 @@ zed-queries:
 		fi; \
 	fi
 
-ci: vendor build fmt test editor-code editor-zed zed-queries
+ci: vendor build fmt test editor-code editor-vscode editor-zed zed-queries
 
 ci-fast: build test
