@@ -2,6 +2,4 @@
 ; no compiler, no network and no release file from anywhere else.
 
 (cram
- (deps
-  ../../scripts/checksums.sh
-  ../../scripts/release-double-build.sh))
+ (deps ../../scripts/checksums.sh ../../scripts/release-double-build.sh))

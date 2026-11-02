@@ -1,16 +1,14 @@
 #!/bin/sh
+# Write one version into the four files that state it, and into
+# editor/zed/Cargo.lock, which `cargo build --locked` checks against them.
 #
 #   scripts/set-version.sh <version>
 #
-#
-#
-#
-#
-#
-#
-#
-#
-#
+# The version is three dot-separated numbers with no leading zero. Every file
+# is read before any is written, so a tree this cannot read is left as it
+# was, and the result is read back with scripts/check-version.sh. Exit status:
+# 0 written and checked, 1 the check still disagrees, 2 a malformed version
+# or a file whose version line is missing or there twice.
 
 set -u
 
