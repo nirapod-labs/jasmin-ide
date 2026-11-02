@@ -1,0 +1,1 @@
+- Check a required file in the context of an entry at the project root, and resolve a named include path the way the compiler does.
