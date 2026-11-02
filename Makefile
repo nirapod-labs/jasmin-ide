@@ -30,7 +30,7 @@ export OPAMJOBS HEAVY
 
 CI := sh scripts/ci.sh
 
-.PHONY: all deps vendor build fmt test check bench bench-build editor-code editor-vscode editor-zed zed-queries ci ci-fast
+.PHONY: all deps vendor build fmt test oracle parity check bench bench-build editor-code editor-vscode editor-zed zed-queries ci ci-fast
 
 .NOTPARALLEL:
 
@@ -63,6 +63,58 @@ bench:
 test:
 	@$(CI) test dune-project 'sh scripts/runtest.sh "$(RUN_DUNE)" $(TEST_ARGS)'
 
+JASMINC ?=
+export JASMINC
+
+JASMINC_MODE := $(if $(filter none,$(strip $(JASMINC))),none,$(if $(strip $(JASMINC)),path,machine))
+
+CORPUS ?=
+
+PARITY_JOBS ?= 4
+
+ORACLE ?= test/oracle/jasminc.sh
+
+oracle:
+	@err=$${TMPDIR:-/tmp}/make-oracle.$$$$; st=0; \
+	case '$(JASMINC_MODE)' in \
+	none) printf 'skip oracle (none)\n'; exit 0 ;; \
+	machine) v=$$(sh '$(ORACLE)' 2>/dev/null) || st=$$? ;; \
+	*) v=$$(sh '$(ORACLE)' '$(JASMINC)' 2>"$$err") || st=$$? ;; \
+	esac; \
+	if [ "$$st" -ne 0 ]; then \
+		if [ '$(JASMINC_MODE)' = machine ]; then \
+			printf 'skip oracle (no jasminc)\n'; \
+		else \
+			r=$$(sed -n '1{s/^[^:]*: //;s/^error: //;p;}' "$$err"); \
+			rm -f "$$err"; \
+			printf 'fail oracle %s (exit %s)\n' "$${r:-no reason on stderr}" "$$st"; \
+			exit "$$st"; \
+		fi; \
+	else \
+		rm -f "$$err"; \
+		printf 'ok oracle %s\n' "$$(printf '%s' "$$v" | tr '\n' ' ' | sed 's/ *$$//')"; \
+	fi
+
+parity:
+	@if [ -z "$(strip $(CORPUS))" ] || [ ! -d "$(CORPUS)" ]; then \
+		printf 'skip parity (corpus not present)\n'; \
+		exit 0; \
+	fi; \
+	err=$${TMPDIR:-/tmp}/make-parity.$$$$; st=0; \
+	case '$(JASMINC_MODE)' in \
+	none) printf 'skip parity (no oracle)\n'; exit 0 ;; \
+	machine) sh '$(ORACLE)' >/dev/null 2>&1 || { printf 'skip parity (no oracle)\n'; exit 0; } ;; \
+	*) sh '$(ORACLE)' '$(JASMINC)' >/dev/null 2>"$$err" || st=$$? ;; \
+	esac; \
+	if [ "$$st" -ne 0 ]; then \
+		r=$$(sed -n '1{s/^[^:]*: //;s/^error: //;p;}' "$$err"); \
+		rm -f "$$err"; \
+		printf 'fail parity %s (exit %s)\n' "$${r:-no reason on stderr}" "$$st"; \
+		exit "$$st"; \
+	fi; \
+	rm -f "$$err"; \
+	$(CI) parity test/parity 'PARITY_JOBS=$(PARITY_JOBS) sh test/parity/parity.sh "$(CORPUS)"'
+
 editor-code:
 	@$(CI) editor-code editor/code/package.json 'cd editor/code && $(HEAVY) $(PNPM) install --frozen-lockfile && $(PNPM) run validate'
 
@@ -90,6 +142,6 @@ zed-queries:
 		$(CI) zed-queries "$(GRAMMAR_DIR)/src/parser.c" 'cd editor/zed && JASMIN_GRAMMAR_DIR="$(GRAMMAR_DIR)" ./test/queries.sh'; \
 	fi
 
-ci: vendor build fmt test editor-code editor-vscode editor-zed zed-queries
+ci: vendor build fmt test oracle editor-code editor-vscode editor-zed zed-queries
 
 ci-fast: build test
