@@ -87,16 +87,7 @@ zed-queries:
 	elif [ ! -f "$(GRAMMAR_DIR)/src/parser.c" ]; then \
 		printf 'skip zed-queries (no grammar)\n'; \
 	else \
-		pin=$$(sed -n 's/^rev = "\([0-9a-f]\{40\}\)"$$/\1/p' editor/zed/extension.toml | head -n 1); \
-		revision=; \
-		if [ -e "$(GRAMMAR_DIR)/.git" ]; then \
-			revision=$$(git -C "$(GRAMMAR_DIR)" rev-parse HEAD 2>/dev/null); \
-		fi; \
-		if [ -n "$$pin" ] && [ -n "$$revision" ] && [ "$$revision" != "$$pin" ]; then \
-			printf 'skip zed-queries (grammar at %.7s, pin %.7s)\n' "$$revision" "$$pin"; \
-		else \
-			$(CI) zed-queries "$(GRAMMAR_DIR)/src/parser.c" 'cd editor/zed && JASMIN_GRAMMAR_DIR="$(GRAMMAR_DIR)" ./test/queries.sh'; \
-		fi; \
+		$(CI) zed-queries "$(GRAMMAR_DIR)/src/parser.c" 'cd editor/zed && JASMIN_GRAMMAR_DIR="$(GRAMMAR_DIR)" ./test/queries.sh'; \
 	fi
 
 ci: vendor build fmt test editor-code editor-vscode editor-zed zed-queries
