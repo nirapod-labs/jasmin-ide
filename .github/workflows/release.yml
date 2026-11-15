@@ -218,7 +218,7 @@ jobs:
           printf '(env (_ (link_flags (-ccopt -L%s))))\n' "$RUNNER_TEMP/gmp" \
             >"$RUNNER_TEMP/dune-workspace"
           for pass in 1 2; do
-            dune build --root . --profile release \
+            opam exec -- dune build --root . --profile release \
               --build-dir "$RUNNER_TEMP/build-$pass" \
               --workspace "$RUNNER_TEMP/dune-workspace" \
               -j 4 lsp-server/native/main.exe

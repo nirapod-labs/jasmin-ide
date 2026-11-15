@@ -58,6 +58,11 @@ jobs:
   ocaml:
     name: release channel, OCaml ${{ matrix.ocaml }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    env:
+      # setup-ocaml does not put the switch on PATH, and the Makefile's
+      # fallback names the local development switch, so make is told how to
+      # reach dune here.
+      DUNE: opam exec -- dune
     strategy:
       fail-fast: false
       matrix:
