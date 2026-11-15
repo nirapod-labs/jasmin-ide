@@ -25,7 +25,11 @@ exec 3<&0
 "$@" <&3 &
 pid=$!
 
+# The watchdog exits normally when it is stopped: a job that dies from a
+# signal makes bash, which is /bin/sh on macOS, print "Terminated" on this
+# script's standard error at a moment that depends on timing.
 (
+  trap 'exit 0' TERM
   seconds=0
   while [ "$seconds" -lt "$limit" ]; do
     kill -0 "$pid" 2>/dev/null || break

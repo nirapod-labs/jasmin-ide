@@ -70,7 +70,7 @@ jobs:
         run: |
           set -eu
           upstream=https://github.com/jasmin-lang/jasmin.git
-          git clone --quiet --filter=blob:none --no-checkout \
+          git clone --quiet --filter=blob:none \
             --depth 1 --branch main "$upstream" "$RUNNER_TEMP/jasmin"
           commit=$(git -C "$RUNNER_TEMP/jasmin" rev-parse HEAD)
           printf 'commit=%s\n' "$commit" >>"$GITHUB_OUTPUT"
