@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security problem
+    url: https://github.com/nirapod-labs/jasmin-ide/security/advisories/new
+    about: Please report vulnerabilities privately, not in a public issue.
+  - name: Questions about Jasmin
+    url: https://formosa-crypto.zulipchat.com/
+    about: The Formosa-Crypto Zulip, for questions about Jasmin and high-assurance cryptography.

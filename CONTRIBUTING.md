@@ -1,8 +1,33 @@
-# Contributing
+# Contributing to Jasmin IDE
 
-Thanks for looking. This file covers the checks a change has to pass and the
-rules the tree follows. `docs/development.md` has the build and every test
-command.
+Thanks for your interest in Jasmin IDE. Bug reports, fixes, tests and
+documentation are all welcome. This file covers how to propose a change, the
+checks it has to pass and the rules the tree follows. The
+[development guide](docs/development.md) has the build and every test
+command, and its [layout](docs/development.md#layout) section maps the tree.
+
+Everyone taking part is expected to follow the
+[code of conduct](CODE_OF_CONDUCT.md).
+
+## Reporting a bug
+
+Open an issue with the server version (`jasmin-lsp --version`), your editor
+and its version, and the smallest Jasmin file that shows the problem. If the
+server disagrees with `jasminc` on the same file, say which `jasminc` you ran:
+the compiler is the reference, and a difference from it is a bug here.
+
+A security problem goes privately, as [SECURITY.md](SECURITY.md) describes,
+not into a public issue.
+
+## Fixing a bug or improving a feature
+
+Go ahead and open a pull request. If an issue goes with it, link it in the
+description so it's closed when the change lands.
+
+## Adding a feature
+
+Open an issue first and describe what you want to do. That way we can agree
+the feature fits before anyone spends time on it.
 
 ## Before you send a change
 

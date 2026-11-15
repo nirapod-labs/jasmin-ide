@@ -1,0 +1,43 @@
+name: Bug report
+description: Something in the server or an editor extension doesn't work as it should.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: input
+    attributes:
+      label: Jasmin input
+      description: The smallest file that shows the problem, and the jasmin.project file if you use one.
+      render: text
+  - type: input
+    id: server
+    attributes:
+      label: Server version
+      description: The output of `jasmin-lsp --version`.
+    validations:
+      required: true
+  - type: input
+    id: editor
+    attributes:
+      label: Editor
+      description: The editor and its version, and the extension version.
+    validations:
+      required: true
+  - type: textarea
+    id: compiler
+    attributes:
+      label: What jasminc says
+      description: If the server disagrees with the compiler, the `jasminc` version and its output on the same file.
+      render: text
+  - type: textarea
+    id: log
+    attributes:
+      label: Server log
+      description: "The relevant lines of the server log (in VS Code, the Jasmin: Show server log command)."
+      render: text
