@@ -126,7 +126,7 @@ jobs:
         working-directory: ${{ runner.temp }}/jasmin
         run: |
           set -eu
-          make -C compiler CIL
+          opam exec -- make -C compiler CIL
           test -f compiler/src/CIL/expr.ml
 
       # `make -C compiler dist` writes compiler/jasmin-compiler.tgz: the same
@@ -137,7 +137,7 @@ jobs:
         working-directory: ${{ runner.temp }}/jasmin
         run: |
           set -eu
-          make -C compiler dist
+          opam exec -- make -C compiler dist
           mkdir -p "$RUNNER_TEMP/edge"
           cp compiler/jasmin-compiler.tgz "$RUNNER_TEMP/edge/"
           printf '%s\n' "${{ steps.upstream.outputs.commit }}" \
