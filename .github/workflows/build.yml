@@ -46,6 +46,14 @@ env:
   PNPM_SETUP_VERSION: v4
   PNPM_SETUP_SHA: fc06bc1257f339d1d5d8b3a19a8cae5388b55320
 
+  UPLOAD_ARTIFACT_ACTION: actions/upload-artifact
+  UPLOAD_ARTIFACT_VERSION: v4
+  UPLOAD_ARTIFACT_SHA: ea165f8d65b6e75b540449e92b4886f43607fa02
+
+  DOWNLOAD_ARTIFACT_ACTION: actions/download-artifact
+  DOWNLOAD_ARTIFACT_VERSION: v4
+  DOWNLOAD_ARTIFACT_SHA: d3f86a106a0bac45b974a628896c90dbdf5c8093
+
 jobs:
   ocaml:
     name: release channel, OCaml ${{ matrix.ocaml }} on ${{ matrix.os }}
@@ -55,13 +63,13 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            ocaml: "4.14"
+            ocaml: "4.14.4"
             locked: "yes"
           - os: ubuntu-24.04-arm
-            ocaml: "4.14"
+            ocaml: "4.14.4"
             locked: "yes"
           - os: macos-15
-            ocaml: "4.14"
+            ocaml: "4.14.4"
             locked: "yes"
           - os: ubuntu-24.04
             ocaml: "5.3"
@@ -90,11 +98,13 @@ jobs:
         if: matrix.locked == 'no'
         run: |
           # The lock file pins the compiler itself, so opam refuses it in a 5.x
-          # switch. This cell takes the workspace's own dependency list and the
-          # vendored tree's packages by name, without the formatter, which is
-          # pinned for 4.14 and used only by the local format step.
-          opam install --deps-only -y ./jasmin-lsp.opam
-          opam install -y angstrom batteries menhir menhirLib zarith
+          # switch. This cell names the packages itself: the server's
+          # dependencies apart from the jasmin package, which the build takes
+          # from vendor/ instead, and the vendored tree's own requirements,
+          # without the formatter, which is pinned for 4.14 and used only by
+          # the local format step.
+          opam install -y dune lsp jsonrpc yojson zarith menhirLib \
+            angstrom batteries menhir
 
       - name: Fetch the Jasmin release tarball
         run: |
@@ -127,9 +137,21 @@ jobs:
           # compiler is `make parity` with JASMINC.
           bash scripts/corpus-smoke.sh _build/default/lsp-server/native/main.exe "$RUNNER_TEMP/jasmin"
 
+      - name: Keep the server for the VS Code job
+        if: matrix.os == 'ubuntu-24.04' && matrix.locked == 'yes'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: jasmin-lsp-linux-x86_64
+          path: _build/default/lsp-server/native/main.exe
+          if-no-files-found: error
+          retention-days: 1
+
   editor-code:
     name: VS Code extension
     runs-on: ubuntu-24.04
+    # The extension's tests start the real server, so they wait for the
+    # build that produces it.
+    needs: ocaml
     steps:
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -147,6 +169,12 @@ jobs:
           run_install: false
           package_json_file: editor/code/package.json
 
+      - name: Fetch the server the OCaml job built
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: jasmin-lsp-linux-x86_64
+          path: ${{ runner.temp }}/server
+
       - name: Validate the extension
         # `make editor-code` is not called here on purpose: that step demands a
         # Jasmin corpus (JASMIN_TM_CORPUS) and skips without one, and a runner
@@ -154,6 +182,8 @@ jobs:
         # and `pnpm run validate` prints its own skip for the corpus checks.
         working-directory: editor/code
         run: |
+          chmod +x "$RUNNER_TEMP/server/main.exe"
+          export JASMIN_LSP="$RUNNER_TEMP/server/main.exe"
           pnpm install --frozen-lockfile
           pnpm run validate
 
