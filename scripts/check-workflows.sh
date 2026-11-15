@@ -28,7 +28,7 @@ trap 'rm -f "$out"' EXIT
 if command -v actionlint >/dev/null 2>&1; then
 	actionlint "$dir"/*.yml >>"$out" 2>&1 || true
 else
-	echo "check-workflows: actionlint is not installed; syntax not checked"
+	echo "check-workflows: actionlint is not installed; syntax not checked" >&2
 fi
 
 targets=$(sed -n 's/^\([A-Za-z][A-Za-z0-9_.-]*\):.*/\1/p' Makefile)

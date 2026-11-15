@@ -108,8 +108,10 @@ jobs:
           # from vendor/ instead, and the vendored tree's own requirements,
           # without the formatter, which is pinned for 4.14 and used only by
           # the local format step.
-          opam install -y dune lsp jsonrpc yojson zarith menhirLib \
-            angstrom batteries menhir
+          # lsp and jsonrpc are held at the lock's version, since the server
+          # is written against that protocol library's API.
+          opam install -y dune lsp.1.27.0 jsonrpc.1.27.0 yojson zarith \
+            menhirLib angstrom batteries menhir
 
       - name: Fetch the Jasmin release tarball
         run: |

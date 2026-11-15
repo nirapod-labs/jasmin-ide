@@ -15,7 +15,7 @@ repository's own Makefile and scripts.
   >       - run: make build
   >       - run: sh scripts/check-version.sh
   > EOF
-  $ check() { sh ../../scripts/check-workflows.sh "$PWD/wf" > out; s=$?; sed "s|$PWD/||" out; return $s; }
+  $ check() { sh ../../scripts/check-workflows.sh "$PWD/wf" > out 2>/dev/null; s=$?; sed "s|$PWD/||" out; return $s; }
   $ check
   check-workflows: 1 workflows, every rule holds
 
