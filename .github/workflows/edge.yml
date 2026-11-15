@@ -90,12 +90,14 @@ jobs:
       # release channel uses a tarball instead. `install` is GNU install here
       # because the distribution script uses `install -t`, which BSD install
       # does not have; on this runner it is coreutils and already present.
+      # setup-ocaml makes a local switch in the repository's own directory,
+      # and these steps run in the upstream checkout, so they name it.
       - name: Extract the CIL from the Rocq proofs
         if: steps.cache.outputs.cache-hit != 'true'
         working-directory: ${{ runner.temp }}/jasmin
         run: |
           set -eu
-          opam exec -- make -C compiler CIL
+          opam exec --switch "$GITHUB_WORKSPACE" -- make -C compiler CIL
           test -f compiler/src/CIL/expr.ml
 
       # `make -C compiler dist` writes compiler/jasmin-compiler.tgz: the same
@@ -106,7 +108,7 @@ jobs:
         working-directory: ${{ runner.temp }}/jasmin
         run: |
           set -eu
-          opam exec -- make -C compiler dist
+          opam exec --switch "$GITHUB_WORKSPACE" -- make -C compiler dist
           mkdir -p "$RUNNER_TEMP/edge"
           cp compiler/jasmin-compiler.tgz "$RUNNER_TEMP/edge/"
           printf '%s\n' "${{ steps.upstream.outputs.commit }}" \
