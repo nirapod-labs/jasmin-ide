@@ -2,8 +2,8 @@
 error, the diagnostics and the summary and 1 when it has one, and nothing but
 its own lines on stdout. The last part is the one the reader could have
 broken: `check` is read before the server is created so the batch mode never
-touches the protocol (`compiler/cli.ml`), and the `--version` line this card
-adds must not change that.
+touches the protocol (`compiler/cli.ml`), and the `--version` line must not
+change that.
 
   $ printf 'export fn main() -> reg u64 {\n  reg u64 x;\n  x = 1;\n  return x;\n}\n' > ok.jazz
   $ ../../../lsp-server/native/main.exe check ok.jazz > out.txt 2> err.txt; echo "status $?"

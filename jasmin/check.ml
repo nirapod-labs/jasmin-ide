@@ -763,7 +763,7 @@ module Make (A : Arch_full.Arch) = struct
           let item_span = span_of_item item in
           if loop.place then loop.origin := item_span;
           (* A diagnostic in an item recovery rewrote the syntax of is a
-             consequence of the broken text: the design drops every typing
+             consequence of the broken text: the check drops every typing
              diagnostic in a function that contains a recovered region, not
              only the ones whose own span happens to overlap it. The item's
              span decides, so a use just after the rewritten bytes is

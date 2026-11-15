@@ -7,9 +7,9 @@
     was opened with; only the key is normalised.
 
     A document is analysed under the project file nearest above it, found by
-    walking up from its own directory (design note, section 3). Two documents
-    in one workspace may therefore be under two different projects, and one
-    under neither is analysed with the defaults and told nothing about it. *)
+    walking up from its own directory. Two documents in one workspace may
+    therefore be under two different projects, and one under neither is
+    analysed with the defaults and told nothing about it. *)
 
 type t
 
@@ -186,7 +186,7 @@ val max_bytes : int
 
 type snapshot = {
   index : Index.t;
-      (** The index over the analysed text's untyped tree (design section 9):
+      (** The index over the analysed text's untyped tree:
           every identifier occurrence, every declaration with its name and
           item ranges, the outline and the [require] edges. Its
           [Index.file] is the document's path, or its uri when it has none,
@@ -281,8 +281,8 @@ val snapshot : t -> uri:string -> snapshot option
 
     It reads what the last check left and does no work of its own: it does not
     parse, type, resolve or read a file, and it never calls the check, so a
-    caller may ask on every keystroke (design section 5, section 10: completion
-    and signature help never trigger a check). It costs one hash lookup of the
+    caller may ask on every keystroke (completion and signature help never
+    trigger a check). It costs one hash lookup of the
     uri, and it cannot raise.
 
     The value is the last analysis's even when the document's text has changed

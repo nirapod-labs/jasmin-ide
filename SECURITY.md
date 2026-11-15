@@ -57,16 +57,11 @@ way nobody has thought of should be analysed, reported and survived:
 
 ## Reporting
 
-**The repository is private until the first public release, and there is no
-security contact address yet.** A placeholder address is worse than none,
-because mail sent to it would silently go nowhere, so this file names no
-address at all.
-
-The security contact is published with the first public release, in this file.
-Once the repository is public, report a suspected vulnerability privately
-through the repository's own private reporting channel rather than in a public
-issue, and include the version of the server, the Jasmin version it was built
-against, the input that triggers the problem, and what you saw.
+Report a suspected vulnerability privately, through GitHub's private
+vulnerability reporting: the "Report a vulnerability" button on the
+repository's Security tab. Include the version of the server, the Jasmin
+version it was built against, the input that triggers the problem, and what
+you saw.
 
 Please do not open a public issue for a security problem. Do not send a proof
 of concept to anyone else before there has been a chance to look at it.

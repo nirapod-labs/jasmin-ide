@@ -52,7 +52,7 @@ window check and nothing else.
 
 The build check has two halves, and the cases below answer both with things
 they own. The slot half reads a directory: `locks` is one this test makes and
-keeps empty, so a slot held by a build in another lane cannot answer for it.
+keeps empty, so a slot held by another build on the machine cannot answer for it.
 The process half reads the host's whole process table, which no directory can
 pin, so it is answered by a `ps` of the test's own that reports no build.
 Neither half then depends on what the machine is doing, and no case measures

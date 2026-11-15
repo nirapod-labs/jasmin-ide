@@ -932,8 +932,8 @@ let print_request_table results =
           result.request_unit.label result.project_files result.project_bytes)
     results
 
-(* The rows in one line: a reader of a gate log sees whether the measurement
-   is complete before reading any number. *)
+(* The rows in one line: a reader of the log of a run sees whether the
+   measurement is complete before reading any number. *)
 let print_request_tally results =
   let rows = List.concat_map (fun result -> result.rows) results in
   let count what =

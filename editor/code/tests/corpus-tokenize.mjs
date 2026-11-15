@@ -15,8 +15,8 @@ const corpusVariable = "JASMIN_TM_CORPUS";
 
 /**
  * Set to anything to make a missing corpus a failure instead of a skip. The
- * `editor-code` step of `make ci` sets it: the gate is "every corpus file
- * tokenizes", so a gate run that tokenized nothing is red, not green.
+ * `editor-code` step of `make ci` sets it: the check is "every corpus file
+ * tokenizes", so a run that tokenized nothing is red, not green.
  */
 const requiredVariable = "JASMIN_TM_CORPUS_REQUIRED";
 

@@ -8,10 +8,10 @@
     used where it was declared.
 
     Where the compiler has an answer it wins: [Env.Funs.find] for a
-    function, and a typed variable use's [v_dloc]. The typed facts of design
-    section 9 are exposed by the adapter lane, and until that interface
-    lands the resolver is the only answer for every name. The interface here
-    does not change when it does: a [Resolved] declaration is the same
+    function, and a typed variable use's [v_dloc]. The Jasmin adapter
+    exposes the typed facts ([Jide_jasmin.Facts]), but the resolver does not
+    read them yet, so it is the only answer for every name. The interface
+    here does not change when it does: a [Resolved] declaration is the same
     (file, byte offset) either way, so the compiler's answer can replace the
     resolver's without touching a consumer.
 

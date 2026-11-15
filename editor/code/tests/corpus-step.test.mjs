@@ -10,7 +10,7 @@ import {fileURLToPath} from "node:url";
 // The corpus step is the half of `pnpm run validate` that can only be green
 // after a real tokenize run. These cases pin the three statuses it must keep
 // apart: 0 after tokenizing, a printed skip only when no corpus is named, and
-// a failure for anything else — including a gate run with no corpus.
+// a failure for anything else, including a `make ci` run with no corpus.
 
 const step = new URL("./corpus-step.mjs", import.meta.url).pathname;
 const skip = 3;
@@ -40,7 +40,7 @@ describe("the corpus step", () => {
     );
   });
 
-  test("a gate run with no corpus fails, so make ci cannot be green having read nothing", () => {
+  test("a run with no corpus fails, so make ci cannot be green having read nothing", () => {
     const result = runStep({JASMIN_TM_CORPUS_REQUIRED: "1"});
     assert.equal(result.status, 1);
     assert.match(result.stderr, /JASMIN_TM_CORPUS is not set and this run requires a corpus/u);
@@ -82,12 +82,12 @@ describe("the corpus step", () => {
 });
 
 // The statuses above are worth nothing if `pnpm run validate` never calls the
-// step, or if the gate calls it without requiring a corpus: that is the "a
+// step, or if `make ci` calls it without requiring a corpus: that is the "a
 // step that always skips is not a step" defect in its other two shapes. These
 // cases read the two files that do the wiring, so a `validate` that stops
 // running the step, or an `editor-code` step that stops demanding the corpus,
-// fails a test instead of quietly weakening the gate.
-describe("the wiring that makes the corpus step a gate", () => {
+// fails a test instead of quietly weakening the check.
+describe("the wiring that makes the corpus step a required check", () => {
   const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
 
   /** What `make editor-code` would run, with the corpus named or not. */
@@ -115,8 +115,8 @@ describe("the wiring that makes the corpus step a gate", () => {
 
   test("make ci's editor-code step requires the corpus", () => {
     const named = dryRun("/corpus/tree");
-    assert.match(named, /JASMIN_TM_CORPUS_REQUIRED=1/u, "a gate run has to make an absent corpus a failure, not a skip");
-    assert.match(named, /JASMIN_TM_CORPUS="\/corpus\/tree"/u, "the gate run has to pass the named tree through, or it tokenizes nothing");
+    assert.match(named, /JASMIN_TM_CORPUS_REQUIRED=1/u, "a make ci run has to make an absent corpus a failure, not a skip");
+    assert.match(named, /JASMIN_TM_CORPUS="\/corpus\/tree"/u, "the make ci run has to pass the named tree through, or it tokenizes nothing");
     assert.match(
       dryRun(),
       /skip editor-code \(needs JASMIN_TM_CORPUS\)/u,

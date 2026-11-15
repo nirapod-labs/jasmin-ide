@@ -1,7 +1,6 @@
-; Navigation tests: the four requests the engine answers, layer 2 of the test
-; design. Each `.t` drives the built server through the test client over pipes,
-; so every test runs the real binary and the record is the protocol's own
-; bytes, normalised.
+; Navigation tests: the four requests the engine answers. Each `.t` drives the
+; built server through the test client over pipes, so every test runs the real
+; binary and the record is the protocol's own bytes, normalised.
 ;
 ; The two executables are declared as dependencies even though dune would
 ; build them anyway: the dependency is what makes a rebuilt server or client

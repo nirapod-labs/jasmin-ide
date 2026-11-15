@@ -1,4 +1,4 @@
-(** The tree half of the parser parity gate.
+(** The tree half of the parser parity check.
 
     For one file this program answers three questions and prints one tree.
 
@@ -40,7 +40,7 @@
     The release's printer elides source locations by construction: every
     located node it prints is read through [Location.unloc], so it cannot
     show a difference in them. That is why the structural comparison above
-    does not use the printing, and why the printing is not the gate: it is
+    does not use the printing, and why the printing is not the check: it is
     the cross-check that our build of the release's printer, given our tree,
     produces the same bytes as the release's own binary given its own.
 

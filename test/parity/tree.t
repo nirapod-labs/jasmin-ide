@@ -1,4 +1,4 @@
-The tree half of the parser parity gate over a corpus this test writes itself.
+The tree half of the parser parity check over a corpus this test writes itself.
 The release's parse-and-print is not here, so a stand-in plays it: the same
 rendering this program prints for one file, which is what the release's
 binary prints for a file the two parsers read alike.

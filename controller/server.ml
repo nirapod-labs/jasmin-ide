@@ -158,30 +158,12 @@ let server_info () =
    declare. The seven editing requests are advertised with the shape each one
    needs: completion triggers on [#] and [:] because a primitive and a
    qualified name are written that way, signature help on [(] and [,] because
-   those open and separate a call's arguments, rename has a prepare step, and
-   semantic tokens need the legend the encoder numbers the tokens by. The
+   those open and separate a call's arguments, and rename has a prepare step. Workspace
+   symbols and semantic tokens are not advertised: the engine has no answer
+   for them yet, and a client that saw the capability would offer the user a
+   feature that shows nothing. The
    capabilities are written here rather than through the protocol package's
    own types, so the JSON the client reads is this list and nothing else. *)
-let semantic_tokens_capability () =
-  `Assoc
-    [
-      ( "legend",
-        `Assoc
-          [
-            ( "tokenTypes",
-              `List
-                (List.map
-                   (fun name -> `String name)
-                   Json_conv.semantic_token_types) );
-            ( "tokenModifiers",
-              `List
-                (List.map
-                   (fun name -> `String name)
-                   Json_conv.semantic_token_modifiers) );
-          ] );
-      ("full", `Bool true);
-    ]
-
 let capabilities ~features () =
   (* Rename is advertised only while the features answer it. A client that sees
      the capability offers the user a rename, so a server that cannot make one
@@ -208,11 +190,7 @@ let capabilities ~features () =
          `Assoc [ ("triggerCharacters", `List [ `String "("; `String "," ]) ] );
      ]
     @ rename
-    @ [
-        ("workspaceSymbolProvider", `Bool true);
-        ("documentHighlightProvider", `Bool true);
-        ("semanticTokensProvider", semantic_tokens_capability ());
-      ])
+    @ [ ("documentHighlightProvider", `Bool true) ])
 
 let initialize_result ~features () =
   `Assoc

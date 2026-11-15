@@ -66,7 +66,7 @@ val hover_json : Jide_engine.Locate.hover option -> Yojson.Safe.t
     The kind is always [markdown]: the client's
     [textDocument.hover.contentFormat] is not read, and no plain text answer
     is offered. That is a client-capability negotiation this server does not
-    do; both clients this lab ships ask for markdown, so nothing is lost
+    do; both clients this repository ships ask for markdown, so nothing is lost
     there, and a client that asked for [plaintext] alone would be sent a
     MarkupContent it may not render. *)
 

@@ -1,6 +1,5 @@
 (* The context a file is checked in: an entry of the project, or the entry
-   that requires it, directly or through other files. The rule is in the
-   design's section on included files. *)
+   that requires it, directly or through other files. *)
 
 type t = {
   file : string;  (** the file the context is for, as a normalised path *)

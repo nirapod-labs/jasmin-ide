@@ -1,8 +1,9 @@
 # Changelog fragments
 
 One file per change, named `<area>-<short-slug>.md`, with the area one of
-`server`, `vscode`, `zed` or `grammar`. The release script collects the
-fragments into `CHANGES.md` and removes them.
+`server`, `vscode`, `zed` or `grammar`. When a release is cut, the person
+cutting it moves the fragments into a new section of `CHANGES.md` and deletes
+the files.
 
 Example, `changes/server-diagnostics.md`:
 

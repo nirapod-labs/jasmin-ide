@@ -57,8 +57,7 @@ val usage_line : string
 val version_line : unit -> string
 (** [version_line ()] is the whole `--version` output, without its line
     break: the server's own version, the Jasmin version the server links, and
-    which source that Jasmin came from, in the one form `design/INFRA.md`
-    section 2 asks for:
+    which source that Jasmin came from, in this one form:
 
     {[
       jasmin-lsp <server version> (<jasmin version>, built from <route>)

@@ -334,11 +334,11 @@ async function checkRename(document, positions, capabilities) {
   try {
     location = await vscode.commands.executeCommand(prepareRenameCommand, document.uri, positions.name);
   } catch (error) {
-    // A server that advertises rename and then refuses the rename is not a
-    // client failure: the engine has no rename yet, and refusing is the
-    // correct answer for a request with no empty form. Record what the
-    // server said and stop, rather than failing the harness for behaviour
-    // the design asks for.
+    // A server whose features decline the query refuses with "rename is
+    // unavailable" rather than answering with an empty form. That is not a
+    // client failure, so it is recorded as a SKIP with the server's own
+    // reason; the skip allowlist does not name rename, so the run still
+    // fails, and the log says why.
     const reason = messageOf(error);
     if (/rename is unavailable/i.test(reason)) {
       recordCheck(

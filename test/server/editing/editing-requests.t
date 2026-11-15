@@ -53,6 +53,6 @@ controller's unit tests, so only the requests' replies are printed here.
   4 result {"end":{"character":3,"line":2},"start":{"character":2,"line":2}}
   5 result {"changes":{"file:///tmp/editing.jazz":[{"newText":"y","range":{"end":{"character":11,"line":1},"start":{"character":10,"line":1}}},{"newText":"y","range":{"end":{"character":3,"line":2},"start":{"character":2,"line":2}}},{"newText":"y","range":{"end":{"character":10,"line":3},"start":{"character":9,"line":3}}}]}}
   6 result []
-  7 result []
+  7 result [{"kind":1,"range":{"end":{"character":11,"line":1},"start":{"character":10,"line":1}}},{"kind":1,"range":{"end":{"character":3,"line":2},"start":{"character":2,"line":2}}},{"kind":1,"range":{"end":{"character":10,"line":3},"start":{"character":9,"line":3}}}]
   8 result null
   9 result null

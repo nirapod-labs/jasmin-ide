@@ -246,7 +246,7 @@ let test_annotation_keys () =
         (kind_of completion "stacksize"
         = Some Jide_engine.Complete.Annotation_key);
       check "annotation: no keyword is offered" (no_label completion "fn");
-      check "colon: the design's second trigger asks for the keys"
+      check "colon: the second trigger character asks for the keys"
         (labels
            (complete_at ~trigger:Jide_engine.Complete.Colon (resolved, index)
               ~byte:(String.length basic))

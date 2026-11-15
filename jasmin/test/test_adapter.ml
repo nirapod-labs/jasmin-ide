@@ -777,7 +777,8 @@ let test_dot_prefixed_cycle () =
    as a three-file project: the entry requires the file that declares the
    parameter, then the document, which uses the parameter and does not
    require it. Alone the document does not resolve the name; in its entry's
-   context it does, which is the rule of design 8.4. The entry's items after
+   context it does, because a file an entry requires is checked in the
+   context of that entry. The entry's items after
    the require that names the document are not typed — the context stops
    there — so the error in them is nobody's diagnostic. *)
 let test_context_chain_of_three_files () =

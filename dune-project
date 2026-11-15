@@ -4,6 +4,10 @@
 (implicit_transitive_deps false)
 (generate_opam_files true)
 
+(license MIT)
+
+(authors "Jasmin IDE contributors")
+
 (package
  (name jasmin-lsp)
  (synopsis "Language server for the Jasmin language")

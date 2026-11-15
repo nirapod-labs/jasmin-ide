@@ -80,7 +80,7 @@ let item_tokens =
 (** Tokens that can begin a top-level item and can never begin a statement:
     {!item_tokens} with the members of {!statement_tokens} taken out. Seeing
     one of them where a statement belongs means the block that contains the
-    statement was never closed, which is the one repair the design makes
+    statement was never closed, which is the one repair recovery makes
     without dropping anything: a virtual [}] closes the block and the text
     read so far stays in the tree.
 

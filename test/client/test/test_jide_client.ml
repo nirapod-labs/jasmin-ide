@@ -367,8 +367,8 @@ let command_line () =
                 (outcome.code = 1 && outcome.output = ""
                && outcome.message <> ""))))
 
-(* The card asks for the binary itself to print the same bytes twice on one
-   session, so both runs are real processes over the same two files. *)
+(* The binary itself has to print the same bytes twice on one session, so
+   both runs are real processes over the same two files. *)
 let binary_twice () =
   let session =
     {|{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}

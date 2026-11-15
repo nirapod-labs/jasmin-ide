@@ -195,7 +195,7 @@ let cleanup () =
   List.iter remove_tree !roots;
   roots := []
 
-(* The design's worked example, byte for byte, comments and blank lines
+(* A complete example project file, byte for byte, comments and blank lines
    included. Its tree holds [src/main.jazz], [src/shared] and [lib/x86_64],
    which is what makes the include paths and the entry checkable. *)
 let worked_example =
@@ -274,7 +274,7 @@ let test_the_two_values () =
   check "values: the architecture" (project.arch = Some arm_m4);
   check "values: the calling convention" (project.call_conv = Some windows)
 
-(* The design's failure table, one test per row. *)
+(* The malformed project files, one test for each kind of problem. *)
 
 let test_an_unknown_architecture () =
   let text =
@@ -841,8 +841,8 @@ let test_the_nearest_project_file_decides_for_a_document () =
         loaded.Jide_engine.Project.path = Some (path_of root file_name)
     | None -> false)
 
-(* A key followed by an equals and nothing else names a mistake the design's
-   table does not list: the value the key needs is missing, and the line is
+(* A key followed by an equals and nothing else names a mistake the cases
+   above do not cover: the value the key needs is missing, and the line is
    where it is missing. *)
 let test_a_key_with_no_value () =
   let text = lines [ "[jasmin]"; "arch =" ] in
@@ -852,7 +852,7 @@ let test_a_key_with_no_value () =
   check "key with no value: nothing is set"
     ((loaded.project : Jide_engine.Project.t).arch = None);
   (* A line with no equals at all is the other shape of the same mistake, and
-     the design gives its message. *)
+     it has a message of its own. *)
   let text = lines [ "[jasmin]"; "call_conv" ] in
   let loaded = parse text in
   check_problem "line with no equals" text loaded ~line:2 ~fragment:"call_conv"

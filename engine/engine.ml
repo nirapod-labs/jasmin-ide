@@ -1,9 +1,9 @@
 (* The engine: open documents, and the analysis of each one.
 
    The project file is found by walking up from the directory of the file
-   being analysed (design note, section 3), so two documents in one workspace
-   may be under two different projects, and a document under neither is
-   analysed with the defaults. *)
+   being analysed, so two documents in one workspace may be under two
+   different projects, and a document under neither is analysed with the
+   defaults. *)
 
 type settings = {
   arch : Jide_jasmin.Adapter.arch;
@@ -721,9 +721,10 @@ let analyse t ~uri (document : Document.t) key =
     }
   in
   match
-    (* The context comes first: the check that follows is run in it, which is
-       the rule of design 8.4. The files before the document are the chain
-       without its last element, which is the document itself. *)
+    (* The context comes first: a file an entry requires is checked in the
+       context of that entry, so the check that follows is run in it. The
+       files before the document are the chain without its last element,
+       which is the document itself. *)
     let context = context_of t document in
     let in_context =
       match List.rev (Context.chain context) with

@@ -870,7 +870,7 @@ let test_a_name_out_of_scope_is_not_a_collision () =
             }\n")
 
 (* Rename and rename back restore the text exactly. This is the text-level
-   statement the gate asks for: the two edits composed are the identity. *)
+   requirement on rename: the two edits composed are the identity. *)
 let test_rename_and_rename_back_restores_the_text () =
   let file = "/work/variables.jazz" in
   match
@@ -1831,9 +1831,9 @@ let test_a_rename_to_the_same_name_changes_nothing () =
       check "same name: the outer occurrences are still edits"
         (edit_count edits = 3)
 
-(* The gate's statement, measured case by case: the verdict is the compiler's
-   own list, errors and warnings alike, and it is the same list before and
-   after the rename. It is compared with the list the server publishes, so the
+(* The requirement on rename, measured case by case: the verdict is the
+   compiler's own list, errors and warnings alike, and it is the same list
+   before and after the rename. It is compared with the list the server publishes, so the
    test measures what a client sees rather than a filtered view of it. A case
    the rule refuses writes no text, so its verdict cannot change; it stays in
    the list so that a rule which stops refusing cannot pass this test. *)

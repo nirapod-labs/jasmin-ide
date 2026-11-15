@@ -1,8 +1,7 @@
-; Lifecycle tests of the protocol loop, layer 2 and layer 3 of the test
-; design: the test client drives the built server for the replies, and a
-; framed pipe drives it where only bytes will do (the exit codes and the
-; frame reader's refusals). Both executables are dependencies, not
-; libraries, because every test runs the real binary.
+; Lifecycle tests of the protocol loop: the test client drives the built server
+; for the replies, and a framed pipe drives it where only bytes will do (the
+; exit codes and the frame reader's refusals). Both executables are
+; dependencies, not libraries, because every test runs the real binary.
 ;
 ; Every input of these tests is either a `.t` file, which dune adds to the
 ; stanza itself, or one of the six entries below: the three helpers the tests

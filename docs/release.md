@@ -3,9 +3,10 @@
 A release is one version of the server and both editor extensions, built
 from one signed tag, published with the SHA-256 of every file.
 
-Nothing has been released yet, and the GitHub workflows have never run: the
-repository is private. What follows works locally today. Publishing,
-attestations and the registries wait for the repository to be public.
+Nothing has been released yet. The build workflow runs on every push; the
+release workflow runs on a signed tag and has not run yet. Publishing to the
+VS Code Marketplace and Open VSX also needs the publisher accounts, which are
+not set up yet.
 
 ## The version
 
@@ -42,7 +43,8 @@ because GMP is linked statically under the LGPL.
 
 ## Steps
 
-1. Set the version and commit it.
+1. Set the version, move the fragments under `changes/` into a new section of
+   `CHANGES.md`, delete them, and commit.
 2. On each build host, build its platform into one directory:
    `make release-static RELEASE_DIR=<dir>`, or
    `scripts/build-static.sh <platform> <dir>/jasmin-lsp-<version>-<platform>`.

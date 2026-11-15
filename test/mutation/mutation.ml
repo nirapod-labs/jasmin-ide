@@ -2,7 +2,7 @@
 
     For a deterministic sample of a Jasmin corpus, mutate one token at a
     time, run each mutated text through the adapter, and print the three
-    criteria of the recovery gate with the distribution behind them:
+    recovery criteria with the distribution behind them:
 
     - no exception or hang;
     - the outline of the items away from the edit unchanged, or the case
@@ -12,7 +12,7 @@
       the first ({!Witness}); a changed outline with no witness fails;
     - at most two errors per single-token mutation.
 
-    The corpus is an argument. Nothing about this host or about this lab is
+    The corpus is an argument. Nothing about this host or about any checkout is
     written into the program, and a run writes nothing: it prints.
 
     Every check runs in its own process with a wall-clock budget, so a hang

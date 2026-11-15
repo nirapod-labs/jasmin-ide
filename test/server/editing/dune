@@ -1,10 +1,10 @@
 ; Editing-request tests: the seven requests the controller routes to the
-; engine's editing features, layer 2 of the test design. Each `.t` drives the
-; built server through the test client over pipes, so every test runs the real
-; binary and the record is the protocol's own bytes, normalised.
+; engine's editing features. Each `.t` drives the built server through the
+; test client over pipes, so every test runs the real binary and the record is
+; the protocol's own bytes, normalised.
 ;
 ; What these tests pin is the routing and the empty answer, not what the
-; engine computes: the engine's own answers are its lane's tests. A routed
+; engine computes: the engine's own answers are tested in engine/test. A routed
 ; request is no longer MethodNotFound, so a client that asks before the
 ; engine can answer sees the empty answer its request has in the protocol
 ; (null, or an empty list) and never an error, except for rename, which has

@@ -1,4 +1,4 @@
-The resolver half of the parity gate, `typed_uses.exe --corpus`, over a
+The resolver half of the parity check, `typed_uses.exe --corpus`, over a
 corpus this test writes itself, so the run's verdicts are checked on every
 tree. The corpus has two entries: the
 first requires a library, and the second requires a library of its own and
@@ -51,7 +51,7 @@ that follows the measurement fails as it must, and the run passes.
   uses: 2 files, 2 checks; the check accepts 2, refuses 0
   uses: distinct typed variable uses per architecture: 20; measured: 20; the compiler's declaration in its namespace: 20; elsewhere: 0; unresolved: 0; other-name: 0; misplaced: 0; excluded: 0 (flag 0, temporary 0); unchecked: 0
   uses: uses of files a top-level require reaches: 15 (in 3 distinct files; 2 of them are not checked directly, with 9 uses)
-  uses: the gate's measure: 20 of 20 measured uses are the compiler's declaration in their own namespace (100.0000%)
+  uses: the measure: 20 of 20 measured uses are the compiler's declaration in their own namespace (100.0000%)
   uses: by folder: typed, measured, same, elsewhere, unresolved, other-name, misplaced, excluded, unchecked
   uses:   x86-64: 20 typed, 20 measured, 20 same, 0 elsewhere, 0 unresolved, 0 other-name, 0 misplaced, 0 excluded, 0 unchecked
   uses: every measured typed use of every accepted file is the compiler's declaration in its own namespace
@@ -59,7 +59,7 @@ that follows the measurement fails as it must, and the run passes.
   uses: distinct typed variable uses per architecture: 20; measured: 20; the compiler's declaration in its namespace: 18; elsewhere: 2; unresolved: 0; other-name: 0; misplaced: 0; excluded: 0 (flag 0, temporary 0); unchecked: 0
   uses: uses of files a top-level require reaches: 15 (in 3 distinct files; 2 of them are not checked directly, with 9 uses)
   uses: negative control: 1 use(s) are judged differently by two checks of one architecture, since a planted use of a file is reached unplanted from another check
-  uses: the gate's measure: 18 of 20 measured uses are the compiler's declaration in their own namespace (90.0000%)
+  uses: the measure: 18 of 20 measured uses are the compiler's declaration in their own namespace (90.0000%)
   uses: by folder: typed, measured, same, elsewhere, unresolved, other-name, misplaced, excluded, unchecked
   uses:   x86-64: 20 typed, 20 measured, 18 same, 2 elsewhere, 0 unresolved, 0 other-name, 0 misplaced, 0 excluded, 0 unchecked
   uses: negative control: a wrong binding was planted in each of the 2 accepted checks that have a measured use, and the comparison reported it in 2; the run fails, as it must
@@ -76,7 +76,7 @@ planted binding is reported, and the run fails, as it must.
   uses: distinct typed variable uses per architecture: 20; measured: 20; the compiler's declaration in its namespace: 18; elsewhere: 2; unresolved: 0; other-name: 0; misplaced: 0; excluded: 0 (flag 0, temporary 0); unchecked: 0
   uses: uses of files a top-level require reaches: 15 (in 3 distinct files; 2 of them are not checked directly, with 9 uses)
   uses: negative control: 1 use(s) are judged differently by two checks of one architecture, since a planted use of a file is reached unplanted from another check
-  uses: the gate's measure: 18 of 20 measured uses are the compiler's declaration in their own namespace (90.0000%)
+  uses: the measure: 18 of 20 measured uses are the compiler's declaration in their own namespace (90.0000%)
   uses: by folder: typed, measured, same, elsewhere, unresolved, other-name, misplaced, excluded, unchecked
   uses:   x86-64: 20 typed, 20 measured, 18 same, 2 elsewhere, 0 unresolved, 0 other-name, 0 misplaced, 0 excluded, 0 unchecked
   uses: negative control: a wrong binding was planted in each of the 2 accepted checks that have a measured use, and the comparison reported it in 2; the run fails, as it must
@@ -96,7 +96,7 @@ A file the check refuses has no compiler-side answer, so it fails the run.
   uses: 2 files, 2 checks; the check accepts 1, refuses 1
   uses: distinct typed variable uses per architecture: 12; measured: 12; the compiler's declaration in its namespace: 12; elsewhere: 0; unresolved: 0; other-name: 0; misplaced: 0; excluded: 0 (flag 0, temporary 0); unchecked: 0
   uses: uses of files a top-level require reaches: 6 (in 1 distinct files; 1 of them are not checked directly, with 6 uses)
-  uses: the gate's measure: 12 of 12 measured uses are the compiler's declaration in their own namespace (100.0000%)
+  uses: the measure: 12 of 12 measured uses are the compiler's declaration in their own namespace (100.0000%)
   uses: by folder: typed, measured, same, elsewhere, unresolved, other-name, misplaced, excluded, unchecked
   uses:   x86-64: 12 typed, 12 measured, 12 same, 0 elsewhere, 0 unresolved, 0 other-name, 0 misplaced, 0 excluded, 0 unchecked
   uses: different success/x86-64/broken.jazz (x86-64): the check does not accept it: 2:3 unknown variable: `y'

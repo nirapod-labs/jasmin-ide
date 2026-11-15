@@ -106,9 +106,10 @@ let serve () =
   (* Completion and signature help answer from the snapshot the last check
      left: {!Jide_engine.Engine.snapshot} reads what that check built and does
      no work of its own, so neither request costs a parse, a type or a file
-     read, and both answer while the file is being edited. The other five
-     requests are still answered with the empty answer the protocol has for
-     each, and a rename, which has no empty answer, with a refusal. *)
+     read, and both answer while the file is being edited. Document highlights
+     read the same snapshot. Workspace symbols and semantic tokens have no
+     answer yet, are not advertised, and get the protocol's empty answer if a
+     client asks anyway. *)
   let completion ~uri ~byte =
     match Jide_engine.Engine.snapshot engine ~uri with
     | Some snapshot ->
@@ -137,7 +138,23 @@ let serve () =
     Jide_controller.Features.make ~completion ~signature_help ~prepare_rename
       ~rename
       ~workspace_symbols:(fun ~query:_ -> None)
-      ~highlights:(fun ~uri:_ ~byte:_ -> None)
+      ~highlights:(fun ~uri ~byte ->
+        match Jide_engine.Engine.snapshot engine ~uri with
+        | Some snapshot ->
+            Some
+              (List.map
+                 (fun (h : Jide_engine.Highlight.highlight) ->
+                   {
+                     Jide_engine.Types.span = h.span;
+                     kind =
+                       (match h.kind with
+                       | Jide_engine.Highlight.Text -> Jide_engine.Types.Text_
+                       | Read -> Read
+                       | Write -> Write);
+                   })
+                 (Jide_engine.Highlight.at ~index:snapshot.index
+                    ~resolve:snapshot.resolve ~byte))
+        | None -> None)
       ~semantic_tokens:(fun ~uri:_ -> None)
       ()
   in

@@ -3,14 +3,13 @@
 #
 #   sh scripts/check-workflows.sh [<directory>]
 #
-# The workflows do not run while the repository is private, so what a run
-# would prove is checked by reading them: actionlint, when installed, for the
-# syntax and the expressions; then the rules below. Every violation is one
+# What can go wrong in a workflow before it runs is checked by reading it:
+# actionlint, when installed, for the syntax and the expressions; then the
+# rules below. Every violation is one
 # line, `<rule>: <file>:<line>: <what>`, and any violation fails the run.
 #
-#   pins         an action is pinned to a 40-character commit SHA, or every
-#                action still holds the placeholder PIN that the first public
-#                release replaces; a tag, a branch or a mix of the two fails.
+#   pins         every action is pinned to a 40-character commit SHA; a tag or
+#                a branch fails.
 #   permissions  each workflow sets `contents: read` at its top level and
 #                grants no write there, so a write is always a job's own.
 #   make         every `make <target>` a step runs is a target of the Makefile.
@@ -43,10 +42,7 @@ for file in "$dir"/*.yml; do
 		{ line = $0; sub(/[ \t]#.*/, "", line) }
 		line ~ /uses: / && line !~ /uses: \.\// && line !~ /docker:\/\// {
 			ref = line; sub(/.*@/, "", ref); sub(/[ \t].*/, "", ref)
-			if (ref == "PIN") placeholder++
-			else if (ref ~ /^[0-9a-f]{40}$/) pinned++
-			else bad("pins", "not pinned to a commit: " ref)
-			if (placeholder && pinned) bad("pins", "some actions pinned and some still PIN")
+			if (ref !~ /^[0-9a-f]{40}$/) bad("pins", "not pinned to a commit: " ref)
 		}
 		function word(at) { w = substr(line, at); sub(/[ \t].*/, "", w); return w }
 		match(line, /(^|[ ;&|(])make [a-z]/) && line !~ /make -C/ {

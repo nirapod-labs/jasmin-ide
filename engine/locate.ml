@@ -1,8 +1,8 @@
 (* Navigation and hover over the snapshot, and the seam the controller calls.
 
-   Section 9 of the design keeps a syntax index and a resolver beside the
-   compiler's typed program, and section 10 answers definition, references,
-   the outline and hover from them. This module is the reading side of that:
+   The engine keeps a syntax index and a resolver beside the compiler's typed
+   program, and answers definition, references, the outline and hover from
+   them. This module is the reading side of that:
    the snapshot is built once, and each question is a lookup in it.
 
    Nothing here parses, resolves or types. The one thing a caller brings is

@@ -1,11 +1,8 @@
 # Build, attest and draft a release from a signed tag.
 #
-# Nothing here has ever run. The project is private and has no remote, so this
-# file is checked by inspection only, with `scripts/check-workflows.sh`.
-#
-# The gate is the `release` environment. It carries a protection rule whose
-# reviewer is the person who decides that a release happens, so no job below
-# runs until that approval lands. That the tag is signed is a repository tag
+# Every job that builds or publishes runs in the `release` environment. It
+# carries a protection rule whose reviewer is the person who decides that a
+# release happens, so no such job runs until that approval lands. That the tag is signed is a repository tag
 # rule, not a line in this file.
 #
 # Permissions are read-only at the top of the file. Only the jobs that write
@@ -17,14 +14,11 @@
 #   id-token: write      the two publishing jobs and the attestation job. It
 #                        mints an identity token: a registry checks one, and the
 #                        attestation action uses one to obtain the certificate
-#                        it signs with. Nothing else in this file may hold it,
-#                        and `scripts/check-workflows.sh` reads every job's
-#                        effective permissions to say so.
+#                        it signs with. Nothing else in this file holds it.
 #
-# The attestation job is the one place the design's "`id-token: write` only in
-# the publishing jobs" is read wider than its words: an attestation is itself a
-# publication, to the transparency log, so the job takes the same release gate
-# and no other job may hold either scope.
+# The attestation job holds `id-token: write` although it publishes no
+# package: an attestation is itself a publication, to the transparency log, so
+# the job takes the same approval and no other job may hold either scope.
 
 name: release
 
@@ -35,44 +29,6 @@ on:
 
 permissions:
   contents: read
-
-# Every action this workflow uses, with the version a reader recognises and the
-# commit its `uses:` line must name.
-#
-# GitHub runs no expression on a `uses:` line, so the value below cannot be
-# substituted into it: the pair is a record, and the `uses:` line carries the
-# same value literally. Each `<NAME>_SHA` is the string PIN until one fill-in
-# pass replaces it here and on the `uses:` lines in the same commit.
-# `scripts/check-workflows.sh` fails while any pin is PIN and fails when the
-# two places disagree, so a half-finished pass is caught rather than shipped.
-env:
-  CHECKOUT_ACTION: actions/checkout
-  CHECKOUT_VERSION: v4
-  CHECKOUT_SHA: 11d5960a326750d5838078e36cf38b85af677262
-
-  SETUP_OCAML_ACTION: ocaml/setup-ocaml
-  SETUP_OCAML_VERSION: v3
-  SETUP_OCAML_SHA: ff66428f72b64472e749b22e0ad4dded4b2ddca6
-
-  SETUP_NODE_ACTION: actions/setup-node
-  SETUP_NODE_VERSION: v4
-  SETUP_NODE_SHA: 49933ea5288caeca8642d1e84afbd3f7d6820020
-
-  PNPM_SETUP_ACTION: pnpm/action-setup
-  PNPM_SETUP_VERSION: v4
-  PNPM_SETUP_SHA: fc06bc1257f339d1d5d8b3a19a8cae5388b55320
-
-  UPLOAD_ARTIFACT_ACTION: actions/upload-artifact
-  UPLOAD_ARTIFACT_VERSION: v4
-  UPLOAD_ARTIFACT_SHA: ea165f8d65b6e75b540449e92b4886f43607fa02
-
-  DOWNLOAD_ARTIFACT_ACTION: actions/download-artifact
-  DOWNLOAD_ARTIFACT_VERSION: v4
-  DOWNLOAD_ARTIFACT_SHA: d3f86a106a0bac45b974a628896c90dbdf5c8093
-
-  ATTEST_ACTION: actions/attest-build-provenance
-  ATTEST_VERSION: v2
-  ATTEST_SHA: e8998f949152b193b063cb0ec769d69d929409be
 
 jobs:
   # The two Linux architectures, each built inside an Alpine container.
@@ -103,7 +59,7 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - name: Check out
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Build twice in an Alpine container and check what is linked
         # The image is a tag, not a digest, and the packages `apk add` names
@@ -168,7 +124,7 @@ jobs:
           mv "$asset" "$asset.sha256" "$RUNNER_TEMP/release/"
 
       - name: Upload the asset
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: linux-${{ matrix.arch }}
           path: ${{ runner.temp }}/release/
@@ -183,7 +139,7 @@ jobs:
     environment: release
     steps:
       - name: Check out
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Set up OCaml
         uses: ocaml/setup-ocaml@ff66428f72b64472e749b22e0ad4dded4b2ddca6 # v3.9.1
@@ -262,7 +218,7 @@ jobs:
           mv "$asset" "$asset.sha256" "$RUNNER_TEMP/release/"
 
       - name: Upload the asset
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: macos-aarch64
           path: ${{ runner.temp }}/release/
@@ -290,10 +246,10 @@ jobs:
             runner: macos-15
     steps:
       - name: Check out
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Download this platform's binary
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: ${{ matrix.platform }}
           path: ${{ runner.temp }}/release
@@ -318,21 +274,21 @@ jobs:
     environment: release
     steps:
       - name: Check out
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "22"
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
           package_json_file: editor/code/package.json
           run_install: false
 
       - name: Download every platform's binary
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           path: ${{ runner.temp }}/assets
 
@@ -358,7 +314,7 @@ jobs:
           release=$RUNNER_TEMP/release
           mkdir -p "$release"
           version=${GITHUB_REF_NAME#v}
-          # The three servers, under the asset names the design fixes.
+          # The three servers, under their release asset names.
           for directory in "$RUNNER_TEMP"/assets/*/; do
             cp "$directory"jasmin-lsp-* "$release/"
           done
@@ -397,7 +353,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Upload the release files
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: release-files
           path: ${{ runner.temp }}/release/
@@ -411,13 +367,13 @@ jobs:
   # two publishing jobs allowed `id-token: write`: the action signs with a
   # certificate it obtains through the runner's identity token, so it needs
   # that scope as well as `attestations: write` to write the attestation. It
-  # stays behind the `release` gate, and no step of another job may hold
+  # waits for the `release` approval, and no step of another job may hold
   # either scope.
   #
   # Attestation is on unless a maintainer turns it off: `ATTEST_ENABLED` is a
   # repository variable, and setting it to `false` skips this job. Nothing
-  # waits on the answer either way — the draft depends on `packages` and its
-  # SHA256SUMS, not on this job — so a skipped or failed attestation cannot
+  # waits on the answer either way (the draft depends on `packages` and its
+  # SHA256SUMS, not on this job), so a skipped or failed attestation cannot
   # stop a draft from existing, and a failed one is a red job in the run. The
   # release checklist asks for the attestations to be verified before anything
   # is published, which is where that red job is read.
@@ -433,13 +389,13 @@ jobs:
       id-token: write
     steps:
       - name: Download the release files
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: release-files
           path: ${{ runner.temp }}/release
 
       - name: Attest the build provenance of every file
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
         with:
           subject-path: ${{ runner.temp }}/release/*
 
@@ -458,7 +414,7 @@ jobs:
       contents: write
     steps:
       - name: Download the release files
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: release-files
           path: ${{ runner.temp }}/release
@@ -487,7 +443,7 @@ jobs:
   #
   # They are the only jobs in this directory with `id-token: write`: both
   # registries authenticate the workflow's identity token instead of a stored
-  # token, which is why the design allows it here and nowhere else.
+  # token, so they need it and no other job does.
   publish-vscode:
     name: publish to the VS Code Marketplace
     needs: [draft]
@@ -499,21 +455,21 @@ jobs:
       id-token: write
     steps:
       - name: Check out
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "22"
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
           package_json_file: editor/code/package.json
           run_install: false
 
       - name: Download the release files
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: release-files
           path: ${{ runner.temp }}/release
@@ -538,21 +494,21 @@ jobs:
       id-token: write
     steps:
       - name: Check out
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "22"
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
           package_json_file: editor/code/package.json
           run_install: false
 
       - name: Download the release files
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: release-files
           path: ${{ runner.temp }}/release

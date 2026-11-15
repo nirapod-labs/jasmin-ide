@@ -1,8 +1,8 @@
-(** The typed-use half of the resolver parity gate.
+(** The typed-use half of the resolver parity check.
 
-    The gate's clause is one sentence: 100% of typed variable uses in the corpus
+    The requirement is one sentence: 100% of typed variable uses in the corpus
     resolve to the compiler's declaration, its [v_dloc]. This program measures that
-    clause over one file. It runs the compiler's check ({!Jide_jasmin.Adapter.check}),
+    requirement over one file. It runs the compiler's check ({!Jide_jasmin.Adapter.check}),
     which leaves the typed facts of the file, and the engine's resolver over the same
     bytes, and for every typed use asks what the use's name names in the namespace the
     compiler typed the use in.
@@ -42,7 +42,7 @@
       every excluded use.
     - [unchecked]: a use of a file the check refused. The run fails on such a file.
 
-    The gate's percentage is over the measured uses. The run checks that the classes
+    The percentage is over the measured uses. The run checks that the classes
     add up to the typed uses, so no use leaves the tally.
 
     {2 Output}
@@ -201,7 +201,7 @@ type answer = {
       (** the first of them, [line:column message], for the run's output *)
   uses : int;  (** the typed variable occurrences of the checked file *)
   measured : int;
-      (** the uses the gate counts: same, elsewhere, unresolved, other-name and
+      (** the uses the percentage counts: same, elsewhere, unresolved, other-name and
           misplaced *)
   same : int;
       (** the ones the resolver answers with the compiler's declaration *)
@@ -1350,8 +1350,8 @@ let corpus_run ~negative (args : H.args) =
         d.conflicts;
   if measured > 0 then
     H.say
-      "the gate's measure: %d of %d measured uses are the compiler's \
-       declaration in their own namespace (%.4f%%)"
+      "the measure: %d of %d measured uses are the compiler's declaration in \
+       their own namespace (%.4f%%)"
       same measured
       (100. *. float same /. float measured);
   if d.typed > 0 then (

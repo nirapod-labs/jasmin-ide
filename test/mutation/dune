@@ -22,10 +22,10 @@
  (action
   (run %{exe:mutation.exe} --selftest)))
 
-; gate.t runs the harness over a corpus it writes itself: a passing run whose
+; verdicts.t runs the harness over a corpus it writes itself: a passing run whose
 ; one changed outline is proven impossible, and the negative control, a
 ; planted defect the run must fail on.
 
 (cram
- (applies_to gate)
+ (applies_to verdicts)
  (deps %{exe:mutation.exe}))

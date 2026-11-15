@@ -11,7 +11,7 @@ repository's own Makefile and scripts.
   >   build:
   >     runs-on: ubuntu-24.04
   >     steps:
-  >       - uses: actions/checkout@PIN
+  >       - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567
   >       - run: make build
   >       - run: sh scripts/check-version.sh
   > EOF
@@ -19,16 +19,12 @@ repository's own Makefile and scripts.
   $ check
   check-workflows: 1 workflows, every rule holds
 
-A pin to a SHA passes, a tag fails, and so does a mix of a SHA and the
-placeholder.
+A pin to a commit SHA passes; a tag or a branch fails.
 
-  $ sed 's/@PIN/@0123456789abcdef0123456789abcdef01234567/' wf/ci.yml > wf/b.yml; mv wf/b.yml wf/ci.yml
-  $ check
-  check-workflows: 1 workflows, every rule holds
-  $ printf '      - uses: actions/setup-node@v4\n      - uses: actions/cache@PIN\n' >> wf/ci.yml
+  $ printf '      - uses: actions/setup-node@v4\n      - uses: actions/cache@main\n' >> wf/ci.yml
   $ check
   pins: wf/ci.yml:12: not pinned to a commit: v4
-  pins: wf/ci.yml:13: some actions pinned and some still PIN
+  pins: wf/ci.yml:13: not pinned to a commit: main
   check-workflows: 2 violation(s)
   [1]
 

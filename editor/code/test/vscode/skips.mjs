@@ -19,15 +19,14 @@ export const expectedChecks = 2;
  * The checks that may be recorded as SKIP, each with the reason the skip is
  * allowed today. The key is the check's own name — `recordCheck`'s first
  * argument in `suite.js` — not the capability that was missing.
+ *
+ * The list is empty: the server advertises both completion and rename (with
+ * `prepareProvider`), so the window measures both checks and a skip of either
+ * fails the run.
+ *
+ * @type {Map<string, string>}
  */
-export const allowedSkips = new Map([
-  [
-    "rename",
-    "the engine advertises no renameProvider yet, so the client registers no rename provider and cannot send " +
-      "textDocument/prepareRename or textDocument/rename; advertising it is the rename lane's work, and this " +
-      "entry goes when it lands"
-  ]
-]);
+export const allowedSkips = new Map([]);
 
 /**
  * Decides the editing-help half of the run from the records the window wrote.

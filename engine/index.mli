@@ -3,9 +3,9 @@
     The compiler's typed program keeps each variable's declaration and each
     use, but it drops call-target names, intrinsic names, type-alias names and
     everything of an item that failed to type. So the engine keeps its own
-    index over the syntax tree (design section 9): every identifier
-    occurrence with its byte range and its kind, every declaration with its
-    name range and its item range, and the [require] edges.
+    index over the syntax tree: every identifier occurrence with its byte
+    range and its kind, every declaration with its name range and its item
+    range, and the [require] edges.
 
     This module knows syntax only. {!Resolve} walks the same trees and
     decides what each occurrence names. *)
@@ -119,7 +119,7 @@ val normalise : string -> string
     name the same file through different symbolic links stay different. *)
 
 val equal_declaration : declaration -> declaration -> bool
-(** [equal_declaration a b] is the identity of design section 9: the same
+(** [equal_declaration a b] is the identity of a declaration: the same
     absolute file and the same declaration byte offset. A compiler unique id
     is never part of it. *)
 

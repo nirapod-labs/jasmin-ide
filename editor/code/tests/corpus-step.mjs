@@ -13,7 +13,7 @@
 // source is the same "green having done nothing" hazard as naming none.
 //
 // `make ci` sets JASMIN_TM_CORPUS_REQUIRED, which the instrument reads, so a
-// gate run with no corpus is exit 1 from the instrument and red here. That is
+// `make ci` run with no corpus is exit 1 from the instrument and red here. That is
 // the point: a green `make ci` log must never be able to mean the tokenizer
 // read nothing.
 
@@ -38,8 +38,8 @@ if (run.error) {
   );
   process.exitCode = 0;
 } else {
-  // A tokenizer error, a corpus path that names nothing, or a gate run with no
-  // corpus: all of them are failures of the step, with the instrument's own
+  // A tokenizer error, a corpus path that names nothing, or a `make ci` run with
+  // no corpus: all of them are failures of the step, with the instrument's own
   // message and status.
   process.exitCode = typeof run.status === "number" ? run.status : 1;
 }

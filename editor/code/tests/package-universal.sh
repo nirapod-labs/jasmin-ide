@@ -25,7 +25,7 @@
 #     package for every platform.
 #
 # The archive is read with the reader `package-check.mjs` uses, so a package
-# that passes here is read the same way by the gate.
+# that passes here is read the same way by the packaging check.
 #
 # Exit status: 0 when the package is correct or was skipped, 1 when it is not.
 set -u

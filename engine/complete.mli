@@ -39,10 +39,9 @@ type trigger =
   | Hash
   | Colon
       (** The character a client triggered the request with, when it names one.
-    The design gives completion the two trigger characters [#] and [:]. A [#]
-    asks for the intrinsics of the document's architecture, which is how a
-    primitive call is written, and a [:] asks for the annotation keys, the
-    fixed list the design assigns to that trigger. *)
+    Completion has two trigger characters, [#] and [:]. A [#] asks for the
+    intrinsics of the document's architecture, which is how a primitive call
+    is written, and a [:] asks for the annotation keys, a fixed list. *)
 
 val keywords : string list
 (** The lexer's own keyword table, in the lexer's order and without the

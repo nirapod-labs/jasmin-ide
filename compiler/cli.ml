@@ -15,9 +15,9 @@ let read_opt path =
    files under the project root, which is the directory of the nearest
    jasmin.project at or above the file. With no project file above it the
    search stays in the file's own directory, because there is no root to
-   bound a walk up the tree. A .jazz file is an entry by default (design 8.4),
-   so it is checked on its own and nothing is searched; a file no entry
-   requires is alone, which is the empty list. *)
+   bound a walk up the tree. A .jazz file is an entry by default, so it is
+   checked on its own and nothing is searched; a file no entry requires is
+   alone, which is the empty list. *)
 let context_of ~(idirs : (string * string) list) (file : string) : string list =
   (* The walk reads a [from NAME require] through the same bindings the check
      uses, [JASMINPATH]'s included. *)

@@ -93,7 +93,7 @@ let starts_with ~(prefix : string) (label : string) =
 (* What the word being typed is completed as. A [#] written directly before
    it asks for the intrinsics of the document's architecture, which is how a
    primitive call is written. A [#] followed by an opening bracket asks for the
-   annotation keys, and so does the design's [:] trigger. The [#] is read from
+   annotation keys, and so does a [:] trigger. The [#] is read from
    the text when the client names no trigger, which is what a request arriving
    after the character looks like when the client sends no trigger kind. *)
 type context = Names | Intrinsics | Annotation_keys
@@ -330,7 +330,7 @@ let label (callee : string) (parameters : string list) (results : string list) =
 
 (* The signature the compiler left for one declaration. Facts hold the items
    of one checked file, so they answer only for a declaration of that file,
-   and the identity is the design's: the file and the byte where the name
+   and a declaration is identified by its file and the byte where its name
    starts. *)
 let facts_signature (facts : Facts.t) (index : Index.t)
     (declaration : Index.declaration) =

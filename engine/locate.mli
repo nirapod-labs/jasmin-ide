@@ -4,7 +4,7 @@
     Every answer comes from the snapshot the engine keeps of a document: the
     index of each file the resolution reached, the answer the resolver gave
     for each occurrence in it and, where a check left them, the typed facts of
-    a file (design sections 9 and 10). Nothing here parses, resolves or types
+    a file. Nothing here parses, resolves or types
     a text again, so the four questions cannot disagree with each other or
     with the resolver: they read one table.
 

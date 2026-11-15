@@ -647,8 +647,8 @@ let test_an_exception_in_the_context_stage_is_internal () =
     | None -> false)
 
 (* The snapshot: what the last check built, read back without a second check.
-   These four tests are the contract the completion and signature-help lanes
-   are written against, so each of them names one half of it: nothing is
+   These four tests are the contract completion and signature help are
+   written against, so each of them names one half of it: nothing is
    analysed to answer, the answer is the last analysis's, it survives a broken
    file, and a caller can see when it is stale. *)
 
@@ -786,7 +786,7 @@ let test_snapshot_after_a_check () =
                 && declaration.Jide_engine.Index.name_span
                      .Jide_lang.Span.start_byte <> byte
             | _ -> false));
-      (* The completion lane's own call, over the snapshot alone: the function
+      (* The call completion makes, over the snapshot alone: the function
          declared in the file is offered as a name in scope, and no check ran
          to answer it. The offset is the start of the body of the second
          function, where both functions are declared already. *)
@@ -868,9 +868,8 @@ let test_snapshot_is_the_last_analysis () =
 
 (* (d) A file that does not parse still yields a snapshot, and its index still
    holds the items the recovering parser kept: that is what the outline and
-   hover read while the file is broken (design section 1 goal 2, and the
-   invariant that a broken file keeps them working). The broken statement is
-   dropped, so the function is still there. *)
+   hover read while the file is broken, so a broken file keeps them working.
+   The broken statement is dropped, so the function is still there. *)
 let test_snapshot_of_a_broken_file () =
   let calls = ref 0 in
   let engine = Jide_engine.Engine.create ~check:(counting_check calls) () in

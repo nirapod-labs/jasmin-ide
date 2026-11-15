@@ -884,8 +884,8 @@ let test_unterminated_comment_keeps_the_prefix () =
     (keeps_the_compilers_error text parsed);
   check "comment prefix: no recovery was needed" (recoveries parsed = 0)
 
-(* A function whose closing brace is missing, and nothing after it. The
-   design closes the block with a virtual brace so the header and the body
+(* A function whose closing brace is missing, and nothing after it. Recovery
+   closes the block with a virtual brace so the header and the body
    read so far stay in the tree; a drop here loses the file's only item. *)
 let test_virtual_brace_keeps_the_function () =
   let text = "fn only(reg u32 a) -> reg u32 {\n  return a;\n" in

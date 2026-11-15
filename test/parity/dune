@@ -2,7 +2,7 @@
 ; printer. It needs a corpus and a compiler, neither of which this repository
 ; carries, so `dune runtest` runs only its self-test, which checks this
 ; program's own plumbing and not parity; `make parity-tree` runs the
-; measurement (test/parity/tree.sh) and is where the gate's numbers come from.
+; measurement (test/parity/tree.sh) and is where the parity numbers come from.
 
 (executable
  (name parity_tree)
@@ -28,7 +28,7 @@
 ; names. It needs a corpus, which this repository does not carry, so
 ; `dune runtest` runs only its self-test, over small sources it builds itself;
 ; `make parity-uses` runs the measurement (test/parity/uses.sh) and is where
-; the gate's numbers come from.
+; the parity numbers come from.
 
 (executable
  (name typed_uses)

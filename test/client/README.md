@@ -3,9 +3,9 @@
 A small client that speaks the language server protocol over the server's
 standard input and output, prints one normalised line per reply, and turns
 every failure into an exit code. The protocol suites drive a server with it,
-so that protocol tests are cram tests (`design/ARCHITECTURE.md` section 13,
-layer 2). It is test infrastructure and is never linked into the server: its
-only dependencies are `yojson` and the standard library.
+so that protocol tests are cram tests. It is test infrastructure and is never
+linked into the server: its only dependencies are `yojson` and the standard
+library.
 
 ## Usage
 

@@ -6,17 +6,16 @@
 // the `LanguageClient` object, the client capabilities VS Code supplies, and
 // the window's own teardown of the extension. It starts a window, so it is not
 // part of `pnpm run validate`: `pnpm run test:vscode` runs it by hand and
-// `make editor-vscode` runs it for the gate. The first run downloads a VS Code
-// build into `.vscode-test/` beside this extension (gitignored), which is the
-// build-and-test download the gate allows; a host where that is impossible
-// fails the gate step unless the caller allows that skip by name
-// (`JASMIN_ALLOWED_SKIPS`), so a gate log never reads green over a window that
-// did not open.
+// `make editor-vscode` runs it as a CI step. The first run downloads a VS Code
+// build into `.vscode-test/` beside this extension (gitignored), the one
+// download the build and test steps make; a host where that is impossible
+// fails the step unless the caller allows that skip by name
+// (`JASMIN_ALLOWED_SKIPS`), so the log of a run never reads green over a window
+// that did not open.
 //
-// `VSCODE_TEST_CACHE` names another directory for that download, and the lab
-// sets it to one shared directory, so that every worktree reads the same VS
-// Code build instead of downloading its own copy into `.vscode-test/`. Unset,
-// the cache is `.vscode-test/` beside this extension, as it always was.
+// `VSCODE_TEST_CACHE` names another directory for that download; setting it to
+// one shared directory lets every worktree read the same VS Code build instead
+// of downloading its own copy into `.vscode-test/`. Unset, the cache is `.vscode-test/` beside this extension, as it always was.
 //
 // The window records everything the extension writes to its output channel
 // into the capture file named by `JASMIN_IDE_VSCODE_CAPTURE`, and the checks
@@ -50,8 +49,8 @@ const repositoryRoot = fileURLToPath(new URL("../../../..", import.meta.url));
 const builtServer = join(repositoryRoot, "_build", "default", "lsp-server", "native", "main.exe");
 const serverPath = process.env.JASMIN_LSP ?? builtServer;
 
-// A fixed VS Code release, so that a gate log names the editor it was measured
-// with. `JASMIN_IDE_VSCODE_VERSION` overrides it for a one-off run.
+// A fixed VS Code release, so that the log of a run names the editor it was
+// measured with. `JASMIN_IDE_VSCODE_VERSION` overrides it for a one-off run.
 const vscodeVersion = process.env.JASMIN_IDE_VSCODE_VERSION ?? "1.145.2";
 
 try {
@@ -235,7 +234,7 @@ const summary = captured.find((entry) => entry.level === "summary");
 //
 // Each check also names the line it looked for, so a FAIL prints the terminal
 // line that never arrived rather than only the property that was hoped for. A
-// reader of the gate log does not have the capture file, so the name of the
+// reader of the log does not have the capture file, so the name of the
 // missing line is the whole diagnosis.
 const checks = [
   {
@@ -366,7 +365,7 @@ for (const check of checks) {
 for (const check of editingHelp) {
   console.log(`vscode-test: ${check.status} ${check.check}: ${check.detail}`);
   if (check.status === "SKIP") {
-    // The reason belongs in the log: a reader of the gate's output has only
+    // The reason belongs in the log: a reader of the run's output has only
     // this line to tell an expected skip from a check that stopped happening.
     const reason = allowedSkips.get(check.check);
     console.log(
@@ -444,7 +443,7 @@ if (failure !== undefined) {
   );
 }
 
-// The raw record, whatever the verdict: the gate keeps the log, and a reader
+// The raw record, whatever the verdict: the log is kept, and a reader
 // must be able to check the lines the checks above were made from.
 if (captured.length === 0) {
   console.log("vscode-test: the window captured nothing, so no lifecycle step can be shown");

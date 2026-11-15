@@ -39,10 +39,9 @@ project.
 
 ## Reporting a problem
 
-The repository is private until the first public release, and there is no
-conduct contact published yet. The contact is published with the first public
-release, in this file. Until then, raise a conduct problem directly with the
-person who maintains the repository.
+There is no dedicated conduct address yet. Raise a conduct problem privately
+with a maintainer of the repository, by email or by a direct message, rather
+than in a public thread.
 
 Report what happened, where, and who was involved. A report is read by the
 maintainer and is not shared more widely than it needs to be.

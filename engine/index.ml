@@ -1,7 +1,6 @@
 (* The index of one untyped tree: identifiers, declarations and requires.
 
-   Section 9 of the design asks for the syntax tree the compiler discards.
-   The walk here is deliberately syntax-shaped: it visits every [pident] the
+   The engine keeps the syntax tree the compiler discards. The walk here is deliberately syntax-shaped: it visits every [pident] the
    grammar has, in source order, and never asks what a name means. The
    resolver does that, over the same tree, with pretyping's rules. *)
 
@@ -125,7 +124,7 @@ let normalise (path : string) =
 (* [A::B::x] has one range in the compiler's location. The last segment is
    read from the source bytes: it ends where the identifier ends and starts
    one segment length before it, and only when the two bytes before it are
-   [::]. A space around [::] gives the whole range, as the design says. *)
+   [::]. A space around [::] gives the whole range. *)
 let last_segment (text : string) (span : Jide_lang.Span.t) (name : string) =
   let name_length = String.length name in
   let rec find index =

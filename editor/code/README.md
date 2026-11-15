@@ -120,8 +120,8 @@ evidence; the runner reads it back after the window has closed. `make
 editor-vscode` runs the same check in the local CI; a host that cannot download
 VS Code gets a printed skip only when the caller allows that skip by name
 (`make editor-vscode JASMIN_ALLOWED_SKIPS=editor-vscode`), and without it the
-step fails, so a gate log cannot claim the editor half was measured when it was
-not.
+step fails, so the log of a run cannot claim the editor half was measured when
+it was not.
 
 ## Packaging
 

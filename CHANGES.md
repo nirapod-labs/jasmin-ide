@@ -9,8 +9,8 @@ numbers follow `0.MINOR.PATCH` until 1.0.
 
 Entries are not written here by hand. Each change adds one file under
 `changes/`, named `<area>-<short-slug>.md`, with the area one of `server`,
-`vscode`, `zed` or `grammar`. At release time the fragments are collected into
-a new section below and the fragment files are removed. `changes/README.md`
+`vscode`, `zed` or `grammar`. When a release is cut, the fragments are moved
+into a new section below by hand and the fragment files are removed. `changes/README.md`
 gives the shape of a fragment.
 
 A fragment says what a user sees, in one or two plain sentences, without

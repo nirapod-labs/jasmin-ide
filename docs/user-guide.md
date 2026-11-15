@@ -18,8 +18,8 @@ library, so its errors are the compiler's, at the compiler's places.
   would clash with another declaration is refused, and the message says
   which one.
 
-Workspace symbols, document highlights and semantic tokens are answered with
-an empty result for now, so the editor shows nothing for them.
+Document highlights light every use of the name under the cursor in the same
+file. Workspace symbols and semantic tokens are not offered yet.
 
 ## Installing
 

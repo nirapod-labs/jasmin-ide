@@ -2,7 +2,7 @@
 are the ones the binary has: the default serve mode and `check`. Those are
 the only two, so the test asks for both and for no third — a mode named in
 the help and not implemented would be a lie in the one place a reader looks,
-and a mode implemented and not named is the defect this card fixes.
+and a mode implemented and not named would be hidden from that reader.
 
 The options listed are `--version`, `--help` and `--stdio`; the check mode's
 own options stay `jasmin-lsp check --help`, which the block says, and which

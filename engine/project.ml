@@ -128,7 +128,7 @@ let apply_key ~directory ~on_disk ~complain ~set_once ~line ~key ~key_span
      there. Both questions are asked only when the text came from a named
      file: a relative path means nothing without the directory that holds it,
      and guessing one would resolve against the process's working directory,
-     which the design forbids. *)
+     which has nothing to do with the project. *)
   let exists path = Sys.file_exists path in
   match key with
   | "arch" -> (
@@ -155,7 +155,7 @@ let apply_key ~directory ~on_disk ~complain ~set_once ~line ~key ~key_span
       (* The value holds a second [=]: the first one on the line separates the
          key from the value, and the first one of the value separates the name
          from the path. A value with no second [=] is one mistake, reported
-         once, and with the design's own message for it: a value that has to
+         once, and with the message for a malformed line: a value that has to
          hold a [key = value] pair of its own and does not is missing the very
          thing that message names. An [include] accumulates, so writing it
          twice binds two names in the order the file gives them. *)

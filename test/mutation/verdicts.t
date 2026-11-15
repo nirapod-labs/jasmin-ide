@@ -1,5 +1,5 @@
 The recovery mutation harness over a corpus this test writes itself, so the
-gate's own verdicts are checked on every tree: a passing run, where every
+harness's own verdicts are checked on every tree: a passing run, where every
 case whose outline changed has a witness that no parser could have kept it,
 and the negative control, where a defect a parser could avoid is planted in
 the outline under test and the run must fail.

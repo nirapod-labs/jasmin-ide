@@ -29,9 +29,9 @@
 
     It also routes the seven editing requests of {!Features}, and advertises
     them: completion with the trigger characters [#] and [:], signature help
-    with [(] and [,], rename with its prepare step, workspace symbols,
-    document highlights, and semantic tokens with the legend they are
-    encoded by. Each one parses its parameters, forces a check when the
+    with [(] and [,], rename with its prepare step, and document highlights.
+    Workspace symbols and semantic tokens are routed but not advertised,
+    because the engine has no answer for them yet. Each one parses its parameters, forces a check when the
     document's text is newer than its last analysis, and answers the engine's
     answer, or the empty answer the protocol has for an answer there is
     none: never an error for an empty answer.

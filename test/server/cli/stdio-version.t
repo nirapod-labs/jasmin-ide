@@ -6,8 +6,8 @@ because `--version` and `--help` already ignore every word after them; it is
 pinned here all the same, so that a later reader cannot narrow either word to
 the front of the command line without a test saying so.
 
-The line is the `--version` line itself, one line, with the shape
-`design/INFRA.md` section 2 asks for:
+The line is the `--version` line itself: one line, with the server version,
+the Jasmin version and the source that Jasmin was built from:
 
   $ ../../../lsp-server/native/main.exe --stdio --version > out.txt 2> err.txt; echo "status $?"
   status 0
@@ -15,7 +15,7 @@ The line is the `--version` line itself, one line, with the shape
   1
   $ wc -c < err.txt | tr -d ' '
   0
-  $ grep -cE '^jasmin-lsp [0-9]+\.[0-9]+\.[0-9]+ \(Jasmin Compiler [0-9]{4}\.[0-9]{2}\.[0-9]+, built from (vendored release [0-9]{4}\.[0-9]{2}\.[0-9]+|installed library)\)$' out.txt
+  $ grep -cE '^jasmin-lsp [0-9]+\.[0-9]+\.[0-9]+ \(Jasmin Compiler [0-9]{4}\.[0-9]{2}\.[0-9]+[^,]*, built from (vendored release [0-9]{4}\.[0-9]{2}\.[0-9]+|vendored tarball sha256:[0-9a-f]{12}|installed library)\)$' out.txt
   1
 
 It is compared byte for byte with what `--version` writes, in both orders, so

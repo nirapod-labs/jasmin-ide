@@ -140,27 +140,7 @@ let expected_capabilities () =
          rename is advertised only where the features answer it. The
          advertised set with the features is checked by
          [test_rename_is_advertised_with_the_features]. *)
-      ("workspaceSymbolProvider", `Bool true);
       ("documentHighlightProvider", `Bool true);
-      ( "semanticTokensProvider",
-        `Assoc
-          [
-            ( "legend",
-              `Assoc
-                [
-                  ( "tokenTypes",
-                    `List
-                      (List.map
-                         (fun name -> `String name)
-                         Jide_controller.Json_conv.semantic_token_types) );
-                  ( "tokenModifiers",
-                    `List
-                      (List.map
-                         (fun name -> `String name)
-                         Jide_controller.Json_conv.semantic_token_modifiers) );
-                ] );
-            ("full", `Bool true);
-          ] );
     ]
 
 let create_with_features () =

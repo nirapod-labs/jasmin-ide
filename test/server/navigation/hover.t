@@ -23,7 +23,7 @@ an error.
   status 0
 
   $ sed 's/"version":"[^"]*"/"version":"<version>"/' replies.txt
-  1 result {"capabilities":{"completionProvider":{"resolveProvider":false,"triggerCharacters":["#",":"]},"definitionProvider":true,"documentHighlightProvider":true,"documentSymbolProvider":true,"hoverProvider":true,"referencesProvider":true,"renameProvider":{"prepareProvider":true},"semanticTokensProvider":{"full":true,"legend":{"tokenModifiers":["declaration","inline","export"],"tokenTypes":["namespace","type","function","parameter","variable","property","keyword"]}},"signatureHelpProvider":{"triggerCharacters":["(",","]},"textDocumentSync":1,"workspaceSymbolProvider":true},"serverInfo":{"name":"jasmin-lsp","version":"<version>"}}
+  1 result {"capabilities":{"completionProvider":{"resolveProvider":false,"triggerCharacters":["#",":"]},"definitionProvider":true,"documentHighlightProvider":true,"documentSymbolProvider":true,"hoverProvider":true,"referencesProvider":true,"renameProvider":{"prepareProvider":true},"signatureHelpProvider":{"triggerCharacters":["(",","]},"textDocumentSync":1},"serverInfo":{"name":"jasmin-lsp","version":"<version>"}}
   - textDocument/publishDiagnostics {"diagnostics":[],"uri":"file:///tmp/navigation.jazz","version":1}
   2 result {"contents":{"kind":"markdown","value":"```jasmin\nreg u32 x\n```"},"range":{"end":{"character":3,"line":2},"start":{"character":2,"line":2}}}
   3 result null
@@ -70,7 +70,7 @@ run, so the record prints it as `$ROOT`; every other byte is the server's own.
   status 0
 
   $ sed -e "s|$PWD|\$ROOT|g" -e 's/"version":"[^"]*"/"version":"<version>"/' replies.txt
-  1 result {"capabilities":{"completionProvider":{"resolveProvider":false,"triggerCharacters":["#",":"]},"definitionProvider":true,"documentHighlightProvider":true,"documentSymbolProvider":true,"hoverProvider":true,"referencesProvider":true,"renameProvider":{"prepareProvider":true},"semanticTokensProvider":{"full":true,"legend":{"tokenModifiers":["declaration","inline","export"],"tokenTypes":["namespace","type","function","parameter","variable","property","keyword"]}},"signatureHelpProvider":{"triggerCharacters":["(",","]},"textDocumentSync":1,"workspaceSymbolProvider":true},"serverInfo":{"name":"jasmin-lsp","version":"<version>"}}
+  1 result {"capabilities":{"completionProvider":{"resolveProvider":false,"triggerCharacters":["#",":"]},"definitionProvider":true,"documentHighlightProvider":true,"documentSymbolProvider":true,"hoverProvider":true,"referencesProvider":true,"renameProvider":{"prepareProvider":true},"signatureHelpProvider":{"triggerCharacters":["(",","]},"textDocumentSync":1},"serverInfo":{"name":"jasmin-lsp","version":"<version>"}}
   - textDocument/publishDiagnostics {"diagnostics":[],"uri":"file://$ROOT/fixtures/entry.jazz","version":1}
   2 result {"contents":{"kind":"markdown","value":"```jasmin\nfn lib_f(reg u32 x) -> reg u32\n```"},"range":{"end":{"character":11,"line":17},"start":{"character":6,"line":17}}}
   3 result {"contents":{"kind":"markdown","value":"```jasmin\nfn A::f(u32) -> u32\n```"},"range":{"end":{"character":10,"line":16},"start":{"character":6,"line":16}}}
