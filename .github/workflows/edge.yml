@@ -72,11 +72,17 @@ jobs:
       # Hierarchy Builder 1.9.1 and mathcomp 2.4.0. Upstream's opam file allows
       # up to Rocq 9.2, but the extraction stops on a Rocq 9.2.0 kernel anomaly
       # (environ.ml, assertion failed), so the ranges are not used here.
+      #
+      # They go into a switch of their own, `rocq`, used only to make the
+      # tarball. In the server's switch they would constrain its locked
+      # dependencies: opam would move Rocq and rebuild its libraries to fit the
+      # locked dune, and some of them do not build with it.
       - name: Install Rocq and its libraries
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          opam repo add coq-released https://coq.inria.fr/opam/released || true
-          opam install -y \
+          opam switch create rocq ocaml-base-compiler.4.14.4 --no-switch \
+            --repos default,coq-released=https://coq.inria.fr/opam/released
+          opam install --switch rocq -y \
             'coq-core>=9.0' 'coq-core<9.1' \
             coq-stdlib.9.0.0 \
             coq-elpi.2.5.2 \
@@ -92,14 +98,12 @@ jobs:
       # release channel uses a tarball instead. `install` is GNU install here
       # because the distribution script uses `install -t`, which BSD install
       # does not have; on this runner it is coreutils and already present.
-      # setup-ocaml makes a local switch in the repository's own directory,
-      # and these steps run in the upstream checkout, so they name it.
       - name: Extract the CIL from the Rocq proofs
         if: steps.cache.outputs.cache-hit != 'true'
         working-directory: ${{ runner.temp }}/jasmin
         run: |
           set -eu
-          opam exec --switch "$GITHUB_WORKSPACE" -- make -C compiler CIL
+          opam exec --switch rocq -- make -C compiler CIL
           test -f compiler/src/CIL/expr.ml
 
       # `make -C compiler dist` writes compiler/jasmin-compiler.tgz: the same
@@ -110,22 +114,12 @@ jobs:
         working-directory: ${{ runner.temp }}/jasmin
         run: |
           set -eu
-          opam exec --switch "$GITHUB_WORKSPACE" -- make -C compiler dist
+          opam exec --switch rocq -- make -C compiler dist
           mkdir -p "$RUNNER_TEMP/edge"
           cp compiler/jasmin-compiler.tgz "$RUNNER_TEMP/edge/"
           printf '%s\n' "${{ steps.upstream.outputs.commit }}" \
             >"$RUNNER_TEMP/edge/upstream-commit"
           sha256sum "$RUNNER_TEMP/edge/jasmin-compiler.tgz"
-
-      # Rocq was needed only for the extraction, and the tarball now carries
-      # its output. Left in the switch, it constrains the server's locked
-      # dependencies: opam would upgrade Rocq and rebuild its libraries to fit
-      # the locked dune, and some of them do not build with it. Removing
-      # rocq-runtime takes everything that depends on it; --auto-remove takes
-      # what was installed only for them.
-      - name: Remove Rocq from the switch
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: opam remove -y --auto-remove rocq-runtime
 
       - name: Install the dependencies of the release channel
         run: |
