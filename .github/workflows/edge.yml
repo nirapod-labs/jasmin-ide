@@ -66,22 +66,23 @@ jobs:
         with:
           ocaml-compiler: "4.14.4"
 
-      # Rocq and the libraries the proofs need, through opam. The versions are
-      # the ones upstream's own package metadata names: Rocq 9.0, mathcomp 2.4
-      # (ssreflect and algebra), mathcomp-word 3.5, and the two libraries the
-      # extraction depends on. A version outside them is not a Jasmin that
-      # upstream says builds.
+      # Rocq and the libraries the proofs need, through opam, at the versions
+      # upstream's own CI builds with (its default.nix): Rocq 9.0, elpi 2.5.2,
+      # Hierarchy Builder 1.9.1 and mathcomp 2.4.0. Upstream's opam file allows
+      # up to Rocq 9.2, but the extraction stops on a Rocq 9.2.0 kernel anomaly
+      # (environ.ml, assertion failed), so the ranges are not used here.
       - name: Install Rocq and its libraries
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           opam repo add coq-released https://coq.inria.fr/opam/released || true
           opam install -y \
-            'coq-core>=9.0' 'coq-core<9.3' \
-            coq-stdlib \
-            'coq-elpi>=2.5.1' \
-            'coq-mathcomp-ssreflect>=2.4' 'coq-mathcomp-ssreflect<2.7' \
-            coq-mathcomp-algebra \
-            'coq-mathcomp-word>=3.5' \
+            'coq-core>=9.0' 'coq-core<9.1' \
+            coq-stdlib.9.0.0 \
+            coq-elpi.2.5.2 \
+            coq-hierarchy-builder.1.9.1 \
+            coq-mathcomp-ssreflect.2.4.0 \
+            coq-mathcomp-algebra.2.4.0 \
+            coq-mathcomp-word.3.5 \
             coq-paco \
             coq-itree
 
