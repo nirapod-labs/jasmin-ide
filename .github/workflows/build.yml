@@ -1,93 +1,115 @@
-# Build every push and every pull request.
-#
-# The matrix is the release channel: the Jasmin release `vendor/jasmin.lock`
-# names, on the three runner platforms, with OCaml 4.14 everywhere and one
-# extra Linux cell on OCaml 5.x. The edge channel (upstream main) is a workflow
-# of its own, `.github/workflows/edge.yml`, because it needs a Rocq extraction
-# and must not run on a push.
-
 name: build
 
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
-# Read-only. Nothing in this workflow writes to the repository, to a release or
-# to a registry, so nothing here needs a scope that could.
 permissions:
   contents: read
 
+concurrency:
+  group: build-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  STRICT: "1"
+
 jobs:
-  ocaml:
-    name: release channel, OCaml ${{ matrix.ocaml }} on ${{ matrix.os }}
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: sh scripts/ci-changes.sh
+
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install actionlint and zizmor
+        run: |
+          sh scripts/ci-tools.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+
+      - name: Versions and workflows
+        run: make version-check workflows
+
+      - name: Sign-offs
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          for commit in $(git rev-list "$BASE..$HEAD"); do
+            git show -s --format=%B "$commit" | grep -q '^Signed-off-by: ' ||
+              { echo "$commit has no Signed-off-by"; exit 1; }
+          done
+
+  server:
+    name: OCaml ${{ matrix.ocaml }}, ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     env:
-      # setup-ocaml does not put the switch on PATH, and the Makefile's
-      # fallback names the local development switch, so make is told how to
-      # reach dune here.
       DUNE: opam exec -- dune
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
-            ocaml: "4.14.4"
-            locked: "yes"
-          - os: ubuntu-24.04-arm
-            ocaml: "4.14.4"
-            locked: "yes"
-          - os: macos-15
-            ocaml: "4.14.4"
-            locked: "yes"
-          - os: ubuntu-24.04
-            ocaml: "5.3"
-            locked: "no"
+          - { os: ubuntu-24.04, ocaml: 4.14.4, locked: true, main: true }
+          - { os: ubuntu-24.04-arm, ocaml: 4.14.4, locked: true, main: false }
+          - { os: macos-15, ocaml: 4.14.4, locked: true, main: false }
+          - { os: ubuntu-24.04, ocaml: "5.3", locked: false, main: false }
     steps:
-      - name: Check out
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
-      - name: Set up OCaml ${{ matrix.ocaml }}
+      - name: Restore the switch
+        if: matrix.locked
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: _opam
+          key: opam-${{ runner.os }}-${{ runner.arch }}-${{ matrix.ocaml }}-${{ hashFiles('jasmin-lsp.opam.locked', 'vendor/requirements.opam') }}
+
+      - name: Set up OCaml
         uses: ocaml/setup-ocaml@ff66428f72b64472e749b22e0ad4dded4b2ddca6 # v3.9.1
         with:
           ocaml-compiler: ${{ matrix.ocaml }}
+          cache: ${{ !matrix.locked }}
 
-      - name: Install the dependencies the lock file names
-        if: matrix.locked == 'yes'
+      - name: Locked dependencies
+        if: matrix.locked
         run: |
-          # The order the tree documents: the lock first, because it carries
-          # the compiler and the whole package closure, then the build
-          # requirements of the vendored tree and the formatter, which the lock
-          # cannot name. Both are --deps-only, so neither installs this package
-          # itself.
           opam install --locked --deps-only -y ./jasmin-lsp.opam.locked
           opam install --deps-only -y ./vendor/requirements.opam
 
-      - name: Install the dependencies of the 5.x cell
-        if: matrix.locked == 'no'
-        run: |
-          # The lock file pins the compiler itself, so opam refuses it in a 5.x
-          # switch. This cell names the packages itself: the server's
-          # dependencies apart from the jasmin package, which the build takes
-          # from vendor/ instead, and the vendored tree's own requirements,
-          # without the formatter, which is pinned for 4.14 and used only by
-          # the local format step.
-          # lsp and jsonrpc are held at the lock's version, since the server
-          # is written against that protocol library's API.
-          opam install -y dune lsp.1.27.0 jsonrpc.1.27.0 yojson zarith \
-            menhirLib angstrom batteries menhir
-
-      - name: Fetch the Jasmin release tarball
-        run: |
-          # vendor/fetch.sh reads vendor/jasmin.lock, downloads the release
-          # archive, checks its SHA-256 before anything is unpacked, and
-          # assembles vendor/jasmin/. The `vendor` step is a no-op afterwards.
-          sh vendor/fetch.sh
+      - name: Unlocked dependencies
+        if: ${{ !matrix.locked }}
+        run: >-
+          opam install -y dune lsp.1.27.0 jsonrpc.1.27.0 yojson zarith
+          menhirLib angstrom batteries menhir
 
       - name: Build
-        run: make build
+        run: make build bench-build
 
-      - name: Check the formatting
-        if: matrix.locked == 'yes'
+      - name: Format
+        if: matrix.main
         run: make fmt
 
       - name: Test
@@ -95,20 +117,13 @@ jobs:
 
       - name: Corpus smoke
         run: |
-          # The corpus is not in this repository and is never copied into it:
-          # it comes from the release the lock file names, so the library, the
-          # checker and the corpus are one version. The tag is read from the
-          # lock rather than written down twice.
           release=$(sed -n 's/^version *= *//p' vendor/jasmin.lock)
           git clone --quiet --depth 1 --branch "v$release" \
             https://github.com/jasmin-lang/jasmin.git "$RUNNER_TEMP/jasmin"
-          # No compiler is installed here, so this is the smoke test: every
-          # file gets a verdict and nothing is internal. Parity against the
-          # compiler is `make parity` with JASMINC.
           bash scripts/corpus-smoke.sh _build/default/lsp-server/native/main.exe "$RUNNER_TEMP/jasmin"
 
-      - name: Keep the server for the VS Code job
-        if: matrix.os == 'ubuntu-24.04' && matrix.locked == 'yes'
+      - name: Keep the server
+        if: matrix.main
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: jasmin-lsp-linux-x86_64
@@ -116,60 +131,67 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  editor-code:
+  vscode:
     name: VS Code extension
+    needs: [changes, server]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    # The extension's tests start the real server, so they wait for the
-    # build that produces it.
-    needs: ocaml
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: editor/code
     steps:
-      - name: Check out
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
-      - name: Set up Node
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "22"
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
-          # The version comes from `packageManager` in editor/code, so it is
-          # named in one place. The install is the make step's own.
           run_install: false
           package_json_file: editor/code/package.json
 
-      - name: Fetch the server the OCaml job built
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: jasmin-lsp-linux-x86_64
           path: ${{ runner.temp }}/server
 
-      - name: Validate the extension
-        # `make editor-code` is not called here on purpose: that step demands a
-        # Jasmin corpus (JASMIN_TM_CORPUS) and skips without one, and a runner
-        # has none. The two commands below are what the step runs when it runs,
-        # and `pnpm run validate` prints its own skip for the corpus checks.
-        working-directory: editor/code
+      - name: Validate
         run: |
           chmod +x "$RUNNER_TEMP/server/main.exe"
           export JASMIN_LSP="$RUNNER_TEMP/server/main.exe"
           pnpm install --frozen-lockfile
           pnpm run validate
 
-      - name: List the files a package would carry
-        working-directory: editor/code
+      - name: Package contents
         run: pnpm exec vsce ls --no-dependencies
 
-  editor-zed:
+  zed:
     name: Zed extension
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - name: Check out
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
-      - name: Install the WebAssembly target
-        run: rustup target add wasm32-wasip2
+      - run: rustup target add wasm32-wasip2
 
-      - name: Build the extension for the WASM target
-        run: make editor-zed
+      - run: make editor-zed
+
+  ci-ok:
+    needs: [changes, lint, server, vscode, zed]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          NEEDS: ${{ toJson(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key) \(.value.result)"' <<<"$NEEDS"
+          jq -e 'all(.[]; .result == "success" or .result == "skipped")' <<<"$NEEDS" >/dev/null
