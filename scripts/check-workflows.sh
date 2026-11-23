@@ -4,8 +4,9 @@
 #   sh scripts/check-workflows.sh [<directory>]
 #
 # What can go wrong in a workflow before it runs is checked by reading it:
-# actionlint, when installed, for the syntax and the expressions; then the
-# rules below. Every violation is one
+# actionlint for the syntax and the expressions, zizmor for the security
+# audits, each skipped with a warning when absent unless STRICT is set; then
+# the rules below. Every violation is one
 # line, `<rule>: <file>:<line>: <what>`, and any violation fails the run.
 #
 #   pins         every action is pinned to a 40-character commit SHA; a tag or
@@ -24,11 +25,18 @@ ls "$dir"/*.yml >/dev/null 2>&1 || { echo "check-workflows: no workflow in $dir"
 out=$(mktemp) || exit 2
 trap 'rm -f "$out"' EXIT
 
-if command -v actionlint >/dev/null 2>&1; then
-	actionlint "$dir"/*.yml >>"$out" 2>&1 || true
-else
-	echo "check-workflows: actionlint is not installed; syntax not checked" >&2
-fi
+lint() {
+	if command -v "$1" >/dev/null 2>&1; then
+		"$@" >>"$out" 2>&1 || true
+	elif [ -n "${STRICT:-}" ]; then
+		echo "$1: not installed" >>"$out"
+	else
+		echo "check-workflows: $1 is not installed; skipped" >&2
+	fi
+}
+
+lint actionlint "$dir"/*.yml
+lint zizmor --offline --quiet --format github "$dir"
 
 targets=$(sed -n 's/^\([A-Za-z][A-Za-z0-9_.-]*\):.*/\1/p' Makefile)
 

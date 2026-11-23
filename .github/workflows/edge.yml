@@ -33,6 +33,8 @@ jobs:
     steps:
       - name: Check out this repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Resolve the upstream commit this run is about
         id: upstream
@@ -110,6 +112,8 @@ jobs:
       # shape as the release tarball, with the extracted CIL inside it. It is
       # the third thing that has to exist before vendor/fetch.sh can use it.
       - name: Build the distribution tarball
+        env:
+          UPSTREAM_COMMIT: ${{ steps.upstream.outputs.commit }}
         if: steps.cache.outputs.cache-hit != 'true'
         working-directory: ${{ runner.temp }}/jasmin
         run: |
@@ -117,7 +121,7 @@ jobs:
           opam exec --switch rocq -- make -C compiler dist
           mkdir -p "$RUNNER_TEMP/edge"
           cp compiler/jasmin-compiler.tgz "$RUNNER_TEMP/edge/"
-          printf '%s\n' "${{ steps.upstream.outputs.commit }}" \
+          printf '%s\n' "$UPSTREAM_COMMIT" \
             >"$RUNNER_TEMP/edge/upstream-commit"
           sha256sum "$RUNNER_TEMP/edge/jasmin-compiler.tgz"
 
@@ -159,11 +163,13 @@ jobs:
       # build was for is not there: a step that prints an empty field and exits
       # 0 reports a build it did not check.
       - name: Record what this run built
+        env:
+          UPSTREAM_COMMIT: ${{ steps.upstream.outputs.commit }}
         run: |
           set -eu
           binary=./_build/install/default/bin/jasmin-lsp
           test -x "$binary"
-          printf 'edge: upstream %s\n' "${{ steps.upstream.outputs.commit }}"
+          printf 'edge: upstream %s\n' "$UPSTREAM_COMMIT"
           printf 'edge: server %s\n' "$binary"
           printf 'edge: the tarball of this commit is cached under jasmin-dist-%s\n' \
-            "${{ steps.upstream.outputs.commit }}"
+            "$UPSTREAM_COMMIT"
