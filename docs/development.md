@@ -45,7 +45,9 @@ their input isn't set: `oracle` without `JASMINC`, `editor-code` without
 `JASMIN_TM_CORPUS` (a Jasmin release tree for the TextMate corpus check) and
 `zed-queries` without `JASMIN_GRAMMAR_DIR` (a `tree-sitter-jasmin` checkout).
 `editor-vscode` downloads a VS Code build and never skips, unless
-`JASMIN_ALLOWED_SKIPS=editor-vscode` says so.
+`JASMIN_ALLOWED_SKIPS=editor-vscode` says so. With `STRICT=1`, which CI
+sets, a missing input fails the step instead of skipping it, and
+`make workflows` fails when actionlint or zizmor is not installed.
 
 ## Comparing with the compiler
 

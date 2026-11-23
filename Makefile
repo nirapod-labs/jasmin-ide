@@ -27,9 +27,11 @@ comma := ,
 
 # $(call needs,VARIABLES,COMMAND) runs COMMAND when every variable is set and
 # otherwise prints the ones the target needs. A variable that is set but wrong
-# is refused by the command itself, so a typo never passes as a skip.
+# is refused by the command itself, so a typo never passes as a skip. With
+# STRICT=1, as in CI, a missing variable fails instead of skipping.
+STRICT ?=
 missing = $(strip $(foreach v,$(1),$(if $(strip $($(v))),,$(v))))
-needs = $(if $(call missing,$(1)),@echo 'skip $@ (needs $(call missing,$(1)))',$(2))
+needs = $(if $(call missing,$(1)),$(if $(STRICT),@echo '$@ needs $(call missing,$(1))' >&2; exit 1,@echo 'skip $@ (needs $(call missing,$(1)))'),$(2))
 
 .PHONY: all deps vendor build fmt test version-check ci oracle \
 	editor-code editor-vscode editor-zed zed-queries workflows \
@@ -87,7 +89,7 @@ zed-queries:
 	$(call needs,JASMIN_GRAMMAR_DIR,cd editor/zed && JASMIN_GRAMMAR_DIR="$(JASMIN_GRAMMAR_DIR)" ./test/queries.sh)
 
 workflows:
-	sh scripts/check-workflows.sh
+	STRICT=$(STRICT) sh scripts/check-workflows.sh
 
 # The corpus checks. Each one's expected side is the compiler, or the library
 # the server links, and each runs its own negative control.
