@@ -42,7 +42,7 @@ jobs:
 
       - name: Install actionlint and zizmor
         run: |
-          sh scripts/ci-tools.sh "$RUNNER_TEMP/bin"
+          sh scripts/ci-tools.sh "$RUNNER_TEMP/bin" actionlint zizmor
           echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
 
       - name: Versions and workflows
@@ -117,9 +117,7 @@ jobs:
 
       - name: Corpus smoke
         run: |
-          release=$(sed -n 's/^version *= *//p' vendor/jasmin.lock)
-          git clone --quiet --depth 1 --branch "v$release" \
-            https://github.com/jasmin-lang/jasmin.git "$RUNNER_TEMP/jasmin"
+          sh scripts/ci-corpus.sh "$RUNNER_TEMP/jasmin"
           bash scripts/corpus-smoke.sh _build/default/lsp-server/native/main.exe "$RUNNER_TEMP/jasmin"
 
       - name: Keep the server
@@ -131,15 +129,65 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  oracle:
+    name: compiler parity
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      DUNE: opam exec -- dune
+      JASMIN_ROOT: ${{ github.workspace }}-jasminc
+      JASMINC: ${{ github.workspace }}-jasminc/jasminc/bin/jasminc
+      CORPUS: ${{ github.workspace }}-corpus/compiler/tests
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Restore the switch
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: _opam
+          key: opam-${{ runner.os }}-${{ runner.arch }}-4.14.4-${{ hashFiles('jasmin-lsp.opam.locked', 'vendor/requirements.opam') }}
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@ff66428f72b64472e749b22e0ad4dded4b2ddca6 # v3.9.1
+        with:
+          ocaml-compiler: 4.14.4
+          cache: false
+
+      - name: Locked dependencies
+        run: |
+          opam install --locked --deps-only -y ./jasmin-lsp.opam.locked
+          opam install --deps-only -y ./vendor/requirements.opam
+
+      - name: Restore jasminc
+        id: jasminc
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ env.JASMIN_ROOT }}
+          key: jasminc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vendor/jasmin.lock') }}
+
+      - name: System libraries of jasminc
+        run: sudo apt-get install -y --no-install-recommends libgmp-dev libmpfr-dev libppl-dev
+
+      - name: Build jasminc
+        if: steps.jasminc.outputs.cache-hit != 'true'
+        run: sh scripts/ci-jasminc.sh "$JASMIN_ROOT"
+
+      - name: Corpus
+        run: sh scripts/ci-corpus.sh "$GITHUB_WORKSPACE-corpus"
+
+      - name: Parity
+        run: make oracle parity parity-uses calls intrinsics intrinsic-arity fuzz
+
   vscode:
     name: VS Code extension
     needs: [changes, server]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: editor/code
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -159,14 +207,23 @@ jobs:
           name: jasmin-lsp-linux-x86_64
           path: ${{ runner.temp }}/server
 
-      - name: Validate
+      - name: Restore VS Code
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: editor/code/.vscode-test
+          key: vscode-${{ runner.os }}-${{ hashFiles('editor/code/test/vscode/run.mjs') }}
+
+      - name: Corpus
+        run: sh scripts/ci-corpus.sh "$RUNNER_TEMP/jasmin"
+
+      - name: Validate and run in a window
         run: |
           chmod +x "$RUNNER_TEMP/server/main.exe"
-          export JASMIN_LSP="$RUNNER_TEMP/server/main.exe"
-          pnpm install --frozen-lockfile
-          pnpm run validate
+          export JASMIN_LSP="$RUNNER_TEMP/server/main.exe" JASMIN_TM_CORPUS="$RUNNER_TEMP/jasmin"
+          xvfb-run -a make editor-code editor-vscode
 
       - name: Package contents
+        working-directory: editor/code
         run: pnpm exec vsce ls --no-dependencies
 
   zed:
@@ -175,17 +232,31 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      JASMIN_GRAMMAR_DIR: ${{ github.workspace }}-grammar
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
+      - name: Install tree-sitter
+        run: |
+          sh scripts/ci-tools.sh "$RUNNER_TEMP/bin" tree-sitter
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+
+      - name: Grammar at the pin
+        run: |
+          rev=$(sed -n 's/^rev = "\(.*\)"$/\1/p' editor/zed/extension.toml)
+          git init -q "$JASMIN_GRAMMAR_DIR"
+          git -C "$JASMIN_GRAMMAR_DIR" fetch -q --depth 1 https://github.com/jasmin-lang/tree-sitter-jasmin "$rev"
+          git -C "$JASMIN_GRAMMAR_DIR" checkout -q FETCH_HEAD
+
       - run: rustup target add wasm32-wasip2
 
-      - run: make editor-zed
+      - run: make editor-zed zed-queries
 
   ci-ok:
-    needs: [changes, lint, server, vscode, zed]
+    needs: [changes, lint, server, oracle, vscode, zed]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
